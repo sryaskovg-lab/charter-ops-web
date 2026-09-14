@@ -230,6 +230,7 @@ function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fil
 export default function CharterOpsApp({ profile, onSignOut }) {
   const role = profile.role;
   const [tab, setTab] = useState("schedule");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showLocal, setShowLocal] = useState(false);
   const [viewMode, setViewMode] = useState("week"); // "day" | "week" | "month" | "period"
   const [periodDays, setPeriodDays] = useState(90); // custom span when viewMode === "period"
@@ -681,7 +682,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   ];
 
   return (
-    <div style={{ background: C.bg, color: C.text, fontFamily: SANS, minHeight: 660, borderRadius: 20, overflow: "hidden", boxShadow: "0 1px 2px rgba(58,54,47,0.04), 0 12px 32px rgba(58,54,47,0.07)", display: "flex", flexDirection: "row" }}>
+    <div style={{ background: C.bg, color: C.text, fontFamily: SANS, height: "100vh", width: "100vw", overflow: "hidden", display: "flex", flexDirection: "row" }}>
       <style>{`
         @keyframes slideIn { from { transform: translateX(20px); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
         @keyframes pulseDot { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
@@ -702,35 +703,41 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       `}</style>
 
       {!loaded ? (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 660, color: C.muted, fontFamily: MONO, fontSize: 13 }}>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", color: C.muted, fontFamily: MONO, fontSize: 13 }}>
           Loading shared schedule…
         </div>
       ) : (
       <>
-      <aside style={{ width: 232, flexShrink: 0, display: "flex", flexDirection: "column", background: SIDEBAR.bg, padding: "18px 12px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 8px", marginBottom: 26 }}>
+      <aside style={{ width: sidebarCollapsed ? 64 : 232, flexShrink: 0, display: "flex", flexDirection: "column", background: SIDEBAR.bg, padding: sidebarCollapsed ? "18px 8px" : "18px 12px", position: "relative", transition: "width 0.15s ease, padding 0.15s ease" }}>
+        <button onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          style={{ position: "absolute", top: 20, right: -11, width: 22, height: 22, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, padding: 0, zIndex: 5 }}>
+          {sidebarCollapsed ? "›" : "‹"}
+        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: sidebarCollapsed ? "0" : "0 8px", marginBottom: 26, justifyContent: sidebarCollapsed ? "center" : "flex-start" }}>
           <span style={{ color: C.amber }}><IconPlaneLogo /></span>
-          <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text }}>CHARTER OPS</div>
+          {!sidebarCollapsed && <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text, whiteSpace: "nowrap" }}>CHARTER OPS</div>}
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
           {NAV_ITEMS.map(([k, l, Icon]) => (
-            <button key={k} className="sidebar-nav-item" onClick={() => setTab(k)}
-              style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 8, border: "none",
+            <button key={k} className="sidebar-nav-item" onClick={() => setTab(k)} title={sidebarCollapsed ? l : undefined}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: sidebarCollapsed ? "9px 0" : "9px 10px", justifyContent: sidebarCollapsed ? "center" : "flex-start", borderRadius: 8, border: "none",
                 background: tab === k ? SIDEBAR.bgActive : "transparent", color: tab === k ? SIDEBAR.text : SIDEBAR.muted,
                 fontSize: 13, fontWeight: tab === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%" }}>
-              <Icon /> {l}
+              <Icon /> {!sidebarCollapsed && l}
             </button>
           ))}
         </nav>
         <div style={{ borderTop: `1px solid ${SIDEBAR.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 10px", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
-            <span style={{ width: 7, height: 7, borderRadius: 99, background: live ? C.green : SIDEBAR.muted, display: "inline-block", animation: live ? "pulseDot 1.6s infinite" : "none" }} />
-            {live ? "Synced" : "Offline"}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: sidebarCollapsed ? "0" : "0 10px", justifyContent: sidebarCollapsed ? "center" : "flex-start", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
+            <span style={{ width: 7, height: 7, borderRadius: 99, background: live ? C.green : SIDEBAR.muted, display: "inline-block", animation: live ? "pulseDot 1.6s infinite" : "none", flexShrink: 0 }} />
+            {!sidebarCollapsed && (live ? "Synced" : "Offline")}
           </div>
-          <div style={{ padding: "0 10px", fontSize: 12, color: SIDEBAR.text, lineHeight: 1.4 }}>
-            {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{ROLES[role]?.label}</span>
-          </div>
-          <button onClick={onSignOut} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>Sign out</button>
+          {!sidebarCollapsed && (
+            <div style={{ padding: "0 10px", fontSize: 12, color: SIDEBAR.text, lineHeight: 1.4 }}>
+              {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{ROLES[role]?.label}</span>
+            </div>
+          )}
+          <button onClick={onSignOut} title={sidebarCollapsed ? "Sign out" : undefined} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>{sidebarCollapsed ? "⏻" : "Sign out"}</button>
         </div>
       </aside>
 
