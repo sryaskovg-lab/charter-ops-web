@@ -56,6 +56,7 @@ function guessAcType(variant) {
   return m ? m[1].toUpperCase() : "___";
 }
 function padFlightNo(ref) { return (ref || "").replace(/^[A-Z]+/, ""); }
+function airlineCodeFromRef(ref) { const m = (ref || "").match(/^[A-Z]+/); return m ? m[0] : ""; }
 
 // ---------- station time zones ----------
 // Flight times are stored in UTC (scheduled_departure/scheduled_arrival are timestamptz).
@@ -681,10 +682,9 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const newFlights = (data || []).map(mapFlight);
     setFlightsRaw(fl => [...fl, ...newFlights]);
     const ferryCount = newFlights.filter(f => f.legType === "ferry").length;
-    pushToast(`Imported ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"}${ferryCount ? ` (${ferryCount} ferry/positioning, excluded from inventory)` : ""} — SCR draft ready below`, "ok");
+    pushToast(`Imported ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"}${ferryCount ? ` (${ferryCount} ferry/positioning, excluded from inventory)` : ""}`, "ok");
     pushNotification("Schedule update", `${newFlights.length} flights imported`, "flight");
     setShowBulkImport(false);
-    openSCR(newFlights.filter(f => f.legType !== "ferry"), "destination"); // ferry legs aren't commercial — no slot request needed for them
   }
 
   async function commitRotationDates(rows, pattern) {
@@ -698,10 +698,9 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     if (error) { pushToast(`Rotation commit failed: ${error.message}`, "warn"); return; }
     const newFlights = (data || []).map(mapFlight);
     setFlightsRaw(fl => [...fl, ...newFlights]);
-    pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}⇄${pattern.destination})${pattern.includeReturn ? " — outbound + return" : ""} — SCR draft ready below`, "ok");
+    pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}⇄${pattern.destination})${pattern.includeReturn ? " — outbound + return" : ""}`, "ok");
     pushNotification("Rotation generated", `${newFlights.length} flights · ${pattern.origin}⇄${pattern.destination}`, "flight");
     setShowRotationGen(false);
-    openSCR(newFlights, "destination");
   }
 
   const NAV_ITEMS = [
@@ -1198,46 +1197,103 @@ function MiniStat({ label, value, color = C.text }) {
 // ---------- single flight insertion ----------
 function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
   const [form, setForm] = useState({ ref: "", origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), depTime: "08:00", arrTime: "11:00", capacity: resources[0].capacity, force: false });
+  const [scrLeg, setScrLeg] = useState("destination"); // which airport the slot request is for
+  const [creatorRef, setCreatorRef] = useState("");
+  const [step, setStep] = useState("form"); // "form" | "scr"
+  const [output, setOutput] = useState(null);
+  const [copied, setCopied] = useState(false);
   const conflict = checkConflict(form.resourceId, new Date(form.date), null);
+
+  // Builds the SCR straight from what's typed above — no need for this flight to exist on the
+  // schedule yet. The "draft" flight object only exists inside this function call.
+  function generateSCR() {
+    const draftFlight = { id: "draft", ref: form.ref.trim() || "DV----", origin: form.origin, destination: form.destination, start: new Date(form.date), depTime: form.depTime, arrTime: form.arrTime };
+    const clearanceAirport = scrLeg === "destination" ? form.destination : form.origin;
+    const code = airlineCodeFromRef(draftFlight.ref);
+    const line = newSCRLine({
+      arrFlightId: scrLeg === "destination" ? draftFlight.id : "",
+      depFlightId: scrLeg === "origin" ? draftFlight.id : "",
+      periodFrom: form.date, periodTo: form.date,
+      days: [String(jsToIataDay(draftFlight.start.getUTCDay()))],
+      seats: form.capacity, acType: guessAcType(resources.find(r => r.id === form.resourceId)?.variant),
+      ...(code ? { [scrLeg === "destination" ? "arrDesignator" : "depDesignator"]: code } : {}),
+    });
+    const header = { creatorRef, season: iataSeasonFor(draftFlight.start), messageDate: iso(today), clearanceAirport, si: "", gi: "BRGDS" };
+    setOutput(buildSCRMessage(header, [line], [draftFlight]));
+    setCopied(false);
+    setStep("scr");
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
-      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 400, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>New flight</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ display: "flex", gap: 10 }}>
-            <FieldSm label="Flight number"><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
-            <FieldSm label="Aircraft">
-              <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
-                {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
-              </select>
-            </FieldSm>
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <FieldSm label="Origin"><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Destination"><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <FieldSm label="Departure (UTC)"><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Arrival (UTC)"><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
-          </div>
-          <div style={{ display: "flex", gap: 10 }}>
-            <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
-          </div>
-        </div>
-        {conflict && (
-          <div style={{ background: C.redSoft, border: `1px solid ${C.red}55`, color: C.red, fontSize: 12, padding: "8px 10px", borderRadius: 10, marginTop: 12 }}>
-            {resources.find(r => r.id === form.resourceId)?.code} already flies {conflict.ref} on {form.date}.
-            <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: C.text }}>
-              <input type="checkbox" checked={form.force} onChange={e => setForm({ ...form, force: e.target.checked })} /> Insert anyway (override)
-            </label>
-          </div>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 420, maxWidth: "92vw" }}>
+        {step === "form" && (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>New flight</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>Fill this in, generate the slot request first, then confirm to put it on the schedule.</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Flight number"><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
+                <FieldSm label="Aircraft">
+                  <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
+                    {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
+                  </select>
+                </FieldSm>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Origin"><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+                <FieldSm label="Destination"><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Departure (UTC)"><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label="Arrival (UTC)"><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
+              </div>
+              <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Slot request</div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Request for">
+                  <select value={scrLeg} onChange={e => setScrLeg(e.target.value)} style={inputStyle}>
+                    <option value="destination">Arrival @ {form.destination || "destination"}</option>
+                    <option value="origin">Departure @ {form.origin || "origin"}</option>
+                  </select>
+                </FieldSm>
+                <FieldSm label="Your reference (optional)"><input value={creatorRef} onChange={e => setCreatorRef(e.target.value)} placeholder="ops@yourairline.com" style={inputStyle} /></FieldSm>
+              </div>
+            </div>
+            {conflict && (
+              <div style={{ background: C.redSoft, border: `1px solid ${C.red}55`, color: C.red, fontSize: 12, padding: "8px 10px", borderRadius: 10, marginTop: 12 }}>
+                {resources.find(r => r.id === form.resourceId)?.code} already flies {conflict.ref} on {form.date}.
+                <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: C.text }}>
+                  <input type="checkbox" checked={form.force} onChange={e => setForm({ ...form, force: e.target.checked })} /> Insert anyway (override)
+                </label>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+              <button onClick={onClose} style={miniBtn}>Cancel</button>
+              <button onClick={generateSCR} disabled={conflict && !form.force} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Generate SCR</button>
+            </div>
+          </>
         )}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Cancel</button>
-          <button onClick={() => onCreate({ ...form, start: new Date(form.date), ref: form.ref.trim() || undefined })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Insert flight</button>
-        </div>
+
+        {step === "scr" && (
+          <>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Slot request — {form.ref || "new flight"}</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>Copy this and send it to the coordinator. Nothing is added to the schedule until you confirm below.</div>
+            <textarea readOnly value={output} rows={8} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setStep("form")} style={miniBtn}>Back</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => onCreate({ ...form, start: new Date(form.date), ref: form.ref.trim() || undefined })} disabled={!copied}
+                  title={!copied ? "Copy the message above first" : undefined}
+                  style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add to schedule</button>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -1264,6 +1320,9 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
   const [raw, setRaw] = useState(SAMPLE_PASTE);
   const [rows, setRows] = useState(null);
   const [patterns, setPatterns] = useState(null);
+  const [scrRole, setScrRole] = useState("destination");
+  const [output, setOutput] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   function resourceByCode(code) { return resources.find(r => r.code.toLowerCase() === (code || "").toLowerCase()); }
 
@@ -1317,21 +1376,38 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
   const patternCount = patterns?.filter(p => p.include).length ?? 0;
   const totalFlightsFromPatterns = patterns?.filter(p => p.include).reduce((s, p) => s + p.rows.length, 0) ?? 0;
 
-  function commit() {
-    const acceptedRows = rows.filter(r => r.include && r.status !== "error");
-    const acceptedPatternRows = patterns.filter(p => p.include).flatMap(p => p.rows);
-    onCommit([...acceptedRows, ...acceptedPatternRows]);
+  function acceptedRows() {
+    const rowsAccepted = rows.filter(r => r.include && r.status !== "error");
+    const patternRowsAccepted = patterns.filter(p => p.include).flatMap(p => p.rows);
+    return [...rowsAccepted, ...patternRowsAccepted];
+  }
+
+  // Ferry/positioning legs aren't commercial, so they're left out of the SCR draft — same
+  // reasoning as everywhere else this app auto-drafts a slot request. They're still created
+  // normally once "Confirm" is clicked, just not part of what gets requested.
+  function generateSCR() {
+    const accepted = acceptedRows().filter(r => r.legType !== "ferry");
+    if (accepted.length === 0) { setOutput("No commercial (non-ferry) flights selected — nothing to request a slot for.\nYou can still confirm below to add whatever's selected to the schedule."); setCopied(false); return; }
+    const draftFlights = accepted.map((r, i) => ({
+      id: "draft" + i, resourceId: r.resourceId, origin: r.origin, destination: r.destination, start: r.date,
+      ref: r.flightNo ? "DV" + r.flightNo : ("DV" + (4600 + i)), depTime: r.depTime, arrTime: r.arrTime,
+    }));
+    const seed = deriveSCRSeedFromFlights(draftFlights, resources, scrRole);
+    const header = { creatorRef: "", season: iataSeasonFor(draftFlights[0].start), messageDate: iso(today), clearanceAirport: seed.clearanceAirport, si: "", gi: "BRGDS" };
+    setOutput(buildSCRMessage(header, seed.lines, draftFlights));
+    setCopied(false);
   }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 720, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk import flights</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
-          Paste rows in the same shape as the roster grid: flight number, route, times, aircraft, and leg type (revenue vs. ferry/positioning). Recurring weekly rows get grouped into a pattern automatically. Nothing is written until you commit below.
-        </div>
+
         {!rows && (
           <>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
+              Paste rows in the same shape as the roster grid: flight number, route, times, aircraft, and leg type (revenue vs. ferry/positioning). Recurring weekly rows get grouped into a pattern automatically. Nothing is written until you commit at the end.
+            </div>
             <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
               <button onClick={onClose} style={miniBtn}>Cancel</button>
@@ -1339,7 +1415,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
             </div>
           </>
         )}
-        {rows && (
+        {rows && !output && (
           <>
             {patterns.length > 0 && (
               <>
@@ -1389,9 +1465,27 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11.5, color: C.muted }}>{patternCount} pattern{patternCount === 1 ? "" : "s"} ({totalFlightsFromPatterns} flights) + {okRowCount} individual row{okRowCount === 1 ? "" : "s"} selected</span>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <button onClick={() => { setRows(null); setPatterns(null); }} style={miniBtn}>Back</button>
-                <button onClick={commit} disabled={okRowCount + totalFlightsFromPatterns === 0} style={{ ...miniBtn, background: (okRowCount + totalFlightsFromPatterns) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (okRowCount + totalFlightsFromPatterns) ? C.amber : C.faint, fontWeight: 600 }}>Commit {okRowCount + totalFlightsFromPatterns} flight{(okRowCount + totalFlightsFromPatterns) === 1 ? "" : "s"}</button>
+                <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
+                <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
+                <button onClick={generateSCR} disabled={okRowCount + totalFlightsFromPatterns === 0} style={{ ...miniBtn, background: (okRowCount + totalFlightsFromPatterns) ? GRADIENT_PRIMARY : C.faint, boxShadow: (okRowCount + totalFlightsFromPatterns) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (okRowCount + totalFlightsFromPatterns) ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {output && (
+          <>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>Copy this and send it to the coordinator. Nothing is added to the schedule until you confirm below.</div>
+            <textarea readOnly value={output} rows={8} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => onCommit(acceptedRows())} disabled={!copied}
+                  title={!copied ? "Copy the message above first" : undefined}
+                  style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okRowCount + totalFlightsFromPatterns} flight{(okRowCount + totalFlightsFromPatterns) === 1 ? "" : "s"}</button>
               </div>
             </div>
           </>
@@ -1414,6 +1508,9 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
     includeReturn: true, returnRef: "", returnOrigin: "", returnDestination: "", returnDep: "12:00", returnArr: "15:00", returnDayOffset: 0,
   });
   const [preview, setPreview] = useState(null);
+  const [scrRole, setScrRole] = useState("destination");
+  const [output, setOutput] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   function toggleDay(d) {
     setPattern(p => ({ ...p, daysOfWeek: p.daysOfWeek.includes(d) ? p.daysOfWeek.filter(x => x !== d) : [...p.daysOfWeek, d].sort() }));
@@ -1451,17 +1548,28 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
     setPreview(rows);
   }
 
-  const okCount = preview?.filter(r => r.include).length ?? 0;
+  const included = preview?.filter(r => r.include) ?? [];
+  const okCount = included.length;
   const statusColor = { ok: C.green, conflict: C.amber };
+
+  // Builds the SCR straight from the previewed rows — nothing has been written to the
+  // schedule yet at this point, these are still just draft objects.
+  function generateSCR() {
+    const draftFlights = included.map((r, i) => ({ id: "draft" + i, resourceId: pattern.resourceId, origin: r.origin, destination: r.destination, start: r.date, ref: r.ref, depTime: r.depTime, arrTime: r.arrTime }));
+    const seed = deriveSCRSeedFromFlights(draftFlights, resources, scrRole);
+    const header = { creatorRef: "", season: iataSeasonFor(draftFlights[0].start), messageDate: iso(today), clearanceAirport: seed.clearanceAirport, si: "", gi: "BRGDS" };
+    setOutput(buildSCRMessage(header, seed.lines, draftFlights));
+    setCopied(false);
+  }
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 560, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Generate rotation</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Define the weekly pattern once — every matching date previews here before anything is written.</div>
 
         {!preview && (
           <>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Define the weekly pattern once — every matching date previews here before anything is written.</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", gap: 10 }}>
                 <FieldSm label="Origin"><input value={pattern.origin} onChange={e => setPattern({ ...pattern, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
@@ -1528,8 +1636,9 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
           </>
         )}
 
-        {preview && (
+        {preview && !output && (
           <>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Review, then generate the slot request before anything is written to the schedule.</div>
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
@@ -1551,9 +1660,27 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} of {preview.length} rows selected</span>
-              <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <button onClick={() => setPreview(null)} style={miniBtn}>Back</button>
-                <button onClick={() => onCommit(preview.filter(r => r.include), pattern)} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Commit {okCount} flight{okCount === 1 ? "" : "s"}</button>
+                <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
+                <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
+                <button onClick={generateSCR} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, boxShadow: okCount ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {output && (
+          <>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>Copy this and send it to the coordinator. Nothing is added to the schedule until you confirm below.</div>
+            <textarea readOnly value={output} rows={8} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => onCommit(included, pattern)} disabled={!copied}
+                  title={!copied ? "Copy the message above first" : undefined}
+                  style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okCount} flight{okCount === 1 ? "" : "s"}</button>
               </div>
             </div>
           </>
@@ -1858,11 +1985,13 @@ function deriveSCRSeedFromFlights(flightList, resources, role) {
     const station = role === "destination" ? rep.destination : rep.origin;
     if (!clearanceAirport) clearanceAirport = station;
     const days = [...new Set(group.map(f => jsToIataDay(f.start.getUTCDay())))].map(String);
+    const code = airlineCodeFromRef(rep.ref);
     lines.push(newSCRLine({
       arrFlightId: role === "destination" ? rep.id : "",
       depFlightId: role === "origin" ? rep.id : "",
       periodFrom: iso(group[0].start), periodTo: iso(group[group.length - 1].start),
       days, seats: res?.capacity || rep.capacity, acType: res ? guessAcType(res.variant) : "",
+      ...(code ? { [role === "destination" ? "arrDesignator" : "depDesignator"]: code } : {}),
     }));
   });
   return { clearanceAirport, lines: lines.length ? lines : [newSCRLine()] };
@@ -1966,6 +2095,8 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
     if (f) {
       const res = resources.find(r => r.id === f.resourceId);
       if (res) { patch.seats = res.capacity; patch.acType = guessAcType(res.variant); }
+      const code = airlineCodeFromRef(f.ref);
+      if (code) patch[which === "arr" ? "arrDesignator" : "depDesignator"] = code;
     }
     setDatePickerDraft(d => ({ ...d, ...patch }));
   }
@@ -1985,6 +2116,8 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
     setShowDatePicker(false);
   }
 
+  // Airline designator follows whatever's actually on the selected flight's ref (DV stays DV,
+  // VSV stays VSV) rather than a fixed default.
   function pickFlight(lineId, which, flightId) {
     const f = flights.find(x => x.id === flightId);
     const patch = { [which === "arr" ? "arrFlightId" : "depFlightId"]: flightId };
@@ -1994,6 +2127,8 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
       patch.days = [String(jsToIataDay(f.start.getUTCDay()))];
       const res = resources.find(r => r.id === f.resourceId);
       if (res) { patch.seats = res.capacity; patch.acType = guessAcType(res.variant); }
+      const code = airlineCodeFromRef(f.ref);
+      if (code) patch[which === "arr" ? "arrDesignator" : "depDesignator"] = code;
     }
     updateLine(lineId, patch);
   }
