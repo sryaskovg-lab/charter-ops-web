@@ -389,6 +389,34 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     }
   }
 
+  // allotments.flight_id has ON DELETE CASCADE, so deleting a flight row also removes its
+  // allotments in the database automatically — these functions just report how many active
+  // ones were affected, and mirror that cleanup in local state so the UI updates immediately
+  // rather than waiting on the next Realtime event.
+  async function deleteFlight(flightId) {
+    if (!perms.editFlight) return;
+    const flight = flights.find(f => f.id === flightId);
+    const affected = allotments.filter(a => a.flightId === flightId && a.status !== "cancelled" && a.status !== "released").length;
+    const { error } = await supabase.from("flights").delete().eq("id", flightId);
+    if (error) { pushToast(`Could not delete flight: ${error.message}`, "warn"); return; }
+    setFlightsRaw(fl => fl.filter(f => f.id !== flightId));
+    setAllotmentsRaw(as => as.filter(a => a.flightId !== flightId));
+    if (selectedFlightId === flightId) setSelectedFlightId(null);
+    pushToast(`${flight?.ref || "Flight"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with it` : ""}`, affected ? "warn" : "ok");
+  }
+
+  async function bulkDeleteFlights(flightIds) {
+    if (!perms.editFlight || flightIds.length === 0) return;
+    const affected = allotments.filter(a => flightIds.includes(a.flightId) && a.status !== "cancelled" && a.status !== "released").length;
+    const { error } = await supabase.from("flights").delete().in("id", flightIds);
+    if (error) { pushToast(`Bulk delete failed: ${error.message}`, "warn"); return; }
+    setFlightsRaw(fl => fl.filter(f => !flightIds.includes(f.id)));
+    setAllotmentsRaw(as => as.filter(a => !flightIds.includes(a.flightId)));
+    if (flightIds.includes(selectedFlightId)) setSelectedFlightId(null);
+    pushToast(`${flightIds.length} flight${flightIds.length === 1 ? "" : "s"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with them` : ""}`, affected ? "warn" : "ok");
+    setShowBulkDelete(false);
+  }
+
   // Drag a flight bar from one aircraft's row to another (or to a different day/time on the
   // same row). Duration is preserved so arrival moves with departure. Opens the drawer
   // afterward so the move can be double-checked, not just trusted.
@@ -583,6 +611,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showRotationGen, setShowRotationGen] = useState(false);
   const [showBulkRetime, setShowBulkRetime] = useState(false);
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showSCR, setShowSCR] = useState(false);
   const [scrSeed, setScrSeed] = useState(null); // { flights: [...], role: "origin"|"destination" } | null
 
@@ -622,10 +651,12 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       pushToast(`Conflict: ${resources.find(r=>r.id===draft.resourceId)?.code} already flies ${conflict.ref} that day — check "insert anyway" to override`, "warn");
       return false;
     }
-    const ref = "SX" + (4520 + flights.length + Math.floor(Math.random() * 50));
+    const ref = draft.ref || ("DV" + (4520 + flights.length + Math.floor(Math.random() * 50)));
     const { data, error } = await supabase.from("flights").insert({
       ref, resource_id: draft.resourceId, origin: draft.origin, destination: draft.destination,
-      scheduled_departure: draft.start.toISOString(), capacity: draft.capacity, status: "tentative",
+      scheduled_departure: (combineDateAndTime(draft.start, draft.depTime) || draft.start).toISOString(),
+      scheduled_arrival: combineDateAndTime(draft.start, draft.arrTime)?.toISOString() ?? null,
+      capacity: draft.capacity, status: "tentative",
     }).select().single();
     if (error) { pushToast(`Insert failed: ${error.message}`, "warn"); return false; }
     const newFlight = mapFlight(data);
@@ -643,7 +674,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
       scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
       capacity: resources.find(res => res.id === r.resourceId)?.capacity,
-      status: "tentative", ref: r.flightNo ? "SX" + r.flightNo : ("SX" + (4600 + i)), leg_type: r.legType || "revenue",
+      status: "tentative", ref: r.flightNo ? "DV" + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
     }));
     const { data, error } = await supabase.from("flights").insert(inserts).select();
     if (error) { pushToast(`Import failed: ${error.message}`, "warn"); return; }
@@ -656,18 +687,19 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     openSCR(newFlights.filter(f => f.legType !== "ferry"), "destination"); // ferry legs aren't commercial — no slot request needed for them
   }
 
-  async function commitRotationDates(dates, pattern) {
-    const inserts = dates.map(d => ({
-      resource_id: pattern.resourceId, origin: pattern.origin, destination: pattern.destination,
-      scheduled_departure: d.toISOString(), capacity: pattern.capacity, status: "tentative",
-      ref: "SX" + (4700 + Math.floor(Math.random() * 900)),
+  async function commitRotationDates(rows, pattern) {
+    const inserts = rows.map(r => ({
+      resource_id: pattern.resourceId, origin: r.origin, destination: r.destination,
+      scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
+      scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
+      capacity: pattern.capacity, status: "tentative", ref: r.ref,
     }));
     const { data, error } = await supabase.from("flights").insert(inserts).select();
     if (error) { pushToast(`Rotation commit failed: ${error.message}`, "warn"); return; }
     const newFlights = (data || []).map(mapFlight);
     setFlightsRaw(fl => [...fl, ...newFlights]);
-    pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}→${pattern.destination}) — SCR draft ready below`, "ok");
-    pushNotification("Rotation generated", `${newFlights.length} flights · ${pattern.origin}→${pattern.destination}`, "flight");
+    pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}⇄${pattern.destination})${pattern.includeReturn ? " — outbound + return" : ""} — SCR draft ready below`, "ok");
+    pushNotification("Rotation generated", `${newFlights.length} flights · ${pattern.origin}⇄${pattern.destination}`, "flight");
     setShowRotationGen(false);
     openSCR(newFlights, "destination");
   }
@@ -804,7 +836,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
               perms={perms} onNewFlight={() => setShowAddFlight(true)} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
-              onBulkRetime={() => setShowBulkRetime(true)} onGenSCR={() => openSCR(null, null)} />
+              onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -813,6 +845,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               onAddAllotment={(opId, seats, price) => addAllotment(selectedFlight.id, opId, seats, price)}
               onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment}
               onOpenSCR={role => openSCR([selectedFlight], role)}
+              onDeleteFlight={deleteFlight}
               onClose={() => setSelectedFlightId(null)} />
           )}
         </div>
@@ -830,6 +863,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} />}
       {showBulkRetime && <BulkRetimeModal resources={resources} flights={flights} onClose={() => setShowBulkRetime(false)} onCommit={bulkRetime} />}
+      {showBulkDelete && <BulkDeleteModal resources={resources} flights={flights} allotments={allotments} onClose={() => setShowBulkDelete(false)} onCommit={bulkDeleteFlights} />}
       {showSCR && <SCRModal resources={resources} flights={flights} onClose={() => { setShowSCR(false); setScrSeed(null); }} seedFlights={scrSeed?.flights} seedRole={scrSeed?.role} />}
       </div>
       </>
@@ -842,7 +876,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS }) {
+function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS }) {
   const COL = viewMode === "day" ? 720 : viewMode === "week" ? 216 : viewMode === "month" ? 64 : 36;
   const LABELW = 160;
   const showHourTicks = viewMode === "day" || viewMode === "week";
@@ -871,6 +905,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
           </button>
           {perms.editFlight && <button onClick={onRotationGen} style={navBtn}>Generate rotation</button>}
           {perms.editFlight && <button onClick={onBulkRetime} style={navBtn}>Bulk retime</button>}
+          {perms.editFlight && <button onClick={onBulkDelete} style={{ ...navBtn, color: C.red, borderColor: C.red + "55" }}>Bulk delete</button>}
           <button onClick={onGenSCR} style={navBtn}>Generate SCR</button>
           {perms.editFlight && <button onClick={onBulkImport} style={navBtn}>Bulk import</button>}
           {perms.editFlight && <button onClick={onNewFlight} style={{ ...navBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New flight</button>}
@@ -981,7 +1016,8 @@ function LegendSwatch({ color, label }) {
 }
 
 // ---------- flight drawer ----------
-function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onClose }) {
+function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onDeleteFlight, onClose }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [addingOp, setAddingOp] = useState(operators[0].id);
   const [addingSeats, setAddingSeats] = useState(20);
   const [addingPrice, setAddingPrice] = useState(rateFor(operators[0], flight.destination));
@@ -1057,6 +1093,26 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
           <button onClick={() => onOpenSCR("destination")} style={{ ...miniBtn, flex: 1, fontSize: 11 }}>Arrival @ {flight.destination}</button>
         </div>
       </div>
+
+      {perms.editFlight && (
+        <div style={{ marginBottom: 14, borderTop: `1px solid ${C.borderSoft}`, paddingTop: 12 }}>
+          {!confirmDelete ? (
+            <button onClick={() => setConfirmDelete(true)} style={{ ...miniBtn, width: "100%", color: C.red, borderColor: C.red }}>Delete this flight</button>
+          ) : (
+            <div>
+              <div style={{ fontSize: 11.5, color: C.red, marginBottom: 8 }}>
+                {allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length > 0
+                  ? `This flight has ${allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length} active allotment(s) — deleting it removes those too. This can't be undone.`
+                  : "This can't be undone."}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <button onClick={() => setConfirmDelete(false)} style={{ ...miniBtn, flex: 1 }}>Cancel</button>
+                <button onClick={() => onDeleteFlight(flight.id)} style={{ ...miniBtn, flex: 1, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>Confirm delete</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
         <MiniStat label="Capacity" value={inventory.capacity} />
@@ -1141,7 +1197,7 @@ function MiniStat({ label, value, color = C.text }) {
 
 // ---------- single flight insertion ----------
 function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
-  const [form, setForm] = useState({ origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), capacity: resources[0].capacity, force: false });
+  const [form, setForm] = useState({ ref: "", origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), depTime: "08:00", arrTime: "11:00", capacity: resources[0].capacity, force: false });
   const conflict = checkConflict(form.resourceId, new Date(form.date), null);
 
   return (
@@ -1150,14 +1206,21 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>New flight</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", gap: 10 }}>
+            <FieldSm label="Flight number"><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
+            <FieldSm label="Aircraft">
+              <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
+                {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
+              </select>
+            </FieldSm>
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
             <FieldSm label="Origin"><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
             <FieldSm label="Destination"><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
           </div>
-          <FieldSm label="Aircraft">
-            <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
-              {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
-            </select>
-          </FieldSm>
+          <div style={{ display: "flex", gap: 10 }}>
+            <FieldSm label="Departure (UTC)"><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label="Arrival (UTC)"><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
+          </div>
           <div style={{ display: "flex", gap: 10 }}>
             <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
             <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
@@ -1173,7 +1236,7 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
           <button onClick={onClose} style={miniBtn}>Cancel</button>
-          <button onClick={() => onCreate({ ...form, start: new Date(form.date) })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Insert flight</button>
+          <button onClick={() => onCreate({ ...form, start: new Date(form.date), ref: form.ref.trim() || undefined })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Insert flight</button>
         </div>
       </div>
     </div>
@@ -1347,6 +1410,8 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
   const [pattern, setPattern] = useState({
     origin: "LGW", destination: "DBV", resourceId: resources[0].id, capacity: resources[0].capacity,
     daysOfWeek: [5], startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)),
+    outboundRef: "", outboundDep: "08:00", outboundArr: "11:00",
+    includeReturn: true, returnRef: "", returnOrigin: "", returnDestination: "", returnDep: "12:00", returnArr: "15:00", returnDayOffset: 0,
   });
   const [preview, setPreview] = useState(null);
 
@@ -1354,15 +1419,34 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
     setPattern(p => ({ ...p, daysOfWeek: p.daysOfWeek.includes(d) ? p.daysOfWeek.filter(x => x !== d) : [...p.daysOfWeek, d].sort() }));
   }
 
+  // Same-aircraft out-and-back on the same day is the normal shape of a rotation — the two
+  // legs are expected to coexist, so each is checked against real existing flights only, never
+  // against its own sibling leg (which isn't in `flights` yet, so this falls out naturally).
   function generate() {
     const start = new Date(pattern.startDate), end = new Date(pattern.endDate);
     const dates = [];
     for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
       if (pattern.daysOfWeek.includes(d.getUTCDay())) dates.push(new Date(d));
     }
-    const rows = dates.map(d => {
-      const conflict = flights.find(f => f.resourceId === pattern.resourceId && iso(f.start) === iso(d));
-      return { date: d, status: conflict ? "conflict" : "ok", detail: conflict ? `${resources.find(r => r.id === pattern.resourceId)?.code} already flies ${conflict.ref}` : "", include: !conflict };
+    const outRef = pattern.outboundRef.trim() || ("DV" + (4700 + Math.floor(Math.random() * 900)));
+    const retRef = pattern.returnRef.trim() || ("DV" + (4700 + Math.floor(Math.random() * 900) + 1));
+    const retOrigin = pattern.returnOrigin.trim() || pattern.destination;
+    const retDestination = pattern.returnDestination.trim() || pattern.origin;
+    const resCode = resources.find(r => r.id === pattern.resourceId)?.code;
+    const rows = [];
+    dates.forEach(d => {
+      const outConflict = flights.find(f => f.resourceId === pattern.resourceId && iso(f.start) === iso(d));
+      const outDetail = outConflict ? `${resCode} already flies ${outConflict.ref} that day` : "";
+      rows.push({ date: d, leg: "Outbound", ref: outRef, origin: pattern.origin, destination: pattern.destination, depTime: pattern.outboundDep, arrTime: pattern.outboundArr, status: outConflict ? "conflict" : "ok", detail: outDetail, include: !outConflict });
+      if (pattern.includeReturn) {
+        // The return leg gets its own date (outbound date + offset), its own route (not
+        // assumed to be the reverse of the outbound — a rotation can be CIT-VKO-ALA, not just
+        // out-and-back), and its own independent conflict check.
+        const retDate = addDays(d, pattern.returnDayOffset || 0);
+        const retConflict = flights.find(f => f.resourceId === pattern.resourceId && iso(f.start) === iso(retDate));
+        const retDetail = retConflict ? `${resCode} already flies ${retConflict.ref} that day` : "";
+        rows.push({ date: retDate, leg: "Return", ref: retRef, origin: retOrigin, destination: retDestination, depTime: pattern.returnDep, arrTime: pattern.returnArr, status: retConflict ? "conflict" : "ok", detail: retDetail, include: !retConflict });
+      }
     });
     setPreview(rows);
   }
@@ -1372,7 +1456,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
-      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 520, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 560, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Generate rotation</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Define the weekly pattern once — every matching date previews here before anything is written.</div>
 
@@ -1394,7 +1478,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
                     <button key={i} onClick={() => toggleDay(i)} style={{
                       ...miniBtn, padding: "5px 8px",
                       background: pattern.daysOfWeek.includes(i) ? C.amber : "transparent",
-                      color: pattern.daysOfWeek.includes(i) ? "#1A1400" : C.text,
+                      color: pattern.daysOfWeek.includes(i) ? ON_ACCENT : C.text,
                       borderColor: pattern.daysOfWeek.includes(i) ? C.amber : C.border,
                     }}>{d}</button>
                   ))}
@@ -1405,6 +1489,37 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
                 <FieldSm label="End date"><input type="date" value={pattern.endDate} onChange={e => setPattern({ ...pattern, endDate: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
               <FieldSm label="Capacity"><input type="number" value={pattern.capacity} onChange={e => setPattern({ ...pattern, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
+
+              <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Outbound leg — {pattern.origin}→{pattern.destination}</div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <FieldSm label="Flight number"><input value={pattern.outboundRef} onChange={e => setPattern({ ...pattern, outboundRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+                <FieldSm label="Departure (UTC)"><input type="time" value={pattern.outboundDep} onChange={e => setPattern({ ...pattern, outboundDep: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.outboundArr} onChange={e => setPattern({ ...pattern, outboundArr: e.target.value })} style={inputStyle} /></FieldSm>
+              </div>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, cursor: "pointer" }}>
+                <input type="checkbox" checked={pattern.includeReturn} onChange={e => setPattern({ ...pattern, includeReturn: e.target.checked })} />
+                <span style={{ fontSize: 12.5 }}>Also generate the return leg</span>
+              </label>
+              {pattern.includeReturn && (
+                <>
+                  <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4 }}>Return leg</div>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -6 }}>Doesn't have to go back the way it came — e.g. CIT→VKO out, VKO→ALA back. Leave blank to default to the reverse of the outbound route.</div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <FieldSm label="Origin"><input value={pattern.returnOrigin} onChange={e => setPattern({ ...pattern, returnOrigin: e.target.value.toUpperCase() })} placeholder={pattern.destination} style={inputStyle} /></FieldSm>
+                    <FieldSm label="Destination"><input value={pattern.returnDestination} onChange={e => setPattern({ ...pattern, returnDestination: e.target.value.toUpperCase() })} placeholder={pattern.origin} style={inputStyle} /></FieldSm>
+                  </div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <FieldSm label="Flight number"><input value={pattern.returnRef} onChange={e => setPattern({ ...pattern, returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+                    <FieldSm label="Return after (days)"><input type="number" min={0} value={pattern.returnDayOffset} onChange={e => setPattern({ ...pattern, returnDayOffset: Math.max(0, +e.target.value) })} style={inputStyle} /></FieldSm>
+                  </div>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -4 }}>0 = same day (typical out-and-back turnaround). Use 1+ for layovers — e.g. 1 means the aircraft returns the day after each outbound date.</div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <FieldSm label="Departure (UTC)"><input type="time" value={pattern.returnDep} onChange={e => setPattern({ ...pattern, returnDep: e.target.value })} style={inputStyle} /></FieldSm>
+                    <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.returnArr} onChange={e => setPattern({ ...pattern, returnArr: e.target.value })} style={inputStyle} /></FieldSm>
+                  </div>
+                </>
+              )}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
               <button onClick={onClose} style={miniBtn}>Cancel</button>
@@ -1418,14 +1533,16 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Day</th><th style={{ padding: "6px 8px" }}>Status</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Leg</th><th style={{ padding: "6px 8px" }}>Flight</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Status</th>
                 </tr></thead>
                 <tbody>
                   {preview.map((r, i) => (
                     <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                       <td style={{ padding: "6px 8px" }}><input type="checkbox" checked={r.include} onChange={e => setPreview(rs => rs.map((x, xi) => xi === i ? { ...x, include: e.target.checked } : x))} /></td>
-                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{iso(r.date)}</td>
-                      <td style={{ padding: "6px 8px", color: C.muted }}>{DOW[r.date.getUTCDay()]}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{iso(r.date)} <span style={{ color: C.faint }}>{DOW[r.date.getUTCDay()]}</span></td>
+                      <td style={{ padding: "6px 8px", color: C.muted }}>{r.leg}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.ref}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 11 }}>{r.origin}→{r.destination} {r.depTime}–{r.arrTime}</td>
                       <td style={{ padding: "6px 8px" }}><Badge color={statusColor[r.status]}>{r.status.toUpperCase()}</Badge>{r.detail && <div style={{ fontSize: 10, color: C.faint, marginTop: 2 }}>{r.detail}</div>}</td>
                     </tr>
                   ))}
@@ -1433,10 +1550,10 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
               </table>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} of {preview.length} dates selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} of {preview.length} rows selected</span>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setPreview(null)} style={miniBtn}>Back</button>
-                <button onClick={() => onCommit(preview.filter(r => r.include).map(r => r.date), pattern)} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Commit {okCount} flight{okCount === 1 ? "" : "s"}</button>
+                <button onClick={() => onCommit(preview.filter(r => r.include), pattern)} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Commit {okCount} flight{okCount === 1 ? "" : "s"}</button>
               </div>
             </div>
           </>
@@ -1447,6 +1564,96 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
 }
 
 // ---------- bulk retime (whole season or a filtered subset) ----------
+// ---------- bulk delete ----------
+function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) {
+  const [filter, setFilter] = useState({ from: iso(today), to: iso(addDays(today, 180)), resourceId: "all", originContains: "", destContains: "" });
+  const [matches, setMatches] = useState(null);
+  const [excluded, setExcluded] = useState(new Set());
+
+  function preview() {
+    const f = flights.filter(fl =>
+      iso(fl.start) >= filter.from && iso(fl.start) <= filter.to &&
+      (filter.resourceId === "all" || fl.resourceId === filter.resourceId) &&
+      (!filter.originContains || fl.origin.includes(filter.originContains.toUpperCase())) &&
+      (!filter.destContains || fl.destination.includes(filter.destContains.toUpperCase()))
+    );
+    setMatches(f);
+    setExcluded(new Set());
+  }
+
+  const included = matches ? matches.filter(f => !excluded.has(f.id)) : [];
+  const activeAllotmentCount = included.reduce((s, f) => s + allotments.filter(a => a.flightId === f.id && a.status !== "cancelled" && a.status !== "released").length, 0);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk delete flights</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Filter to the flights you want gone, review exactly what's affected, then commit. This can't be undone.</div>
+
+        {!matches && (
+          <>
+            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+              <FieldSm label="From"><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label="To"><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+              <FieldSm label="Aircraft">
+                <select value={filter.resourceId} onChange={e => setFilter({ ...filter, resourceId: e.target.value })} style={inputStyle}>
+                  <option value="all">All aircraft</option>
+                  {resources.map(r => <option key={r.id} value={r.id}>{r.code}</option>)}
+                </select>
+              </FieldSm>
+              <FieldSm label="Origin contains"><input value={filter.originContains} onChange={e => setFilter({ ...filter, originContains: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label="Dest. contains"><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={onClose} style={miniBtn}>Cancel</button>
+              <button onClick={preview} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+            </div>
+          </>
+        )}
+
+        {matches && (
+          <>
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Ref</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Active allotments</th>
+                </tr></thead>
+                <tbody>
+                  {matches.map(f => {
+                    const activeCount = allotments.filter(a => a.flightId === f.id && a.status !== "cancelled" && a.status !== "released").length;
+                    return (
+                      <tr key={f.id} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: excluded.has(f.id) ? 0.5 : 1 }}>
+                        <td style={{ padding: "6px 8px" }}><input type="checkbox" checked={!excluded.has(f.id)} onChange={e => setExcluded(prev => { const n = new Set(prev); e.target.checked ? n.delete(f.id) : n.add(f.id); return n; })} /></td>
+                        <td style={{ padding: "6px 8px", fontFamily: MONO }}>{f.ref}</td>
+                        <td style={{ padding: "6px 8px" }}>{f.origin}→{f.destination}</td>
+                        <td style={{ padding: "6px 8px", fontFamily: MONO, color: C.muted }}>{iso(f.start)}</td>
+                        <td style={{ padding: "6px 8px", color: activeCount ? C.red : C.faint, fontWeight: activeCount ? 600 : 400 }}>{activeCount || "—"}</td>
+                      </tr>
+                    );
+                  })}
+                  {matches.length === 0 && <tr><td colSpan={5} style={{ padding: 12, textAlign: "center", color: C.faint }}>No flights matched that filter.</td></tr>}
+                </tbody>
+              </table>
+            </div>
+            {activeAllotmentCount > 0 && (
+              <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>{activeAllotmentCount} active allotment(s) across the selected flights will be deleted too.</div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{included.length} of {matches.length} flights selected</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => setMatches(null)} style={miniBtn}>Back</button>
+                <button onClick={() => onCommit(included.map(f => f.id))} disabled={included.length === 0} style={{ ...miniBtn, background: included.length ? C.red : C.faint, color: ON_ACCENT, borderColor: included.length ? C.red : C.faint, fontWeight: 600 }}>Delete {included.length}</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
   const [filter, setFilter] = useState({ from: iso(today), to: iso(addDays(today, 180)), resourceId: "all", originContains: "", destContains: "" });
   const [change, setChange] = useState({ dayShift: 0, timeMode: "shift", minuteShift: 60, newDepTime: "" });
@@ -1592,7 +1799,7 @@ const IATA_DAYS = [["1", "Mon"], ["2", "Tue"], ["3", "Wed"], ["4", "Thu"], ["5",
 function newSCRLine(seed) {
   return {
     id: "l" + Math.random().toString(36).slice(2, 9),
-    actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "SX", depDesignator: "SX",
+    actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "DV", depDesignator: "DV",
     periodFrom: iso(today), periodTo: iso(today), days: [String(jsToIataDay(today.getUTCDay()))],
     seats: 189, acType: "", inboundService: "C", outboundService: "C",
     ...seed,
@@ -1750,7 +1957,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
   // runs collapse, one-offs stay separate) and appended in one go.
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [datePickerDraft, setDatePickerDraft] = useState({
-    actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "SX", depDesignator: "SX",
+    actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "DV", depDesignator: "DV",
     inboundService: "C", outboundService: "C", seats: 189, acType: "", dates: [],
   });
   function pickDraftFlight(which, flightId) {
@@ -1774,7 +1981,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
       const repFlight = flights.find(f => f.id === (shared.arrFlightId || shared.depFlightId));
       if (repFlight) setHeader(h => ({ ...h, clearanceAirport: shared.arrFlightId ? repFlight.destination : repFlight.origin }));
     }
-    setDatePickerDraft({ actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "SX", depDesignator: "SX", inboundService: "C", outboundService: "C", seats: 189, acType: "", dates: [] });
+    setDatePickerDraft({ actionCode: "N", arrFlightId: "", depFlightId: "", arrDesignator: "DV", depDesignator: "DV", inboundService: "C", outboundService: "C", seats: 189, acType: "", dates: [] });
     setShowDatePicker(false);
   }
 
