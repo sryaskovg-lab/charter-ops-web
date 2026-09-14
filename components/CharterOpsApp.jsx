@@ -198,9 +198,14 @@ async function fetchAll() {
 function Badge({ children, color, bg = "transparent" }) {
   return <span style={{ fontFamily: MONO, fontSize: 10.5, letterSpacing: 0.3, padding: "2px 7px", borderRadius: 12, color, background: bg, border: `1px solid ${color}55`, whiteSpace: "nowrap" }}>{children}</span>;
 }
-function Toast({ items }) {
+function Toast({ items, onDismiss }) {
   return <div style={{ position: "fixed", bottom: 18, right: 18, display: "flex", flexDirection: "column", gap: 8, zIndex: 100 }}>
-    {items.map(t => <div key={t.id} style={{ background: C.panel, border: `1px solid ${t.tone === "warn" ? C.red : C.cyan}55`, borderLeft: `3px solid ${t.tone === "warn" ? C.red : C.cyan}`, color: C.text, fontFamily: SANS, fontSize: 13, padding: "10px 14px", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", minWidth: 260, animation: "slideIn 0.25s ease-out" }}>{t.msg}</div>)}
+    {items.map(t => (
+      <div key={t.id} style={{ background: C.panel, border: `1px solid ${t.tone === "warn" ? C.red : C.cyan}55`, borderLeft: `3px solid ${t.tone === "warn" ? C.red : C.cyan}`, color: C.text, fontFamily: SANS, fontSize: 13, padding: "10px 14px", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", minWidth: 260, maxWidth: 380, animation: "slideIn 0.25s ease-out", display: "flex", alignItems: "flex-start", gap: 8 }}>
+        <span style={{ flex: 1 }}>{t.msg}</span>
+        <button onClick={() => onDismiss(t.id)} style={{ background: "none", border: "none", color: C.faint, cursor: "pointer", padding: 0, fontSize: 15, lineHeight: 1, flexShrink: 0 }}>×</button>
+      </div>
+    ))}
   </div>;
 }
 const inputStyle = { background: C.panel, border: `1px solid ${C.border}`, color: C.text, borderRadius: 10, padding: "7px 10px", fontSize: 12.5, fontFamily: SANS, width: "100%", outline: "none", transition: "box-shadow 0.15s ease, border-color 0.15s ease" };
@@ -246,11 +251,15 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 
   const perms = ROLES[role];
 
-  const pushToast = useCallback((msg, tone) => {
+  // sticky=true skips the auto-dismiss timer entirely — for anything the person needs time to
+  // copy (a temp password), not just glance at, since a 4.8s toast racing someone's clipboard
+  // is a real usability bug, not a nitpick.
+  const pushToast = useCallback((msg, tone, sticky) => {
     const id = ++toastIdRef.current;
-    setToasts(t => [...t, { id, msg, tone }]);
-    setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4800);
+    setToasts(t => [...t, { id, msg, tone, sticky }]);
+    if (!sticky) setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 4800);
   }, []);
+  const dismissToast = useCallback(id => setToasts(t => t.filter(x => x.id !== id)), []);
 
   // ---- Tasks, Notifications, search — Tasks/Notifications are real Supabase tables (not
   // local-only state), so they're genuinely shared across everyone using this deployment.
@@ -532,6 +541,24 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     }
   }
 
+  async function resetTeamUserPassword(userId) {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/admin/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ userId }),
+      });
+      let data;
+      try { data = await res.json(); } catch { data = { error: (await res.text().catch(() => "")) || `Server returned ${res.status} with no readable error` }; }
+      if (!res.ok) { pushToast(`Could not reset password: ${data.error}`, "warn"); return null; }
+      return data.tempPassword;
+    } catch (err) {
+      pushToast(`Could not reset password: ${err.message}`, "warn");
+      return null;
+    }
+  }
+
   async function deleteTeamUser(userId) {
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -785,7 +812,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
         onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} />}
-      {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} pushToast={pushToast} />}
+      {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource} />}
@@ -800,7 +827,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       </div>
       </>
       )}
-      <Toast items={toasts} />
+      <Toast items={toasts} onDismiss={dismissToast} />
     </div>
   );
 }
@@ -2197,7 +2224,7 @@ const ROLE_OPTIONS = [
   ["management", "Charter dept management"],
 ];
 
-function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDeleteUser, pushToast }) {
+function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDeleteUser, onResetPassword, pushToast }) {
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   return (
@@ -2223,14 +2250,20 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
                 </select>
               </td>
               <td style={td}>
-                {p.id === currentUserId
-                  ? <span style={{ fontSize: 10.5, color: C.faint }}>Ask another manager to change your own role</span>
-                  : (confirmDeleteId === p.id
-                      ? <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                          <button onClick={() => { onDeleteUser(p.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm delete</button>
-                          <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
-                        </div>
-                      : <button onClick={() => setConfirmDeleteId(p.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>)}
+                <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", alignItems: "center" }}>
+                  <button onClick={async () => {
+                    const tempPassword = await onResetPassword(p.id);
+                    if (tempPassword) pushToast(`New temp password for ${p.email}: ${tempPassword} (copy it now — this won't be shown again)`, "ok", true);
+                  }} style={{ ...miniBtn, fontSize: 10.5 }}>Reset password</button>
+                  {p.id === currentUserId
+                    ? <span style={{ fontSize: 10.5, color: C.faint }}>Ask another manager to change your own role</span>
+                    : (confirmDeleteId === p.id
+                        ? <>
+                            <button onClick={() => { onDeleteUser(p.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm delete</button>
+                            <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
+                          </>
+                        : <button onClick={() => setConfirmDeleteId(p.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>)}
+                </div>
               </td>
             </tr>
           ))}
@@ -2238,7 +2271,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
       </table>
       {showAdd && <AddUserModal onClose={() => setShowAdd(false)} onCreate={async draft => {
         const tempPassword = await onCreateUser(draft);
-        if (tempPassword) pushToast(`${draft.email} created — temp password: ${tempPassword} (relay this securely; they should change it on first login)`, "ok");
+        if (tempPassword) pushToast(`${draft.email} created — temp password: ${tempPassword} (copy it now — this won't be shown again)`, "ok", true);
         setShowAdd(false);
       }} />}
     </div>
