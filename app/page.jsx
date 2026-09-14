@@ -36,9 +36,5 @@ export default function HomePage() {
     return <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#7E8CAD", fontFamily: "monospace" }}>Loading…</div>;
   }
 
-  return (
-    <main style={{ padding: 20, maxWidth: 1400, margin: "0 auto" }}>
-      <CharterOpsApp profile={profile} onSignOut={handleSignOut} />
-    </main>
-  );
+  return <CharterOpsApp profile={profile} onSignOut={handleSignOut} />;
 }
