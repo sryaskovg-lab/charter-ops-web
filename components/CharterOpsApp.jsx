@@ -511,16 +511,43 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   // route instead — the route re-checks that the caller is actually management itself,
   // never trusting this client-side gate alone.
   async function createTeamUser(draft) {
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch("/api/admin/create-user", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
-      body: JSON.stringify(draft),
-    });
-    const data = await res.json();
-    if (!res.ok) { pushToast(`Could not create user: ${data.error}`, "warn"); return null; }
-    setProfiles(ps => [...ps, { id: data.userId, name: draft.name || draft.email, email: draft.email, role: draft.role }]);
-    return data.tempPassword;
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/admin/create-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify(draft),
+      });
+      // The route always returns JSON, even on failure — but if something upstream (a proxy,
+      // a crash Next.js itself intercepts) ever returns HTML or plain text instead, .json()
+      // throws. Falling back to .text() means the person sees *something* instead of nothing.
+      let data;
+      try { data = await res.json(); } catch { data = { error: (await res.text().catch(() => "")) || `Server returned ${res.status} with no readable error` }; }
+      if (!res.ok) { pushToast(`Could not create user: ${data.error}`, "warn"); return null; }
+      setProfiles(ps => [...ps, { id: data.userId, name: draft.name || draft.email, email: draft.email, role: draft.role }]);
+      return data.tempPassword;
+    } catch (err) {
+      pushToast(`Could not create user: ${err.message}`, "warn");
+      return null;
+    }
+  }
+
+  async function deleteTeamUser(userId) {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/admin/delete-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ userId }),
+      });
+      let data;
+      try { data = await res.json(); } catch { data = { error: (await res.text().catch(() => "")) || `Server returned ${res.status} with no readable error` }; }
+      if (!res.ok) { pushToast(`Could not delete user: ${data.error}`, "warn"); return; }
+      setProfiles(ps => ps.filter(p => p.id !== userId));
+      pushToast("User removed", "ok");
+    } catch (err) {
+      pushToast(`Could not delete user: ${err.message}`, "warn");
+    }
   }
 
   const selectedFlight = flights.find(f => f.id === selectedFlightId) || null;
@@ -758,7 +785,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
         onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} />}
-      {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} pushToast={pushToast} />}
+      {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource} />}
@@ -2170,8 +2197,9 @@ const ROLE_OPTIONS = [
   ["management", "Charter dept management"],
 ];
 
-function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, pushToast }) {
+function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDeleteUser, pushToast }) {
   const [showAdd, setShowAdd] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -2194,7 +2222,16 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, pushTo
                   {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
               </td>
-              <td style={td}>{p.id === currentUserId && <span style={{ fontSize: 10.5, color: C.faint }}>Ask another manager to change your own role</span>}</td>
+              <td style={td}>
+                {p.id === currentUserId
+                  ? <span style={{ fontSize: 10.5, color: C.faint }}>Ask another manager to change your own role</span>
+                  : (confirmDeleteId === p.id
+                      ? <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                          <button onClick={() => { onDeleteUser(p.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm delete</button>
+                          <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
+                        </div>
+                      : <button onClick={() => setConfirmDeleteId(p.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>)}
+              </td>
             </tr>
           ))}
         </tbody>
