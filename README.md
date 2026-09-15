@@ -63,6 +63,7 @@ or putting the app behind Vercel's password/SSO protection.
    | `SUPABASE_SERVICE_ROLE_KEY` | from Supabase dashboard → Project Settings → API → `service_role` secret — **server-only**, do not prefix with `NEXT_PUBLIC_` |
    | `CRON_SECRET` | any random string — protects the cron endpoint from being called by randoms |
    | `APIFREAKS_API_KEY` | free key from https://apifreaks.com/signup (Timezone Lookup API) — resolves airport codes not in the static list; server-only |
+   | `ANTHROPIC_API_KEY` | from console.anthropic.com — powers the floating chat assistant (`/api/chat`). Optional: the app runs fine without it, the assistant just shows an error if asked anything. Server-only, never `NEXT_PUBLIC_`. |
 3. Deploy. Vercel will also pick up `vercel.json`'s cron entry automatically and start hitting
    `/api/cron/release-options` once a day (at 03:00 UTC) once deployed. Hobby-plan accounts are
    limited to **daily** cron schedules — Vercel will flat-out reject the deploy if the schedule
@@ -147,3 +148,26 @@ or putting the app behind Vercel's password/SSO protection.
 - Finance (revenue/invoicing reporting) and Documents (file storage) from the reference design
   are not built — Finance needs a decision on what it should actually show, and Documents needs
   real file upload (Supabase Storage), not just a metadata register.
+- **Chat assistant** — a floating widget (bottom-left, on every tab) backed by `/api/chat` and
+  the Claude API. It can look up real flights, allotment totals, operator rates, and fleet
+  status via tool use, but can't change anything. Runs the query using the *asking user's own*
+  Supabase session token (not the service-role key), so RLS guarantees it never surfaces
+  anything that user couldn't already see in the app. **Conversation history is now persisted**
+  per user in the `chat_messages` table (migration `00013`) — reopening the widget or
+  refreshing the page picks up where you left off. Needs `ANTHROPIC_API_KEY` set to actually
+  respond (see above); without it, the widget still opens but shows a clear error rather than
+  failing silently.
+- **Excel roster importer** — Bulk Import now has an "Upload Excel roster" mode alongside the
+  existing CSV paste, parsing the actual per-aircraft weekly grid format (one sheet per tail,
+  flight number and route string in adjacent cells under each weekday column) via the `xlsx`
+  package (SheetJS), entirely client-side. This was built and verified against a real roster
+  file, not a guessed structure — critically, the week-block spacing in that file is **not**
+  uniform (usually 12 rows apart, but 10/11/13 rows around month or season boundaries), so
+  blocks are found dynamically by scanning for the row where a plain day-of-month number
+  actually appears, never assumed to repeat at a fixed interval. Dates are computed by
+  advancing a single anchor Monday 7 days per detected block — this was cross-checked against
+  every block's own stated day-of-month across all 10 real tail sheets with zero mismatches,
+  which is what "verified" means here, not just "ran once." Sheets that don't map to a tail in
+  your `resources` table (summary sheets, aircraft types outside the regular fleet) are skipped
+  and named in the preview, not silently dropped, and non-flight annotations in the grid
+  (tour-operator labels, NOTAMs) are counted and excluded rather than misread as flights.

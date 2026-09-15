@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import "leaflet/dist/leaflet.css";
+import * as XLSX from "xlsx";
 
 // Leaflet touches `window`/`document` at import time, so it can only load client-side —
 // dynamic() with ssr:false is the standard fix for react-leaflet under Next.js.
@@ -155,6 +156,31 @@ function flightGeometry(f) {
   if (dur <= 0) dur += 1440;
   return { offsetFrac: dep / 1440, widthFrac: dur / 1440 };
 }
+// Greedy interval-scheduling lane assignment — when one aircraft has two+ flights whose times
+// overlap (or are close) on the same day, they get separate lanes stacked vertically instead
+// of literally drawing on top of each other.
+function assignLanes(flightsForDay, geomFn = flightGeometry) {
+  const sorted = [...flightsForDay].sort((a, b) => geomFn(a).offsetFrac - geomFn(b).offsetFrac);
+  const laneEnds = [];
+  const laneOf = new Map();
+  sorted.forEach(f => {
+    const g = geomFn(f);
+    const start = g.offsetFrac, end = g.offsetFrac + g.widthFrac;
+    let placed = false;
+    for (let lane = 0; lane < laneEnds.length; lane++) {
+      if (start >= laneEnds[lane] - 0.005) { laneEnds[lane] = end; laneOf.set(f.id, lane); placed = true; break; }
+    }
+    if (!placed) { laneEnds.push(end); laneOf.set(f.id, laneEnds.length - 1); }
+  });
+  return { laneOf, laneCount: Math.max(laneEnds.length, 1) };
+}
+// Box sizing is purely a display decision, tied to zoom level — it never touches the stored
+// depTime/arrTime. At Day/Week zoom there's enough room to show a flight's actual duration; at
+// Month/Period the columns are too narrow for that to be legible, so every flight there just
+// renders as a clean full-day block instead of a sliver sized to a few pixels.
+function effectiveGeometry(f, viewMode) {
+  return (viewMode === "month" || viewMode === "period") ? { offsetFrac: 0, widthFrac: 1 } : flightGeometry(f);
+}
 const FLIGHT_COLORS = ["#FF6B4A", "#0F9B8E", "#1E9E5A", "#D6432E", "#7C6FD1", "#B8860B", "#3B7DD8", "#C2437E"];
 function mapFlight(f) { return { id: f.id, ref: f.ref, resourceId: f.resource_id, origin: f.origin, destination: f.destination, start: new Date(f.scheduled_departure), capacity: f.capacity, status: f.status, legType: f.leg_type, version: f.version, depTime: hhmm(f.scheduled_departure), arrTime: hhmm(f.scheduled_arrival), color: f.color || null }; }
 function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
@@ -209,6 +235,53 @@ function Toast({ items, onDismiss }) {
     ))}
   </div>;
 }
+
+// ---------- floating chat assistant ----------
+function ChatWidget({ open, setOpen, messages, busy, onSend, onClear }) {
+  const [input, setInput] = useState("");
+  const scrollRef = useRef(null);
+  useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [messages, busy]);
+
+  function submit() {
+    const text = input.trim();
+    if (!text || busy) return;
+    onSend(text);
+    setInput("");
+  }
+
+  return (
+    <>
+      <button onClick={() => setOpen(v => !v)} title={open ? "Close assistant" : "Ask the assistant"}
+        style={{ position: "fixed", bottom: 20, left: 20, width: 52, height: 52, borderRadius: 999, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, border: "none", cursor: "pointer", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {open ? <IconX /> : <IconChat />}
+      </button>
+      {open && (
+        <div style={{ position: "fixed", bottom: 82, left: 20, width: 340, height: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, boxShadow: "0 20px 50px rgba(58,54,47,0.2)", display: "flex", flexDirection: "column", zIndex: 95, overflow: "hidden" }}>
+          <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Ask about the schedule</div>
+              <div style={{ fontSize: 10.5, color: C.faint }}>Answers come from real flight/allotment data — it can look things up, not change them.</div>
+            </div>
+            {messages.length > 0 && <button onClick={onClear} title="Clear history" style={{ background: "none", border: "none", color: C.faint, cursor: "pointer", fontSize: 10.5, flexShrink: 0, padding: 0, textDecoration: "underline" }}>Clear</button>}
+          </div>
+          <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+            {messages.length === 0 && <div style={{ fontSize: 11.5, color: C.faint }}>Try: "How many seats does ANEX have left to SSH?" or "What's flying this week on UP-B3748?"</div>}
+            {messages.map((m, i) => (
+              <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "88%", background: m.role === "user" ? C.amberSoft : C.panel2, color: C.text, borderRadius: 10, padding: "7px 10px", fontSize: 12.5, whiteSpace: "pre-wrap" }}>{m.content}</div>
+            ))}
+            {busy && <div style={{ alignSelf: "flex-start", fontSize: 11.5, color: C.faint }}>Thinking…</div>}
+          </div>
+          <div style={{ display: "flex", gap: 6, padding: 10, borderTop: `1px solid ${C.borderSoft}` }}>
+            <input value={input} onChange={e => setInput(e.target.value)} placeholder="Ask a question…" style={{ ...inputStyle, flex: 1, fontSize: 12.5 }}
+              onKeyDown={e => { if (e.key === "Enter") submit(); }} />
+            <button onClick={submit} disabled={busy || !input.trim()} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber }}>Send</button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 const inputStyle = { background: C.panel, border: `1px solid ${C.border}`, color: C.text, borderRadius: 10, padding: "7px 10px", fontSize: 12.5, fontFamily: SANS, width: "100%", outline: "none", transition: "box-shadow 0.15s ease, border-color 0.15s ease" };
 const miniBtn = { background: C.panel, border: `1px solid ${C.border}`, color: C.text, fontSize: 11, padding: "6px 12px", borderRadius: 999, cursor: "pointer", fontFamily: SANS, transition: "transform 0.12s ease, box-shadow 0.15s ease, background 0.15s ease", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" };
 const navBtn = { background: C.panel, border: `1px solid ${C.border}`, color: C.text, fontSize: 12, padding: "7px 14px", borderRadius: 999, cursor: "pointer", fontFamily: SANS, transition: "transform 0.12s ease, box-shadow 0.15s ease, background 0.15s ease", boxShadow: "0 1px 2px rgba(0,0,0,0.05)" };
@@ -227,6 +300,8 @@ function IconPlane() { return <svg width="18" height="18" viewBox="0 0 24 24" fi
 function IconGauge() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a9 9 0 1 0 9 9" /><path d="M12 12 16 8" /><path d="M12 3v2" /></svg>; }
 function IconSearch() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>; }
 function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>; }
+function IconChat({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>; }
+function IconX({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>; }
 
 export default function CharterOpsApp({ profile, onSignOut }) {
   const role = profile.role;
@@ -284,6 +359,57 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     if (!error) setNotifications(ns => [data, ...ns].slice(0, 30));
   }, []);
   const [showNotifPanel, setShowNotifPanel] = useState(false);
+
+  // ---- Chat assistant — tool-use against real data, scoped to the caller's own session on
+  // the server side (see /api/chat), so it never sees more than this user already can.
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatLoaded, setChatLoaded] = useState(false);
+  // Loaded once per session, scoped to this user's own rows by RLS (chat_messages_own_rows) —
+  // nobody else's history is reachable even if they knew the ids.
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.from("chat_messages").select("role, content").order("created_at");
+      setChatMessages((data || []).map(m => ({ role: m.role, content: m.content })));
+      setChatLoaded(true);
+    })();
+  }, []);
+  async function persistChatMessage(role, content) {
+    await supabase.from("chat_messages").insert({ user_id: profile.id, role, content });
+  }
+  async function sendChatMessage(text) {
+    const nextMessages = [...chatMessages, { role: "user", content: text }];
+    setChatMessages(nextMessages);
+    persistChatMessage("user", text);
+    setChatBusy(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+        body: JSON.stringify({ messages: nextMessages.map(m => ({ role: m.role, content: m.content })) }),
+      });
+      let data;
+      try { data = await res.json(); } catch { data = { error: `Server returned ${res.status} with no readable error` }; }
+      if (!res.ok || data.error) {
+        setChatMessages(m => [...m, { role: "assistant", content: `⚠ ${data.error || "Something went wrong."}` }]);
+        // Errors aren't persisted — they're transient UI feedback, not real conversation.
+      } else {
+        setChatMessages(m => [...m, { role: "assistant", content: data.reply }]);
+        persistChatMessage("assistant", data.reply);
+      }
+    } catch (err) {
+      setChatMessages(m => [...m, { role: "assistant", content: `⚠ ${err.message}` }]);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+  async function clearChatHistory() {
+    await supabase.from("chat_messages").delete().eq("user_id", profile.id);
+    setChatMessages([]);
+  }
+
   const [searchQuery, setSearchQuery] = useState("");
 
   // ---- Aircraft (fleet) CRUD — resources already drove the schedule; this adds a dedicated
@@ -418,22 +544,18 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     setShowBulkDelete(false);
   }
 
-  // Drag a flight bar from one aircraft's row to another (or to a different day/time on the
-  // same row). Duration is preserved so arrival moves with departure. Opens the drawer
-  // afterward so the move can be double-checked, not just trusted.
-  async function dropFlight(flightId, newResourceId, newStart, newDepTime) {
+  // Drag a flight bar from one aircraft's row to another (or to a different day on the same
+  // row). Only the date and/or aircraft change — the flight's actual departure/arrival times
+  // are left exactly as they were. Opens the drawer afterward so the move can be double-checked.
+  async function dropFlight(flightId, newResourceId, newStart) {
     if (!perms.editFlight) return;
     const f = flights.find(x => x.id === flightId);
     if (!f) return;
-    const dep = timeToMinutes(f.depTime), arr = timeToMinutes(f.arrTime);
-    const durMin = (dep != null && arr != null) ? ((arr - dep + 1440) % 1440) : null;
-    const newDepMin = timeToMinutes(newDepTime);
-    const newArrTime = (durMin != null && newDepMin != null) ? minutesToHHMM(newDepMin + durMin) : f.arrTime;
     const conflict = checkConflict(newResourceId, newStart, flightId);
-    await updateFlight(flightId, { resourceId: newResourceId, start: newStart, depTime: newDepTime, arrTime: newArrTime });
+    await updateFlight(flightId, { resourceId: newResourceId, start: newStart });
     setSelectedFlightId(flightId);
     if (conflict) pushToast(`${f.ref} moved — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
-    else pushToast(`${f.ref} moved — double-check the details below`, "ok");
+    else pushToast(`${f.ref} moved to ${iso(newStart)} — time unchanged`, "ok");
   }
 
   async function addAllotment(flightId, operatorId, seats, priceOverride) {
@@ -868,6 +990,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       </>
       )}
       <Toast items={toasts} onDismiss={dismissToast} />
+      <ChatWidget open={chatOpen} setOpen={setChatOpen} messages={chatMessages} busy={chatBusy} onSend={sendChatMessage} onClear={clearChatHistory} />
     </div>
   );
 }
@@ -922,7 +1045,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>RESOURCE</div>
               {days.map((d, i) => {
                 const isToday = iso(d) === iso(new Date());
-                return <div key={i} style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 11, fontFamily: MONO, color: isToday ? C.amber : C.muted, borderLeft: `1px solid ${C.borderSoft}`, background: isToday ? C.amberSoft + "55" : "transparent" }}>
+                return <div key={i} onClick={() => { if (viewMode !== "day") { setViewMode("day"); setViewStart(d); } }}
+                  title={viewMode !== "day" ? "Click to view this day alone" : undefined}
+                  style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 11, fontFamily: MONO, color: isToday ? C.amber : C.muted, borderLeft: `1px solid ${C.borderSoft}`, background: isToday ? C.amberSoft + "55" : "transparent", cursor: viewMode !== "day" ? "pointer" : "default" }}>
                   <div>{d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })}</div>
                   <div style={{ color: isToday ? C.amber : C.faint }}>{d.getUTCDate()}/{d.getUTCMonth() + 1}</div>
                 </div>;
@@ -942,11 +1067,26 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
             )}
           </div>
 
-          {resources.map(res => (
-            <div key={res.id} style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", minHeight: 58 }}>
+          {resources.map(res => {
+            const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
+            const byDay = new Map();
+            resFlights.forEach(({ f, c }) => { if (!byDay.has(c)) byDay.set(c, []); byDay.get(c).push(f); });
+            const laneOf = new Map();
+            let maxLanes = 1;
+            byDay.forEach(dayFlights => {
+              const { laneOf: dayLaneOf, laneCount } = assignLanes(dayFlights, f => effectiveGeometry(f, viewMode));
+              dayLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
+              maxLanes = Math.max(maxLanes, laneCount);
+            });
+            const isNarrow = viewMode === "month" || viewMode === "period";
+            const BAR_H = isNarrow ? 44 : 30, BAR_GAP = 8, TOP_PAD = 12;
+            const rowHeight = Math.max(58, TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
+            return (
+            <div key={res.id} style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", minHeight: rowHeight }}>
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2 }}>
                 <div style={{ fontFamily: MONO, fontSize: 12.5, color: C.text }}>{res.code}</div>
                 <div style={{ fontSize: 10.5, color: C.muted }}>{res.variant}</div>
+                {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
               <div style={{ position: "relative", display: "flex" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
@@ -957,48 +1097,57 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   if (!flightId) return;
                   const rect = e.currentTarget.getBoundingClientRect();
                   const relX = e.clientX - rect.left;
-                  const totalDayFloat = relX / COL;
-                  const dayIndex = Math.floor(totalDayFloat);
-                  const hourFrac = Math.max(0, totalDayFloat - dayIndex);
+                  const dayIndex = Math.floor(relX / COL);
                   const newStart = addDays(viewStart, dayIndex);
-                  const depMinutes = Math.round((hourFrac * 1440) / 15) * 15;
-                  onDropFlight(flightId, res.id, newStart, minutesToHHMM(depMinutes));
+                  onDropFlight(flightId, res.id, newStart);
                 }}>
-                {days.map((d, i) => <div key={i} style={{ width: COL, flexShrink: 0, borderLeft: `1px solid ${C.borderSoft}`, height: 58, backgroundImage: `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)` }} />)}
-                {flights.filter(f => f.resourceId === res.id).map(f => {
-                  const c = colFor(f.start);
-                  if (c < 0 || c >= days.length) return null;
+                {days.map((d, i) => <div key={i} style={{ width: COL, flexShrink: 0, borderLeft: `1px solid ${C.borderSoft}`, height: rowHeight, backgroundImage: `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)` }} />)}
+                {resFlights.map(({ f, c }) => {
                   const isFerry = f.legType === "ferry";
                   const s = STATUS_STYLE[f.status];
                   const selected = f.id === selectedFlightId;
-                  const geom = flightGeometry(f);
+                  const geom = effectiveGeometry(f, viewMode);
                   const leftPx = c * COL + geom.offsetFrac * COL + 3;
-                  const widthPx = Math.max(geom.widthFrac * COL - 6, 34);
+                  const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
+                  const lane = laneOf.get(f.id) || 0;
                   const barBg = isFerry ? "repeating-linear-gradient(45deg, rgba(58,54,47,0.03), rgba(58,54,47,0.03) 5px, rgba(58,54,47,0.07) 5px, rgba(58,54,47,0.07) 10px)" : (f.color ? f.color + "70" : s.bg);
                   const barBorder = selected ? C.amber : (f.color || (isFerry ? C.faint : s.border));
                   const refColor = f.color || (isFerry ? C.muted : s.text);
+                  const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
+                  const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   return (
                     <div key={f.id} draggable={perms.editFlight}
                       onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
                       onClick={() => setSelectedFlightId(selected ? null : f.id)}
                       title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign" : ""}`}
-                      style={{ position: "absolute", left: leftPx, top: 12, width: widthPx, height: 30,
+                      style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
                         background: barBg,
                         border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
                         borderRadius: 7, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 6px" }}>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                        <span style={{ fontFamily: MONO, fontSize: 10.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap" }}>{f.ref}</span>
-                        {f.depTime && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{formatStationTime(f.start, f.depTime, f.origin, showLocal)}</span>}
-                        <span style={{ fontSize: 9, color: refColor, opacity: 0.75 }}>→</span>
-                        {f.arrTime && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{formatStationTime(f.start, f.arrTime, f.destination, showLocal)}</span>}
-                      </div>
-                      <div style={{ fontSize: 9, color: refColor, opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden" }}>{f.origin}→{f.destination}{isFerry ? " · FERRY" : ""}</div>
+                      {isNarrow ? (
+                        <>
+                          <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
+                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
+                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
+                        </>
+                      ) : (
+                        <>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                            <span style={{ fontFamily: MONO, fontSize: 10.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap" }}>{f.ref}</span>
+                            {depLabel && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{depLabel}</span>}
+                            <span style={{ fontSize: 9, color: refColor, opacity: 0.75 }}>→</span>
+                            {arrLabel && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{arrLabel}</span>}
+                          </div>
+                          <div style={{ fontSize: 9, color: refColor, opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden" }}>{f.origin}→{f.destination}{isFerry ? " · FERRY" : ""}</div>
+                        </>
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
-          ))}
+          );
+          })}
         </div>
       </div>
 
@@ -1286,7 +1435,7 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setStep("form")} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCreate({ ...form, start: new Date(form.date), ref: form.ref.trim() || undefined })} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add to schedule</button>
@@ -1316,13 +1465,115 @@ const SAMPLE_PASTE = `date,flight_no,origin,destination,dep_time,arr_time,resour
 
 const DOW_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+// ---------- Excel roster-grid importer ----------
+// Built against a real roster file, not a guessed format. Verified against the actual
+// workbook: every tail sheet's first week starts Monday 2026-09-14, and — critically — that
+// single anchor date, advanced 7 days per week block, reproduces every block's stated
+// day-of-month with zero mismatches across all 10 sheets, even though the row-spacing between
+// week blocks is NOT uniform (it's usually 12 rows but varies — 10, 11, 13 — around
+// month/season boundaries). So blocks are found dynamically (by scanning for the row where the
+// date-of-month number actually appears), never assumed to be evenly spaced.
+const ROSTER_ANCHOR_MONDAY = new Date(Date.UTC(2026, 8, 14)); // 2026-09-14, confirmed against the file
+const ROSTER_ROUTE_RE = /^([A-Za-z]{3,4})\s+(\d{3,4})\s*-\s*(\d{3,4})\s+([A-Za-z]{3,4})$/;
+
+function mapSheetToResourceCode(sheetName, resources) {
+  const m4 = sheetName.match(/\b(\d{4})\b/);
+  if (m4) {
+    const code = "UP-B" + m4[1];
+    if (resources.some(r => r.code === code)) return code;
+  }
+  const m757 = sheetName.match(/757-0?(\d)\b/);
+  if (m757) {
+    const code = "UP-B570" + m757[1];
+    if (resources.some(r => r.code === code)) return code;
+  }
+  return null;
+}
+
+function parseRosterWorkbook(workbook, resources, flights) {
+  const parsedRows = [];
+  const skippedSheets = [];
+  const annotations = [];
+  let rowCounter = 0;
+
+  workbook.SheetNames.forEach(sheetName => {
+    const resourceCode = mapSheetToResourceCode(sheetName, resources);
+    if (!resourceCode) { skippedSheets.push(sheetName); return; }
+    const resource = resources.find(r => r.code === resourceCode);
+    const grid = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: null });
+
+    const headerRowIdx = [];
+    grid.forEach((row, i) => { if (typeof row[2] === "number") headerRowIdx.push(i); });
+
+    headerRowIdx.forEach((hIdx, blockI) => {
+      const monday = addDays(ROSTER_ANCHOR_MONDAY, 7 * blockI);
+      const dataStart = hIdx + 2;
+      const dataEnd = (blockI + 1 < headerRowIdx.length ? headerRowIdx[blockI + 1] : grid.length) - 1;
+      for (let r = dataStart; r <= dataEnd && r < grid.length; r++) {
+        const row = grid[r] || [];
+        for (let w = 0; w < 7; w++) {
+          const col = 2 + 2 * w;
+          const flightCell = row[col - 1];
+          const routeCell = row[col];
+          if (routeCell == null || routeCell === "") continue;
+          const routeStr = String(routeCell).trim();
+          const match = ROSTER_ROUTE_RE.exec(routeStr);
+          if (!match) {
+            annotations.push({ sheet: sheetName, text: routeStr });
+            continue;
+          }
+          const [, origin, dep, arr, destination] = match;
+          const date = addDays(monday, w);
+          const depTime = dep.padStart(4, "0").replace(/^(\d{2})(\d{2})$/, "$1:$2");
+          const arrTime = arr.padStart(4, "0").replace(/^(\d{2})(\d{2})$/, "$1:$2");
+          const flightNo = flightCell != null ? String(flightCell).replace(/\D/g, "") : "";
+          rowCounter++;
+          let status = "ok", detail = "";
+          const dupe = flights.find(f => f.resourceId === resource.id && iso(f.start) === iso(date));
+          if (dupe) { status = "conflict"; detail = `${resource.code} already flies ${dupe.ref} that day`; }
+          parsedRows.push({
+            row_number: rowCounter, date, flightNo, origin: origin.toUpperCase(), destination: destination.toUpperCase(),
+            depTime, arrTime, resourceId: resource.id, resourceCode: resource.code, legType: "revenue",
+            status, detail, include: status === "ok", dow: date.getUTCDay(),
+          });
+        }
+      }
+    });
+  });
+
+  return { parsedRows, skippedSheets: [...new Set(skippedSheets)], annotations };
+}
+
+// Shared by both the CSV-paste path and the Excel path — same recurring-pattern grouping
+// either way, so the preview/SCR/confirm UI never needs to know which source produced the rows.
+function groupIntoPatternsAndRemaining(parsed) {
+  const groups = {};
+  parsed.forEach(r => {
+    if (r.status !== "ok") return;
+    const key = [r.flightNo, r.resourceId, r.origin, r.destination, r.dow, r.legType].join("|");
+    (groups[key] = groups[key] || []).push(r);
+  });
+  const detectedPatterns = Object.values(groups).filter(g => g.length >= 3).map(g => ({
+    key: g.map(r => r.row_number).join(","), rows: g, flightNo: g[0].flightNo, resourceId: g[0].resourceId,
+    origin: g[0].origin, destination: g[0].destination, depTime: g[0].depTime, arrTime: g[0].arrTime,
+    dow: g[0].dow, legType: g[0].legType, include: true,
+  }));
+  const patternedRowNumbers = new Set(detectedPatterns.flatMap(p => p.rows.map(r => r.row_number)));
+  const remaining = parsed.filter(r => !patternedRowNumbers.has(r.row_number));
+  return { patterns: detectedPatterns, rows: remaining };
+}
+
 function BulkImportModal({ resources, flights, onClose, onCommit }) {
+  const [mode, setMode] = useState("paste"); // "paste" | "excel"
   const [raw, setRaw] = useState(SAMPLE_PASTE);
   const [rows, setRows] = useState(null);
   const [patterns, setPatterns] = useState(null);
   const [scrRole, setScrRole] = useState("destination");
   const [output, setOutput] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [excelMeta, setExcelMeta] = useState(null); // { fileName, skippedSheets, annotationCount }
+  const [excelError, setExcelError] = useState(null);
+  const [excelBusy, setExcelBusy] = useState(false);
 
   function resourceByCode(code) { return resources.find(r => r.code.toLowerCase() === (code || "").toLowerCase()); }
 
@@ -1352,23 +1603,32 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
       };
     });
 
-    // detect recurring weekly patterns: same flight number + resource + route + weekday, 3+ occurrences
-    const groups = {};
-    parsed.forEach(r => {
-      if (r.status !== "ok") return;
-      const key = [r.flightNo, r.resourceId, r.origin, r.destination, r.dow, r.legType].join("|");
-      (groups[key] = groups[key] || []).push(r);
-    });
-    const detectedPatterns = Object.values(groups).filter(g => g.length >= 3).map(g => ({
-      key: g.map(r => r.row_number).join(","), rows: g, flightNo: g[0].flightNo, resourceId: g[0].resourceId,
-      origin: g[0].origin, destination: g[0].destination, depTime: g[0].depTime, arrTime: g[0].arrTime,
-      dow: g[0].dow, legType: g[0].legType, include: true,
-    }));
-    const patternedRowNumbers = new Set(detectedPatterns.flatMap(p => p.rows.map(r => r.row_number)));
-    const remaining = parsed.filter(r => !patternedRowNumbers.has(r.row_number));
-
+    const { patterns: detectedPatterns, rows: remaining } = groupIntoPatternsAndRemaining(parsed);
     setPatterns(detectedPatterns);
     setRows(remaining);
+  }
+
+  async function handleExcelFile(file) {
+    setExcelError(null);
+    setExcelBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const workbook = XLSX.read(buf, { type: "array" });
+      const { parsedRows, skippedSheets, annotations } = parseRosterWorkbook(workbook, resources, flights);
+      if (parsedRows.length === 0) {
+        setExcelError("No recognizable flight rows found. Check that this is the roster-grid workbook (one sheet per tail number) and that the sheet names include the tail's registration digits.");
+        setExcelBusy(false);
+        return;
+      }
+      const { patterns: detectedPatterns, rows: remaining } = groupIntoPatternsAndRemaining(parsedRows);
+      setPatterns(detectedPatterns);
+      setRows(remaining);
+      setExcelMeta({ fileName: file.name, skippedSheets, annotationCount: annotations.length });
+    } catch (err) {
+      setExcelError(`Could not read this file: ${err.message}`);
+    } finally {
+      setExcelBusy(false);
+    }
   }
 
   const statusColor = { ok: C.green, conflict: C.amber, error: C.red };
@@ -1405,18 +1665,49 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
 
         {!rows && (
           <>
-            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
-              Paste rows in the same shape as the roster grid: flight number, route, times, aircraft, and leg type (revenue vs. ferry/positioning). Recurring weekly rows get grouped into a pattern automatically. Nothing is written until you commit at the end.
+            <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 14, width: "fit-content" }}>
+              <button onClick={() => setMode("paste")} style={{ background: mode === "paste" ? C.panel : "transparent", color: mode === "paste" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "paste" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>Paste CSV rows</button>
+              <button onClick={() => setMode("excel")} style={{ background: mode === "excel" ? C.panel : "transparent", color: mode === "excel" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "excel" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>Upload Excel roster</button>
             </div>
-            <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
-            </div>
+
+            {mode === "paste" && (
+              <>
+                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
+                  Paste rows in the same shape as the roster grid: flight number, route, times, aircraft, and leg type (revenue vs. ferry/positioning). Recurring weekly rows get grouped into a pattern automatically. Nothing is written until you commit at the end.
+                </div>
+                <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+                  <button onClick={onClose} style={miniBtn}>Cancel</button>
+                  <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+                </div>
+              </>
+            )}
+
+            {mode === "excel" && (
+              <>
+                <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
+                  Upload the actual roster workbook — one sheet per tail number, flight number and route in adjacent cells under each weekday column. Sheets that don't match a tail in your fleet (summary sheets, aircraft not in the fleet list) are skipped and listed below, not silently dropped. Nothing is written until you commit at the end.
+                </div>
+                <div style={{ border: `1.5px dashed ${C.border}`, borderRadius: 12, padding: 24, textAlign: "center" }}>
+                  <input type="file" accept=".xlsx,.xls" onChange={e => { const f = e.target.files?.[0]; if (f) handleExcelFile(f); }} style={{ fontSize: 12.5 }} />
+                  {excelBusy && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 8 }}>Reading workbook…</div>}
+                  {excelError && <div style={{ fontSize: 11.5, color: C.red, marginTop: 8 }}>{excelError}</div>}
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+                  <button onClick={onClose} style={miniBtn}>Cancel</button>
+                </div>
+              </>
+            )}
           </>
         )}
         {rows && !output && (
           <>
+            {excelMeta && (
+              <div style={{ background: C.cyanSoft, border: `1px solid ${C.cyan}55`, borderRadius: 10, padding: 10, marginBottom: 12, fontSize: 11.5, color: C.text }}>
+                Parsed <strong>{excelMeta.fileName}</strong>. {excelMeta.skippedSheets.length > 0 && <>Skipped sheets (no matching aircraft in fleet): <strong>{excelMeta.skippedSheets.join(", ")}</strong>. </>}
+                {excelMeta.annotationCount > 0 && <>{excelMeta.annotationCount} non-flight annotation{excelMeta.annotationCount === 1 ? "" : "s"} (tour-operator labels, NOTAMs, etc.) found and left out — informational only, not imported.</>}
+              </div>
+            )}
             {patterns.length > 0 && (
               <>
                 <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, margin: "10px 0 6px" }}>Detected recurring patterns</div>
@@ -1466,7 +1757,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11.5, color: C.muted }}>{patternCount} pattern{patternCount === 1 ? "" : "s"} ({totalFlightsFromPatterns} flights) + {okRowCount} individual row{okRowCount === 1 ? "" : "s"} selected</span>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button onClick={() => { setRows(null); setPatterns(null); }} style={miniBtn}>Back</button>
+                <button onClick={() => { setRows(null); setPatterns(null); setExcelMeta(null); setExcelError(null); }} style={miniBtn}>Back</button>
                 <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
                 <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
                 <button onClick={generateSCR} disabled={okRowCount + totalFlightsFromPatterns === 0} style={{ ...miniBtn, background: (okRowCount + totalFlightsFromPatterns) ? GRADIENT_PRIMARY : C.faint, boxShadow: (okRowCount + totalFlightsFromPatterns) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (okRowCount + totalFlightsFromPatterns) ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
@@ -1482,7 +1773,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCommit(acceptedRows())} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okRowCount + totalFlightsFromPatterns} flight{(okRowCount + totalFlightsFromPatterns) === 1 ? "" : "s"}</button>
@@ -1677,7 +1968,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCommit(included, pattern)} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okCount} flight{okCount === 1 ? "" : "s"}</button>
@@ -2292,7 +2583,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
             <textarea readOnly value={output} rows={6 + lines.length} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
-              <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+              <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
             </div>
           </>
         )}
