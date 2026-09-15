@@ -1300,10 +1300,18 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [selectedFlightId, multiSelectIds, perms.editFlight, flights]);
 
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    function close() { setShowMoreMenu(false); }
+    document.addEventListener("click", close);
+    return () => document.removeEventListener("click", close);
+  }, [showMoreMenu]);
+
   return (
     <div style={{ padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3 }}>
             {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["period", "Period"]].map(([k, l]) => (
               <button key={k} onClick={() => setViewMode(k)} style={{ background: viewMode === k ? C.panel : "transparent", color: viewMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: viewMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: viewMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
@@ -1315,22 +1323,33 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
               <span style={{ fontSize: 11.5, color: C.muted }}>days</span>
             </div>
           )}
+          <div style={{ display: "flex", gap: 4, borderLeft: `1px solid ${C.borderSoft}`, paddingLeft: 12 }}>
+            <button onClick={() => setViewStart(addDays(viewStart, -DAYS))} style={navBtn}>◀</button>
+            <button onClick={() => { const t = new Date(); t.setUTCHours(0, 0, 0, 0); setViewStart(addDays(t, -1)); }} style={navBtn}>Today</button>
+            <button onClick={() => setViewStart(addDays(viewStart, DAYS))} style={navBtn}>▶</button>
+          </div>
         </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
           <input value={filterText} onChange={e => setFilterText(e.target.value)} placeholder="Filter (ref, route)…"
             style={{ ...inputStyle, width: 150, fontSize: 12 }} />
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
-          {perms.editFlight && <button onClick={onRotationGen} style={navBtn}>Generate rotation</button>}
-          {perms.editFlight && <button onClick={onBulkRetime} style={navBtn}>Bulk retime</button>}
-          {perms.editFlight && <button onClick={onBulkDelete} style={{ ...navBtn, color: C.red, borderColor: C.red + "55" }}>Bulk delete</button>}
-          <button onClick={onGenSCR} style={navBtn}>Generate SCR</button>
-          {perms.editFlight && <button onClick={onBulkImport} style={navBtn}>Bulk import</button>}
+          <div style={{ position: "relative" }}>
+            <button onClick={e => { e.stopPropagation(); setShowMoreMenu(v => !v); }} style={navBtn}>More ▾</button>
+            {showMoreMenu && (
+              <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.16)", zIndex: 60, minWidth: 170, padding: 6 }}>
+                <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
+                {perms.editFlight && <>
+                  <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate rotation</button>
+                  <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk import</button>
+                  <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk retime</button>
+                  <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>Bulk delete</button>
+                </>}
+              </div>
+            )}
+          </div>
           {perms.editFlight && <button onClick={onNewFlight} style={{ ...navBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New flight</button>}
-          <button onClick={() => setViewStart(addDays(viewStart, -DAYS))} style={navBtn}>◀</button>
-          <button onClick={() => { const t = new Date(); t.setUTCHours(0, 0, 0, 0); setViewStart(addDays(t, -1)); }} style={navBtn}>Today</button>
-          <button onClick={() => setViewStart(addDays(viewStart, DAYS))} style={navBtn}>▶</button>
         </div>
       </div>
       {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet.</div>}
@@ -1345,7 +1364,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
           )}
           <div style={{ display: "flex", background: C.panel2, borderBottom: `1px solid ${C.border}`, flexDirection: "column" }}>
             <div style={{ display: "flex" }}>
-              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>RESOURCE</div>
+              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>Aircraft</div>
               {days.map((d, i) => {
                 const isToday = iso(d) === iso(new Date());
                 return <div key={i} onClick={() => { if (viewMode !== "day") { setViewMode("day"); setViewStart(d); } }}
@@ -1591,7 +1610,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
             {perms.editFlight && <>
               <button onClick={() => { onDuplicateFlight(f.id); setContextMenu(null); }} style={ctxMenuItem}>Duplicate → next day</button>
               <button onClick={() => { window.confirm(`Delete ${f.ref}? This can't be undone.`) && onDeleteFlight(f.id); setContextMenu(null); }} style={{ ...ctxMenuItem, color: C.red }}>Delete</button>
-              <div style={{ padding: "6px 8px 2px", fontSize: 10, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4 }}>Color</div>
+              <div style={{ padding: "6px 8px 2px", fontSize: 10, color: C.faint, fontWeight: 600 }}>Color</div>
               <div style={{ display: "flex", gap: 5, padding: "2px 8px 6px", flexWrap: "wrap" }}>
                 {FLIGHT_COLORS.slice(0, 9).map(c => (
                   <button key={c} onClick={() => { onSetFlightColor(f.id, c); setContextMenu(null); }} title={c} style={{ width: 16, height: 16, borderRadius: 4, background: c, border: f.color === c ? `2px solid ${C.text}` : "1px solid rgba(0,0,0,0.1)", cursor: "pointer", padding: 0 }} />
@@ -1696,7 +1715,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       </div>
 
       <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Slot requests</div>
+        <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Slot requests</div>
         <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 8 }}>Pre-filled SCR drafts for this flight — review and generate, nothing is sent from here.</div>
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={() => onOpenSCR("origin")} style={{ ...miniBtn, flex: 1, fontSize: 11 }}>Departure @ {flight.origin}</button>
@@ -1736,7 +1755,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       )}
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>Est. revenue on this flight: <span style={{ color: C.text, fontFamily: MONO }}>${inventory.revenue.toLocaleString()}</span></div>
 
-      <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Allotments</div>
+      <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 8 }}>Allotments</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
         {activeAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No seats allocated yet.</div>}
         {activeAllotments.map(a => {
@@ -1800,7 +1819,7 @@ function FieldRow({ label, children }) {
 }
 function MiniStat({ label, value, color = C.text }) {
   return <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "6px 8px", textAlign: "center" }}>
-    <div style={{ fontSize: 9.5, color: C.faint, textTransform: "uppercase" }}>{label}</div>
+    <div style={{ fontSize: 9.5, color: C.faint, fontWeight: 600 }}>{label}</div>
     <div style={{ fontFamily: MONO, fontSize: 15, color }}>{value}</div>
   </div>;
 }
@@ -1870,7 +1889,7 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }
                 <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
               </div>
-              <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Slot request</div>
+              <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginTop: 4 }}>Slot request</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Request for">
                   <select value={scrLeg} onChange={e => setScrLeg(e.target.value)} style={inputStyle}>
@@ -1915,7 +1934,7 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }
 }
 function FieldSm({ label, children }) {
   return <div style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
-    <label style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</label>
+    <label style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</label>
     {children}
   </div>;
 }
@@ -2176,7 +2195,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
             )}
             {patterns.length > 0 && (
               <>
-                <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, margin: "10px 0 6px" }}>Detected recurring patterns</div>
+                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, margin: "10px 0 6px" }}>Detected recurring patterns</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
                   {patterns.map((p, i) => (
                     <div key={p.key} style={{ border: `1px solid ${C.cyan}55`, background: C.cyanSoft, borderRadius: 10, padding: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -2196,7 +2215,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
 
             {rows.length > 0 && (
               <>
-                <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Individual rows</div>
+                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Individual rows</div>
                 <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left" }}>
@@ -2355,7 +2374,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
               </div>
               <FieldSm label="Capacity"><input type="number" value={pattern.capacity} onChange={e => setPattern({ ...pattern, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
 
-              <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Outbound leg — {pattern.origin}→{pattern.destination}</div>
+              <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginTop: 4 }}>Outbound leg — {pattern.origin}→{pattern.destination}</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Flight number"><input value={pattern.outboundRef} onChange={e => setPattern({ ...pattern, outboundRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
                 <FieldSm label="Departure (UTC)"><input type="time" value={pattern.outboundDep} onChange={e => setPattern({ ...pattern, outboundDep: e.target.value })} style={inputStyle} /></FieldSm>
@@ -2368,7 +2387,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
               </label>
               {pattern.includeReturn && (
                 <>
-                  <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4 }}>Return leg</div>
+                  <div style={{ fontSize: 11, color: C.faint, fontWeight: 600 }}>Return leg</div>
                   <div style={{ fontSize: 10, color: C.faint, marginTop: -6 }}>Doesn't have to go back the way it came — e.g. CIT→VKO out, VKO→ALA back. Leave blank to default to the reverse of the outbound route.</div>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <FieldSm label="Origin"><input value={pattern.returnOrigin} onChange={e => setPattern({ ...pattern, returnOrigin: e.target.value.toUpperCase() })} placeholder={pattern.destination} style={inputStyle} /></FieldSm>
@@ -2574,7 +2593,7 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
 
         {!matches && (
           <>
-            <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Which flights</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Which flights</div>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
               <FieldSm label="From"><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
               <FieldSm label="To"><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
@@ -2591,7 +2610,7 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
               <FieldSm label="Dest. contains"><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
             </div>
 
-            <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>What changes</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>What changes</div>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
               <FieldSm label="Shift date by (days)"><input type="number" value={change.dayShift} onChange={e => setChange({ ...change, dayShift: +e.target.value })} style={inputStyle} /></FieldSm>
             </div>
@@ -2913,7 +2932,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
 
         {!output && (
           <>
-            <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, margin: "4px 0 6px" }}>Message header (shared by every line below)</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, margin: "4px 0 6px" }}>Message header (shared by every line below)</div>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
               <FieldSm label="Your reference / email"><input value={header.creatorRef} onChange={e => setHeader({ ...header, creatorRef: e.target.value })} placeholder="ops@yourairline.com" style={inputStyle} /></FieldSm>
               <FieldSm label="Clearance airport"><input value={header.clearanceAirport} onChange={e => setHeader({ ...header, clearanceAirport: e.target.value.toUpperCase() })} maxLength={4} style={inputStyle} /></FieldSm>
@@ -2923,7 +2942,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
               <FieldSm label="Message date"><input type="date" value={header.messageDate} onChange={e => setHeader({ ...header, messageDate: e.target.value })} style={inputStyle} /></FieldSm>
             </div>
 
-            <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, margin: "4px 0 8px" }}>Data lines — one per flight/period ({lines.length})</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, margin: "4px 0 8px" }}>Data lines — one per flight/period ({lines.length})</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 10 }}>
               {lines.map((line, i) => (
                 <div key={line.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 12, background: C.panel2 }}>
@@ -2938,7 +2957,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
                       </select>
                     </FieldSm>
                   </div>
-                  <div style={{ fontSize: 10.5, color: C.faint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>Arrival leg (optional)</div>
+                  <div style={{ fontSize: 10.5, color: C.faint, fontWeight: 600, marginBottom: 4 }}>Arrival leg (optional)</div>
                   <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                     <FieldSm label="Flight">
                       <select value={line.arrFlightId} onChange={e => pickFlight(line.id, "arr", e.target.value)} style={inputStyle}>
@@ -2953,7 +2972,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
                       </select>
                     </FieldSm>
                   </div>
-                  <div style={{ fontSize: 10.5, color: C.faint, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>Departure leg (optional)</div>
+                  <div style={{ fontSize: 10.5, color: C.faint, fontWeight: 600, marginBottom: 4 }}>Departure leg (optional)</div>
                   <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
                     <FieldSm label="Flight">
                       <select value={line.depFlightId} onChange={e => pickFlight(line.id, "dep", e.target.value)} style={inputStyle}>
@@ -3088,7 +3107,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       )}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
-          <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
             <th style={th}>Tour operator</th><th style={th}>Default rate</th><th style={th}>Allotment type</th><th style={th}>Status</th><th style={th}></th>
           </tr>
         </thead>
@@ -3341,7 +3360,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
       </div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
-          <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
             <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Role</th><th style={th}></th>
           </tr>
         </thead>
@@ -3547,7 +3566,7 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
             </div>
             {(flightTableTab === "upcoming" || flightTableTab === "recent") && (
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase" }}>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, fontWeight: 600 }}>
                   <th style={th}>Date</th><th style={th}>Flight</th><th style={th}>Route</th><th style={th}>Aircraft</th><th style={th}>Status</th>
                 </tr></thead>
                 <tbody>
@@ -3570,7 +3589,7 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
             )}
             {flightTableTab === "aircraft" && (
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, textTransform: "uppercase" }}><th style={th}>Aircraft</th><th style={th}>Variant</th><th style={th}>Status</th></tr></thead>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, fontWeight: 600 }}><th style={th}>Aircraft</th><th style={th}>Variant</th><th style={th}>Status</th></tr></thead>
                 <tbody>{resources.map(r => <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}><td style={{ ...td, fontFamily: MONO }}>{r.code}</td><td style={td}>{r.variant}</td><td style={td}><Badge color={C.green} bg={C.greenSoft}>ACTIVE</Badge></td></tr>)}</tbody>
               </table>
             )}
@@ -3602,7 +3621,7 @@ function KpiCard({ icon, color, label, value, sub }) {
   );
 }
 const card = { background: C.panel, border: `1px solid ${C.borderSoft}`, borderRadius: 14, padding: 16, boxShadow: "0 1px 2px rgba(30,42,61,0.04), 0 8px 20px rgba(30,42,61,0.03)" };
-const cardTitle = { fontSize: 11.5, color: C.muted, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 };
+const cardTitle = { fontSize: 11.5, color: C.muted, fontWeight: 600, marginBottom: 6 };
 
 // ---------- Aircraft (fleet management) ----------
 function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResource, onDeleteResource }) {
@@ -3617,7 +3636,7 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
       )}
       <div style={{ ...card, padding: 0, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, textTransform: "uppercase", background: C.panel2 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, background: C.panel2 }}>
             <th style={th}>Registration</th><th style={th}>Variant</th><th style={th}>Capacity</th><th style={th}>Flights on board</th><th style={th}></th>
           </tr></thead>
           <tbody>
