@@ -226,7 +226,8 @@ function Badge({ children, color, bg = "transparent" }) {
   return <span style={{ fontFamily: MONO, fontSize: 10.5, letterSpacing: 0.3, padding: "2px 7px", borderRadius: 12, color, background: bg, border: `1px solid ${color}55`, whiteSpace: "nowrap" }}>{children}</span>;
 }
 function Toast({ items, onDismiss }) {
-  return <div style={{ position: "fixed", bottom: 18, right: 18, display: "flex", flexDirection: "column", gap: 8, zIndex: 100 }}>
+  // bottom offset cleared to sit above the chat launcher button, which now shares this corner
+  return <div style={{ position: "fixed", bottom: 84, right: 18, display: "flex", flexDirection: "column", gap: 8, zIndex: 100 }}>
     {items.map(t => (
       <div key={t.id} style={{ background: C.panel, border: `1px solid ${t.tone === "warn" ? C.red : C.cyan}55`, borderLeft: `3px solid ${t.tone === "warn" ? C.red : C.cyan}`, color: C.text, fontFamily: SANS, fontSize: 13, padding: "10px 14px", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.14)", minWidth: 260, maxWidth: 380, animation: "slideIn 0.25s ease-out", display: "flex", alignItems: "flex-start", gap: 8 }}>
         <span style={{ flex: 1 }}>{t.msg}</span>
@@ -252,17 +253,23 @@ function ChatWidget({ open, setOpen, messages, busy, onSend, onClear }) {
   return (
     <>
       <button onClick={() => setOpen(v => !v)} title={open ? "Close assistant" : "Ask the assistant"}
-        style={{ position: "fixed", bottom: 20, left: 20, width: 52, height: 52, borderRadius: 999, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, border: "none", cursor: "pointer", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        style={{ position: "fixed", bottom: 20, right: 20, width: 52, height: 52, borderRadius: 999, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, border: "none", cursor: "pointer", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center" }}>
         {open ? <IconX /> : <IconChat />}
       </button>
       {open && (
-        <div className="chat-panel" style={{ position: "fixed", bottom: 82, left: 20, width: 340, height: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, boxShadow: "0 20px 50px rgba(58,54,47,0.2)", display: "flex", flexDirection: "column", zIndex: 95, overflow: "hidden" }}>
+        <div className="chat-panel" style={{ position: "fixed", bottom: 82, right: 20, width: 340, height: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, boxShadow: "0 20px 50px rgba(58,54,47,0.2)", display: "flex", flexDirection: "column", zIndex: 95, overflow: "hidden" }}>
           <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Ask about the schedule</div>
               <div style={{ fontSize: 10.5, color: C.faint }}>Answers come from real flight/allotment data — it can look things up, not change them.</div>
             </div>
-            {messages.length > 0 && <button onClick={onClear} title="Clear history" style={{ background: "none", border: "none", color: C.faint, cursor: "pointer", fontSize: 10.5, flexShrink: 0, padding: 0, textDecoration: "underline" }}>Clear</button>}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+              {messages.length > 0 && <button onClick={onClear} title="Clear history" style={{ background: "none", border: "none", color: C.faint, cursor: "pointer", fontSize: 10.5, padding: 0, textDecoration: "underline" }}>Clear</button>}
+              {/* Explicit close button — the panel can cover the launcher button entirely on
+                  mobile (full-height drawer), so closing can never depend on that button still
+                  being reachable underneath it. */}
+              <button onClick={() => setOpen(false)} title="Close" style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", padding: 0, display: "flex" }}><IconX size={16} /></button>
+            </div>
           </div>
           <div ref={scrollRef} style={{ flex: 1, overflow: "auto", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
             {messages.length === 0 && <div style={{ fontSize: 11.5, color: C.faint }}>Try: "How many seats does ANEX have left to SSH?" or "What's flying this week on UP-B3748?"</div>}
@@ -1228,35 +1235,38 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
                   return (
-                    <div key={f.id} draggable={perms.editFlight}
-                      onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
-                      onTouchStart={e => handleFlightTouchStart(e, f)}
-                      onTouchMove={handleFlightTouchMoveBeforeDrag}
-                      onTouchEnd={handleFlightTouchEndBeforeDrag}
-                      onClick={() => setSelectedFlightId(selected ? null : f.id)}
-                      title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
-                      style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
-                        background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
-                        border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
-                        borderRadius: 7, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 6px", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
-                      {isNarrow ? (
-                        <>
-                          <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
-                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
-                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
-                        </>
-                      ) : (
-                        <>
-                          <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                            <span style={{ fontFamily: MONO, fontSize: 10.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap" }}>{f.ref}</span>
-                            {depLabel && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{depLabel}</span>}
-                            <span style={{ fontSize: 9, color: refColor, opacity: 0.75 }}>→</span>
-                            {arrLabel && <span style={{ fontFamily: MONO, fontSize: 8.5, color: refColor, whiteSpace: "nowrap" }}>{arrLabel}</span>}
-                          </div>
-                          <div style={{ fontSize: 9, color: refColor, opacity: 0.8, whiteSpace: "nowrap", overflow: "hidden" }}>{f.origin}→{f.destination}{isFerry ? " · FERRY" : ""}</div>
-                        </>
+                    <React.Fragment key={f.id}>
+                      {!isNarrow && depLabel && (
+                        <span style={{ position: "absolute", left: leftPx - 5, top: TOP_PAD + lane * (BAR_H + BAR_GAP) + BAR_H / 2, transform: "translate(-100%, -50%)", fontFamily: MONO, fontSize: 9, color: C.muted, whiteSpace: "nowrap", pointerEvents: "none" }}>{depLabel}</span>
                       )}
-                    </div>
+                      <div draggable={perms.editFlight}
+                        onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
+                        onTouchStart={e => handleFlightTouchStart(e, f)}
+                        onTouchMove={handleFlightTouchMoveBeforeDrag}
+                        onTouchEnd={handleFlightTouchEndBeforeDrag}
+                        onClick={() => setSelectedFlightId(selected ? null : f.id)}
+                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
+                        style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
+                          background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
+                          border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
+                          borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : "0 10px", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                        {isNarrow ? (
+                          <>
+                            <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
+                            <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
+                            <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
+                          </>
+                        ) : (
+                          <div style={{ display: "flex", alignItems: "center", height: "100%", gap: 6 }}>
+                            <span style={{ fontFamily: MONO, fontSize: 10.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
+                            <span style={{ flex: 1, textAlign: "center", fontSize: 9.5, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin}-{f.destination}{isFerry ? " · FERRY" : ""}</span>
+                          </div>
+                        )}
+                      </div>
+                      {!isNarrow && arrLabel && (
+                        <span style={{ position: "absolute", left: leftPx + widthPx + 5, top: TOP_PAD + lane * (BAR_H + BAR_GAP) + BAR_H / 2, transform: "translateY(-50%)", fontFamily: MONO, fontSize: 9, color: C.muted, whiteSpace: "nowrap", pointerEvents: "none" }}>{arrLabel}</span>
+                      )}
+                    </React.Fragment>
                   );
                 })}
               </div>
