@@ -1186,26 +1186,33 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
 
           {resources.map(res => {
             const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
-            const byDay = new Map();
-            resFlights.forEach(({ f, c }) => { if (!byDay.has(c)) byDay.set(c, []); byDay.get(c).push(f); });
             const laneOf = new Map();
             let maxLanes = 1;
-            // Lane assignment gets a small extra buffer around each flight's real duration —
-            // not just for genuine time overlaps, but so two flights that are merely *close*
-            // (e.g. one lands at 10:00, the next departs 10:05) don't end up with their
-            // outside ETD/ETA labels visually colliding even though the bars themselves don't
-            // truly overlap. Narrow (Month/Period) mode skips this — those are already
-            // full-day blocks with no outside labels to protect.
-            byDay.forEach(dayFlights => {
-              const { laneOf: dayLaneOf, laneCount } = assignLanes(dayFlights, f => {
+            // Lane assignment runs once across this resource's WHOLE visible timeline, not
+            // per-day — a flight ending late on one day and the next one starting early the
+            // next day are adjacent in real time even though they sit in different day
+            // columns, and need to be compared against each other, not reset to a clean slate
+            // at midnight. Each flight's offsetFrac is shifted by its own day index (c) so the
+            // whole resource shares one continuous coordinate space.
+            // A small extra buffer is added around each flight's real duration too — not just
+            // for genuine time overlaps, but so two flights that are merely *close* (one lands
+            // 10:00, the next departs 10:05) don't end up with their outside ETD/ETA labels
+            // visually colliding even though the bars themselves don't truly overlap. Narrow
+            // (Month/Period) mode skips this — those are full-day blocks with no outside
+            // labels to protect.
+            if (resFlights.length > 0) {
+              const cById = new Map(resFlights.map(x => [x.f.id, x.c]));
+              const geomFn = f => {
+                const c = cById.get(f.id);
                 const g = effectiveGeometry(f, viewMode);
-                if (viewMode === "month" || viewMode === "period") return g;
+                if (viewMode === "month" || viewMode === "period") return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
                 const bufferFrac = 42 / COL;
-                return { offsetFrac: g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
-              });
-              dayLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
+                return { offsetFrac: c + g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
+              };
+              const { laneOf: allLaneOf, laneCount } = assignLanes(resFlights.map(x => x.f), geomFn);
+              allLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
               maxLanes = Math.max(maxLanes, laneCount);
-            });
+            }
             const isNarrow = viewMode === "month" || viewMode === "period";
             const BAR_H = isNarrow ? 44 : 30, BAR_GAP = 8, TOP_PAD = 12;
             const rowHeight = Math.max(58, TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
