@@ -1183,6 +1183,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay }
   const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const [filterText, setFilterText] = useState("");
+  const [density, setDensity] = useState("comfortable"); // "comfortable" | "compact"
   const boardRef = useRef(null);
 
   function matchesFilter(f) {
@@ -1335,6 +1336,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
+          <button onClick={() => setDensity(d => d === "compact" ? "comfortable" : "compact")} title="Row height for aircraft with several flights a day" style={navBtn}>
+            {density === "compact" ? "Compact" : "Comfortable"}
+          </button>
           <div style={{ position: "relative" }}>
             <button onClick={e => { e.stopPropagation(); setShowMoreMenu(v => !v); }} style={navBtn}>More ▾</button>
             {showMoreMenu && (
@@ -1389,43 +1393,69 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
             )}
           </div>
 
-          {resources.map(res => {
-            const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
-            const laneOf = new Map();
-            let maxLanes = 1;
-            // Lane assignment runs once across this resource's WHOLE visible timeline, not
-            // per-day — a flight ending late on one day and the next one starting early the
-            // next day are adjacent in real time even though they sit in different day
-            // columns, and need to be compared against each other, not reset to a clean slate
-            // at midnight. Each flight's offsetFrac is shifted by its own day index (c) so the
-            // whole resource shares one continuous coordinate space.
-            // A small extra buffer is added around each flight's real duration too — not just
-            // for genuine time overlaps, but so two flights that are merely *close* (one lands
-            // 10:00, the next departs 10:05) don't end up with their outside ETD/ETA labels
-            // visually colliding even though the bars themselves don't truly overlap. Narrow
-            // (Month/Period) mode skips this — those are full-day blocks with no outside
-            // labels to protect.
-            if (resFlights.length > 0) {
-              const cById = new Map(resFlights.map(x => [x.f.id, x.c]));
-              const geomFn = f => {
-                const c = cById.get(f.id);
-                const g = effectiveGeometry(f, viewMode);
-                if (viewMode === "month" || viewMode === "period") return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
-                const bufferFrac = 42 / COL;
-                return { offsetFrac: c + g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
-              };
-              const { laneOf: allLaneOf, laneCount } = assignLanes(resFlights.map(x => x.f), geomFn);
-              allLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
-              maxLanes = Math.max(maxLanes, laneCount);
-            }
-            const isNarrow = viewMode === "month" || viewMode === "period";
-            const BAR_H = isNarrow ? 44 : 30, BAR_GAP = 8, TOP_PAD = 12;
-            const rowHeight = Math.max(58, TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
+          {(() => {
+            const sortedResources = [...resources].sort((a, b) => (a.variant || "").localeCompare(b.variant || "") || a.code.localeCompare(b.code));
+            const filterActive = filterText.trim().length > 0;
+            const anyMatch = !filterActive || flights.some(matchesFilter);
+            let lastVariant = null;
             return (
-            <div key={res.id} style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", minHeight: rowHeight }}>
+              <>
+                {filterActive && !anyMatch && (
+                  <div style={{ padding: "28px 16px", textAlign: "center", color: C.muted, fontSize: 12.5 }}>
+                    Nothing matches "{filterText}". Try a flight number or a 3-4 letter airport code.
+                  </div>
+                )}
+                {sortedResources.map(res => {
+                  const showDivider = res.variant !== lastVariant;
+                  lastVariant = res.variant;
+                  const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
+                  const laneOf = new Map();
+                  let maxLanes = 1;
+                  // Lane assignment runs once across this resource's WHOLE visible timeline, not
+                  // per-day — a flight ending late on one day and the next one starting early the
+                  // next day are adjacent in real time even though they sit in different day
+                  // columns, and need to be compared against each other, not reset to a clean slate
+                  // at midnight. Each flight's offsetFrac is shifted by its own day index (c) so the
+                  // whole resource shares one continuous coordinate space.
+                  // A small extra buffer is added around each flight's real duration too — not just
+                  // for genuine time overlaps, but so two flights that are merely *close* (one lands
+                  // 10:00, the next departs 10:05) don't end up with their outside ETD/ETA labels
+                  // visually colliding even though the bars themselves don't truly overlap. Narrow
+                  // (Month/Period) mode skips this — those are full-day blocks with no outside
+                  // labels to protect.
+                  if (resFlights.length > 0) {
+                    const cById = new Map(resFlights.map(x => [x.f.id, x.c]));
+                    const geomFn = f => {
+                      const c = cById.get(f.id);
+                      const g = effectiveGeometry(f, viewMode);
+                      if (viewMode === "month" || viewMode === "period") return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
+                      const bufferFrac = 42 / COL;
+                      return { offsetFrac: c + g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
+                    };
+                    const { laneOf: allLaneOf, laneCount } = assignLanes(resFlights.map(x => x.f), geomFn);
+                    allLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
+                    maxLanes = Math.max(maxLanes, laneCount);
+                  }
+                  const isNarrow = viewMode === "month" || viewMode === "period";
+                  const compact = density === "compact";
+                  const BAR_H = isNarrow ? (compact ? 34 : 44) : (compact ? 22 : 30);
+                  const BAR_GAP = compact ? 4 : 8, TOP_PAD = compact ? 8 : 12;
+                  const rowHeight = Math.max(compact ? 40 : 58, TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
+                  return (
+                    <React.Fragment key={res.id}>
+                    {showDivider && (
+                      <div style={{ display: "flex", alignItems: "center", padding: "5px 12px", background: C.panel2, borderBottom: `1px solid ${C.borderSoft}`, borderTop: lastVariant !== null ? `1px solid ${C.border}` : "none" }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 600, color: C.muted }}>{res.variant || "Unclassified"}</span>
+                      </div>
+                    )}
+                    <div style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", minHeight: rowHeight }}>
+
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2 }}>
-                <div style={{ fontFamily: MONO, fontSize: 12.5, color: C.text }}>{res.code}</div>
-                <div style={{ fontSize: 10.5, color: C.muted }}>{res.variant}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontFamily: MONO, fontSize: 12.5, color: C.text, fontWeight: 600 }}>{res.code}</span>
+                  <span title="Seat capacity" style={{ fontFamily: MONO, fontSize: 9.5, color: C.muted, background: C.panel, border: `1px solid ${C.borderSoft}`, borderRadius: 5, padding: "1px 5px" }}>{res.capacity}Y</span>
+                </div>
+                <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{res.variant}</div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
               <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? "crosshair" : "default" }}
@@ -1572,8 +1602,12 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                 })}
               </div>
             </div>
-          );
-          })}
+            </React.Fragment>
+                  );
+                })}
+              </>
+            );
+          })()}
         </div>
       </div>
 
