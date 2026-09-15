@@ -1256,38 +1256,36 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   // real duration-based width is unaffected.
                   const boxFontScale = isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1);
                   return (
-                    <React.Fragment key={f.id}>
-                      {!isNarrow && depLabel && (
-                        <span style={{ position: "absolute", left: leftPx - 5, top: TOP_PAD + lane * (BAR_H + BAR_GAP) + BAR_H / 2, transform: "translate(-100%, -50%)", fontFamily: MONO, fontSize: 9, color: C.muted, whiteSpace: "nowrap", pointerEvents: "none" }}>{depLabel}</span>
+                    <div key={f.id} draggable={perms.editFlight}
+                      onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
+                      onTouchStart={e => handleFlightTouchStart(e, f)}
+                      onTouchMove={handleFlightTouchMoveBeforeDrag}
+                      onTouchEnd={handleFlightTouchEndBeforeDrag}
+                      onClick={() => setSelectedFlightId(selected ? null : f.id)}
+                      title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
+                      style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
+                        background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
+                        border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
+                        borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px" : "0 10px"), touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                      {isNarrow ? (
+                        <>
+                          <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
+                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
+                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
+                        </>
+                      ) : (
+                        // Single line, everything inside the box: FLIGHT# ORIGIN dep-arr DEST.
+                        // The ref never shrinks or truncates (flexShrink:0) — if the box is too
+                        // narrow for the rest, that part ellipsizes first, since the flight
+                        // number is the one thing you always need to be able to read.
+                        <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(5 * boxFontScale), overflow: "hidden" }}>
+                          <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
+                          <span style={{ fontFamily: MONO, fontSize: 9 * boxFontScale, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {f.origin} {depLabel || "--"}-{arrLabel || "--"} {f.destination}{isFerry ? " · FERRY" : ""}
+                          </span>
+                        </div>
                       )}
-                      <div draggable={perms.editFlight}
-                        onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
-                        onTouchStart={e => handleFlightTouchStart(e, f)}
-                        onTouchMove={handleFlightTouchMoveBeforeDrag}
-                        onTouchEnd={handleFlightTouchEndBeforeDrag}
-                        onClick={() => setSelectedFlightId(selected ? null : f.id)}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
-                        style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
-                          background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
-                          border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
-                          borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px" : "0 10px"), touchAction: perms.editFlight ? "pan-y" : "auto" }}>
-                        {isNarrow ? (
-                          <>
-                            <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
-                            <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
-                            <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
-                          </>
-                        ) : (
-                          <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(6 * boxFontScale) }}>
-                            <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
-                            <span style={{ flex: 1, textAlign: "center", fontSize: 9.5 * boxFontScale, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin}-{f.destination}{isFerry ? " · FERRY" : ""}</span>
-                          </div>
-                        )}
-                      </div>
-                      {!isNarrow && arrLabel && (
-                        <span style={{ position: "absolute", left: leftPx + widthPx + 5, top: TOP_PAD + lane * (BAR_H + BAR_GAP) + BAR_H / 2, transform: "translateY(-50%)", fontFamily: MONO, fontSize: 9, color: C.muted, whiteSpace: "nowrap", pointerEvents: "none" }}>{arrLabel}</span>
-                      )}
-                    </React.Fragment>
+                    </div>
                   );
                 })}
               </div>
