@@ -256,7 +256,7 @@ function ChatWidget({ open, setOpen, messages, busy, onSend, onClear }) {
         {open ? <IconX /> : <IconChat />}
       </button>
       {open && (
-        <div style={{ position: "fixed", bottom: 82, left: 20, width: 340, height: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, boxShadow: "0 20px 50px rgba(58,54,47,0.2)", display: "flex", flexDirection: "column", zIndex: 95, overflow: "hidden" }}>
+        <div className="chat-panel" style={{ position: "fixed", bottom: 82, left: 20, width: 340, height: 460, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, boxShadow: "0 20px 50px rgba(58,54,47,0.2)", display: "flex", flexDirection: "column", zIndex: 95, overflow: "hidden" }}>
           <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 600 }}>Ask about the schedule</div>
@@ -302,11 +302,22 @@ function IconSearch() { return <svg width="17" height="17" viewBox="0 0 24 24" f
 function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>; }
 function IconChat({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>; }
 function IconX({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>; }
+function IconMenu() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>; }
 
 export default function CharterOpsApp({ profile, onSignOut }) {
   const role = profile.role;
   const [tab, setTab] = useState("schedule");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Structural mobile detection — used to switch layout (sidebar becomes a drawer, top bar
+  // compresses, etc.), not just for CSS sizing. Checked on mount and on resize/rotate.
+  const [isMobile, setIsMobile] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
   const [showLocal, setShowLocal] = useState(false);
   const [viewMode, setViewMode] = useState("week"); // "day" | "week" | "month" | "period"
   const [periodDays, setPeriodDays] = useState(90); // custom span when viewMode === "period"
@@ -853,6 +864,14 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         .modal-pop { animation: popIn 0.16s cubic-bezier(.2,.8,.2,1); }
         .sidebar-nav-item:hover { background: ${SIDEBAR.bgActive} !important; }
         .leaflet-container { border-radius: 10px; }
+        @media (max-width: 640px) {
+          /* Every modal shares this class — full-screen on a phone instead of a centered
+             fixed-width box, since a 560-720px modal simply doesn't fit. !important is
+             required here because inline styles normally beat stylesheet rules; it's the
+             one legitimate case for it in this file. */
+          .modal-pop { width: 100vw !important; max-width: 100vw !important; height: 100vh !important; max-height: 100vh !important; border-radius: 0 !important; }
+          .chat-panel { width: 100vw !important; left: 0 !important; right: 0 !important; bottom: 0 !important; height: 70vh !important; border-radius: 16px 16px 0 0 !important; }
+        }
       `}</style>
 
       {!loaded ? (
@@ -861,45 +880,68 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         </div>
       ) : (
       <>
-      <aside style={{ width: sidebarCollapsed ? 64 : 232, flexShrink: 0, display: "flex", flexDirection: "column", background: SIDEBAR.bg, padding: sidebarCollapsed ? "18px 8px" : "18px 12px", position: "relative", transition: "width 0.15s ease, padding 0.15s ease" }}>
-        <button onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          style={{ position: "absolute", top: 20, right: -11, width: 22, height: 22, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, padding: 0, zIndex: 5 }}>
-          {sidebarCollapsed ? "›" : "‹"}
-        </button>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: sidebarCollapsed ? "0" : "0 8px", marginBottom: 26, justifyContent: sidebarCollapsed ? "center" : "flex-start" }}>
+      {isMobile && mobileSidebarOpen && (
+        <div onClick={() => setMobileSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 200 }} />
+      )}
+      <aside style={{
+        width: isMobile ? 240 : (sidebarCollapsed ? 64 : 232), flexShrink: 0, display: "flex", flexDirection: "column", background: SIDEBAR.bg,
+        padding: isMobile ? "18px 12px" : (sidebarCollapsed ? "18px 8px" : "18px 12px"),
+        position: isMobile ? "fixed" : "relative", top: isMobile ? 0 : undefined, left: isMobile ? 0 : undefined,
+        height: isMobile ? "100vh" : undefined, zIndex: isMobile ? 201 : undefined,
+        transform: isMobile ? (mobileSidebarOpen ? "translateX(0)" : "translateX(-100%)") : "none",
+        transition: "width 0.15s ease, padding 0.15s ease, transform 0.2s ease",
+      }}>
+        {!isMobile && (
+          <button onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            style={{ position: "absolute", top: 20, right: -11, width: 22, height: 22, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, padding: 0, zIndex: 5 }}>
+            {sidebarCollapsed ? "›" : "‹"}
+          </button>
+        )}
+        {isMobile && (
+          <button onClick={() => setMobileSidebarOpen(false)} title="Close menu"
+            style={{ position: "absolute", top: 16, right: 16, width: 28, height: 28, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
+            <IconX size={15} />
+          </button>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: (sidebarCollapsed && !isMobile) ? "0" : "0 8px", marginBottom: 26, justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start" }}>
           <span style={{ color: C.amber }}><IconPlaneLogo /></span>
-          {!sidebarCollapsed && <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text, whiteSpace: "nowrap" }}>CHARTER OPS</div>}
+          {!(sidebarCollapsed && !isMobile) && <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text, whiteSpace: "nowrap" }}>CHARTER OPS</div>}
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
           {NAV_ITEMS.map(([k, l, Icon]) => (
-            <button key={k} className="sidebar-nav-item" onClick={() => setTab(k)} title={sidebarCollapsed ? l : undefined}
-              style={{ display: "flex", alignItems: "center", gap: 10, padding: sidebarCollapsed ? "9px 0" : "9px 10px", justifyContent: sidebarCollapsed ? "center" : "flex-start", borderRadius: 8, border: "none",
+            <button key={k} className="sidebar-nav-item" onClick={() => { setTab(k); if (isMobile) setMobileSidebarOpen(false); }} title={(sidebarCollapsed && !isMobile) ? l : undefined}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: (sidebarCollapsed && !isMobile) ? "9px 0" : "9px 10px", justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", borderRadius: 8, border: "none",
                 background: tab === k ? SIDEBAR.bgActive : "transparent", color: tab === k ? SIDEBAR.text : SIDEBAR.muted,
                 fontSize: 13, fontWeight: tab === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%" }}>
-              <Icon /> {!sidebarCollapsed && l}
+              <Icon /> {!(sidebarCollapsed && !isMobile) && l}
             </button>
           ))}
         </nav>
         <div style={{ borderTop: `1px solid ${SIDEBAR.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: sidebarCollapsed ? "0" : "0 10px", justifyContent: sidebarCollapsed ? "center" : "flex-start", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
+          <div style={{ display: "flex", alignItems: "center", gap: 6, padding: (sidebarCollapsed && !isMobile) ? "0" : "0 10px", justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
             <span style={{ width: 7, height: 7, borderRadius: 99, background: live ? C.green : SIDEBAR.muted, display: "inline-block", animation: live ? "pulseDot 1.6s infinite" : "none", flexShrink: 0 }} />
-            {!sidebarCollapsed && (live ? "Synced" : "Offline")}
+            {!(sidebarCollapsed && !isMobile) && (live ? "Synced" : "Offline")}
           </div>
-          {!sidebarCollapsed && (
+          {!(sidebarCollapsed && !isMobile) && (
             <div style={{ padding: "0 10px", fontSize: 12, color: SIDEBAR.text, lineHeight: 1.4 }}>
               {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{ROLES[role]?.label}</span>
             </div>
           )}
-          <button onClick={onSignOut} title={sidebarCollapsed ? "Sign out" : undefined} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>{sidebarCollapsed ? "⏻" : "Sign out"}</button>
+          <button onClick={onSignOut} title={(sidebarCollapsed && !isMobile) ? "Sign out" : undefined} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>{(sidebarCollapsed && !isMobile) ? "⏻" : "Sign out"}</button>
         </div>
       </aside>
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderBottom: `1px solid ${C.borderSoft}`, background: C.panel, position: "relative" }}>
-        <div style={{ position: "relative", width: 320 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: isMobile ? "10px 12px" : "12px 20px", borderBottom: `1px solid ${C.borderSoft}`, background: C.panel, position: "relative", gap: 8 }}>
+        {isMobile && (
+          <button onClick={() => setMobileSidebarOpen(true)} title="Menu" style={{ ...miniBtn, padding: 8, flexShrink: 0 }}>
+            <IconMenu />
+          </button>
+        )}
+        <div style={{ position: "relative", flex: isMobile ? 1 : undefined, width: isMobile ? undefined : 320, minWidth: 0 }}>
           <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: C.faint }}><IconSearch /></span>
-          <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search flights, routes, operators…"
-            style={{ ...inputStyle, paddingLeft: 36, background: C.panel2, border: `1px solid ${C.borderSoft}` }} />
+          <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder={isMobile ? "Search…" : "Search flights, routes, operators…"}
+            style={{ ...inputStyle, paddingLeft: 36, background: C.panel2, border: `1px solid ${C.borderSoft}`, width: "100%" }} />
           {searchQuery.trim() && (
             <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, width: "100%", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.12)", zIndex: 50, maxHeight: 280, overflow: "auto" }}>
               {(() => {
@@ -925,14 +967,14 @@ export default function CharterOpsApp({ profile, onSignOut }) {
             </div>
           )}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 8 : 16, flexShrink: 0 }}>
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowNotifPanel(v => !v)} style={{ ...miniBtn, position: "relative", padding: 8, borderRadius: 999 }}>
               <IconBell />
               {notifications.length > 0 && <span style={{ position: "absolute", top: 2, right: 2, width: 7, height: 7, borderRadius: 99, background: C.red }} />}
             </button>
             {showNotifPanel && (
-              <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: 300, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.14)", zIndex: 50, maxHeight: 320, overflow: "auto" }}>
+              <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: "min(300px, 88vw)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.14)", zIndex: 50, maxHeight: 320, overflow: "auto" }}>
                 <div style={{ padding: "10px 14px", fontSize: 12, fontWeight: 600, borderBottom: `1px solid ${C.borderSoft}` }}>Notifications</div>
                 {notifications.length === 0 && <div style={{ padding: 16, fontSize: 12, color: C.faint }}>Nothing yet — actions across the app show up here.</div>}
                 {notifications.map(n => <NotificationRow key={n.id} n={n} />)}
@@ -940,11 +982,13 @@ export default function CharterOpsApp({ profile, onSignOut }) {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 999, background: C.amberSoft, color: C.amber, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700 }}>{(profile.name || "U")[0].toUpperCase()}</div>
-            <div style={{ lineHeight: 1.3 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>{profile.name}</div>
-              <div style={{ fontSize: 10.5, color: C.faint }}>{new Date().toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}</div>
-            </div>
+            <div style={{ width: 30, height: 30, borderRadius: 999, background: C.amberSoft, color: C.amber, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{(profile.name || "U")[0].toUpperCase()}</div>
+            {!isMobile && (
+              <div style={{ lineHeight: 1.3 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>{profile.name}</div>
+                <div style={{ fontSize: 10.5, color: C.faint }}>{new Date().toLocaleDateString(undefined, { weekday: "short", day: "2-digit", month: "short", year: "numeric" })}</div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1005,6 +1049,73 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   const TICK = COL / HOUR_TICKS.length;
   function colFor(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return Math.round((x.getTime() - viewStart.getTime()) / 86400000); }
 
+  // ---- touch drag-and-drop (mobile) ----
+  // HTML5 drag-and-drop (used below for desktop mouse) never fires from touch input at all —
+  // this is a separate implementation, not a "make it responsive" tweak. A long-press (350ms,
+  // without much finger movement) enters drag mode, the same way iOS/Android apps distinguish
+  // a scroll gesture from a drag gesture on the same surface. Once dragging, page/board
+  // scrolling is blocked via a native (non-passive) touchmove listener — React's synthetic
+  // touch handlers are passive by default and can't reliably call preventDefault().
+  const [touchDrag, setTouchDrag] = useState(null); // { flightId, ref, x, y } | null
+  const touchDragRef = useRef(null);
+  const longPressTimerRef = useRef(null);
+  const touchStartPosRef = useRef(null);
+  const dragActive = !!touchDrag;
+
+  function handleFlightTouchStart(e, f) {
+    if (!perms.editFlight) return;
+    const t = e.touches[0];
+    touchStartPosRef.current = { x: t.clientX, y: t.clientY };
+    longPressTimerRef.current = setTimeout(() => {
+      const drag = { flightId: f.id, ref: f.ref, x: t.clientX, y: t.clientY };
+      touchDragRef.current = drag;
+      setTouchDrag(drag);
+    }, 350);
+  }
+  function handleFlightTouchMoveBeforeDrag(e) {
+    if (touchDragRef.current || !touchStartPosRef.current || !longPressTimerRef.current) return;
+    const t = e.touches[0];
+    const dx = Math.abs(t.clientX - touchStartPosRef.current.x), dy = Math.abs(t.clientY - touchStartPosRef.current.y);
+    if (dx > 10 || dy > 10) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; } // real scroll, not a drag — let it through
+  }
+  function handleFlightTouchEndBeforeDrag() {
+    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
+  }
+
+  useEffect(() => {
+    if (!dragActive) return;
+    function onMove(e) {
+      e.preventDefault();
+      const t = e.touches[0];
+      const next = { ...touchDragRef.current, x: t.clientX, y: t.clientY };
+      touchDragRef.current = next;
+      setTouchDrag(next);
+    }
+    function onEnd() {
+      const drag = touchDragRef.current;
+      if (drag) {
+        const el = document.elementFromPoint(drag.x, drag.y);
+        const rowEl = el?.closest("[data-resource-id]");
+        if (rowEl) {
+          const resourceId = rowEl.getAttribute("data-resource-id");
+          const rect = rowEl.getBoundingClientRect();
+          const dayIndex = Math.floor((drag.x - rect.left) / COL);
+          onDropFlight(drag.flightId, resourceId, addDays(viewStart, dayIndex));
+        }
+      }
+      touchDragRef.current = null;
+      setTouchDrag(null);
+    }
+    document.addEventListener("touchmove", onMove, { passive: false });
+    document.addEventListener("touchend", onEnd);
+    document.addEventListener("touchcancel", onEnd);
+    return () => {
+      document.removeEventListener("touchmove", onMove);
+      document.removeEventListener("touchend", onEnd);
+      document.removeEventListener("touchcancel", onEnd);
+    };
+  }, [dragActive]);
+
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
@@ -1021,7 +1132,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
             </div>
           )}
         </div>
-        <div style={{ display: "flex", gap: 6 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
@@ -1088,7 +1199,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                 <div style={{ fontSize: 10.5, color: C.muted }}>{res.variant}</div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
-              <div style={{ position: "relative", display: "flex" }}
+              <div data-resource-id={res.id} style={{ position: "relative", display: "flex" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
                 onDrop={e => {
                   if (!perms.editFlight) return;
@@ -1115,15 +1226,19 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const refColor = f.color || (isFerry ? C.muted : s.text);
                   const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
+                  const isBeingTouchDragged = touchDrag?.flightId === f.id;
                   return (
                     <div key={f.id} draggable={perms.editFlight}
                       onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
+                      onTouchStart={e => handleFlightTouchStart(e, f)}
+                      onTouchMove={handleFlightTouchMoveBeforeDrag}
+                      onTouchEnd={handleFlightTouchEndBeforeDrag}
                       onClick={() => setSelectedFlightId(selected ? null : f.id)}
-                      title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign" : ""}`}
+                      title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
                       style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
-                        background: barBg,
+                        background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
                         border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
-                        borderRadius: 7, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 6px" }}>
+                        borderRadius: 7, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 6px", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
                       {isNarrow ? (
                         <>
                           <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
@@ -1156,6 +1271,11 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
         <LegendSwatch color={C.amber} label="Near full (≥92%)" />
         <LegendSwatch color={C.red} label="Oversold" />
       </div>
+      {touchDrag && (
+        <div style={{ position: "fixed", left: touchDrag.x + 14, top: touchDrag.y - 16, background: C.amber, color: ON_ACCENT, padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
+          Moving {touchDrag.ref} — release over a day to drop
+        </div>
+      )}
     </div>
   );
 }
@@ -1381,7 +1501,7 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
             <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>New flight</div>
             <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>Fill this in, generate the slot request first, then confirm to put it on the schedule.</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Flight number"><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
                 <FieldSm label="Aircraft">
                   <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
@@ -1389,20 +1509,20 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
                   </select>
                 </FieldSm>
               </div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Origin"><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Destination"><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
               </div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Departure (UTC)"><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Arrival (UTC)"><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
               </div>
               <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Slot request</div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Request for">
                   <select value={scrLeg} onChange={e => setScrLeg(e.target.value)} style={inputStyle}>
                     <option value="destination">Arrival @ {form.destination || "destination"}</option>
@@ -1448,7 +1568,7 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
   );
 }
 function FieldSm({ label, children }) {
-  return <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4 }}>
+  return <div style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
     <label style={{ fontSize: 10.5, color: C.muted, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</label>
     {children}
   </div>;
@@ -1862,7 +1982,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
           <>
             <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Define the weekly pattern once — every matching date previews here before anything is written.</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Origin"><input value={pattern.origin} onChange={e => setPattern({ ...pattern, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Destination"><input value={pattern.destination} onChange={e => setPattern({ ...pattern, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
               </div>
@@ -1883,14 +2003,14 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
                   ))}
                 </div>
               </FieldSm>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Start date"><input type="date" value={pattern.startDate} onChange={e => setPattern({ ...pattern, startDate: e.target.value })} style={inputStyle} /></FieldSm>
                 <FieldSm label="End date"><input type="date" value={pattern.endDate} onChange={e => setPattern({ ...pattern, endDate: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
               <FieldSm label="Capacity"><input type="number" value={pattern.capacity} onChange={e => setPattern({ ...pattern, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
 
               <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4, marginTop: 4 }}>Outbound leg — {pattern.origin}→{pattern.destination}</div>
-              <div style={{ display: "flex", gap: 10 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Flight number"><input value={pattern.outboundRef} onChange={e => setPattern({ ...pattern, outboundRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
                 <FieldSm label="Departure (UTC)"><input type="time" value={pattern.outboundDep} onChange={e => setPattern({ ...pattern, outboundDep: e.target.value })} style={inputStyle} /></FieldSm>
                 <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.outboundArr} onChange={e => setPattern({ ...pattern, outboundArr: e.target.value })} style={inputStyle} /></FieldSm>
@@ -1904,16 +2024,16 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
                 <>
                   <div style={{ fontSize: 11, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4 }}>Return leg</div>
                   <div style={{ fontSize: 10, color: C.faint, marginTop: -6 }}>Doesn't have to go back the way it came — e.g. CIT→VKO out, VKO→ALA back. Leave blank to default to the reverse of the outbound route.</div>
-                  <div style={{ display: "flex", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <FieldSm label="Origin"><input value={pattern.returnOrigin} onChange={e => setPattern({ ...pattern, returnOrigin: e.target.value.toUpperCase() })} placeholder={pattern.destination} style={inputStyle} /></FieldSm>
                     <FieldSm label="Destination"><input value={pattern.returnDestination} onChange={e => setPattern({ ...pattern, returnDestination: e.target.value.toUpperCase() })} placeholder={pattern.origin} style={inputStyle} /></FieldSm>
                   </div>
-                  <div style={{ display: "flex", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <FieldSm label="Flight number"><input value={pattern.returnRef} onChange={e => setPattern({ ...pattern, returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
                     <FieldSm label="Return after (days)"><input type="number" min={0} value={pattern.returnDayOffset} onChange={e => setPattern({ ...pattern, returnDayOffset: Math.max(0, +e.target.value) })} style={inputStyle} /></FieldSm>
                   </div>
                   <div style={{ fontSize: 10, color: C.faint, marginTop: -4 }}>0 = same day (typical out-and-back turnaround). Use 1+ for layovers — e.g. 1 means the aircraft returns the day after each outbound date.</div>
-                  <div style={{ display: "flex", gap: 10 }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                     <FieldSm label="Departure (UTC)"><input type="time" value={pattern.returnDep} onChange={e => setPattern({ ...pattern, returnDep: e.target.value })} style={inputStyle} /></FieldSm>
                     <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.returnArr} onChange={e => setPattern({ ...pattern, returnArr: e.target.value })} style={inputStyle} /></FieldSm>
                   </div>
@@ -2727,7 +2847,7 @@ function AddOperatorModal({ onClose, onCreate }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <FieldSm label="Name"><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={inputStyle} /></FieldSm>
           <FieldSm label="Country"><input value={form.country} onChange={e => setForm({ ...form, country: e.target.value })} style={inputStyle} /></FieldSm>
-          <div style={{ display: "flex", gap: 10 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <FieldSm label="Default rate / seat ($)"><input type="number" value={form.defaultRate} onChange={e => setForm({ ...form, defaultRate: +e.target.value })} style={inputStyle} /></FieldSm>
             <FieldSm label="Allotment type">
               <select value={form.allotmentType} onChange={e => setForm({ ...form, allotmentType: e.target.value })} style={inputStyle}>
