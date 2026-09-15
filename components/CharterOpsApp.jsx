@@ -787,11 +787,10 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   }
 
   async function insertSingleFlight(draft) {
+    // Conflicts are advisory only — the toast says so, but the flight is always added.
+    // Blocking the insert here would defeat the point of flagging it; ops staff can see the
+    // warning and decide, but shouldn't be locked out of scheduling a genuine second flight.
     const conflict = checkConflict(draft.resourceId, draft.start, null);
-    if (conflict && !draft.force) {
-      pushToast(`Conflict: ${resources.find(r=>r.id===draft.resourceId)?.code} already flies ${conflict.ref} that day — check "insert anyway" to override`, "warn");
-      return false;
-    }
     const ref = draft.ref || ("DV" + (4520 + flights.length + Math.floor(Math.random() * 50)));
     const { data, error } = await supabase.from("flights").insert({
       ref, resource_id: draft.resourceId, origin: draft.origin, destination: draft.destination,
@@ -802,7 +801,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     if (error) { pushToast(`Insert failed: ${error.message}`, "warn"); return false; }
     const newFlight = mapFlight(data);
     setFlightsRaw(fl => [...fl, newFlight]);
-    pushToast(`${ref} inserted onto the board${conflict ? " (conflict overridden)" : ""} — slot request drafts ready in its flight info`, conflict ? "warn" : "ok");
+    pushToast(`${ref} inserted onto the board${conflict ? ` — heads up: ${resources.find(r=>r.id===draft.resourceId)?.code} already flies ${conflict.ref} that day` : ""} — slot request drafts ready in its flight info`, conflict ? "warn" : "ok");
     pushNotification("Flight added", `${ref} · ${draft.origin}→${draft.destination}`, "flight");
     setShowAddFlight(false);
     setSelectedFlightId(newFlight.id); // opens the drawer straight away — slot-request buttons are right there
@@ -1191,8 +1190,19 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
             resFlights.forEach(({ f, c }) => { if (!byDay.has(c)) byDay.set(c, []); byDay.get(c).push(f); });
             const laneOf = new Map();
             let maxLanes = 1;
+            // Lane assignment gets a small extra buffer around each flight's real duration —
+            // not just for genuine time overlaps, but so two flights that are merely *close*
+            // (e.g. one lands at 10:00, the next departs 10:05) don't end up with their
+            // outside ETD/ETA labels visually colliding even though the bars themselves don't
+            // truly overlap. Narrow (Month/Period) mode skips this — those are already
+            // full-day blocks with no outside labels to protect.
             byDay.forEach(dayFlights => {
-              const { laneOf: dayLaneOf, laneCount } = assignLanes(dayFlights, f => effectiveGeometry(f, viewMode));
+              const { laneOf: dayLaneOf, laneCount } = assignLanes(dayFlights, f => {
+                const g = effectiveGeometry(f, viewMode);
+                if (viewMode === "month" || viewMode === "period") return g;
+                const bufferFrac = 42 / COL;
+                return { offsetFrac: g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
+              });
               dayLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
               maxLanes = Math.max(maxLanes, laneCount);
             });
@@ -1234,6 +1244,10 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
+                  // Short flights render as narrow pills — scale the inside text down rather
+                  // than letting it overflow or clip unreadably. Purely cosmetic; the box's
+                  // real duration-based width is unaffected.
+                  const boxFontScale = isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1);
                   return (
                     <React.Fragment key={f.id}>
                       {!isNarrow && depLabel && (
@@ -1249,7 +1263,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                         style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
                           background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
                           border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
-                          borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : "0 10px", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                          borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px" : "0 10px"), touchAction: perms.editFlight ? "pan-y" : "auto" }}>
                         {isNarrow ? (
                           <>
                             <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
@@ -1257,9 +1271,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                             <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
                           </>
                         ) : (
-                          <div style={{ display: "flex", alignItems: "center", height: "100%", gap: 6 }}>
-                            <span style={{ fontFamily: MONO, fontSize: 10.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
-                            <span style={{ flex: 1, textAlign: "center", fontSize: 9.5, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin}-{f.destination}{isFerry ? " · FERRY" : ""}</span>
+                          <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(6 * boxFontScale) }}>
+                            <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
+                            <span style={{ flex: 1, textAlign: "center", fontSize: 9.5 * boxFontScale, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin}-{f.destination}{isFerry ? " · FERRY" : ""}</span>
                           </div>
                         )}
                       </div>
@@ -1475,7 +1489,7 @@ function MiniStat({ label, value, color = C.text }) {
 
 // ---------- single flight insertion ----------
 function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
-  const [form, setForm] = useState({ ref: "", origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), depTime: "08:00", arrTime: "11:00", capacity: resources[0].capacity, force: false });
+  const [form, setForm] = useState({ ref: "", origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), depTime: "08:00", arrTime: "11:00", capacity: resources[0].capacity });
   const [scrLeg, setScrLeg] = useState("destination"); // which airport the slot request is for
   const [creatorRef, setCreatorRef] = useState("");
   const [step, setStep] = useState("form"); // "form" | "scr"
@@ -1544,15 +1558,12 @@ function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
             </div>
             {conflict && (
               <div style={{ background: C.redSoft, border: `1px solid ${C.red}55`, color: C.red, fontSize: 12, padding: "8px 10px", borderRadius: 10, marginTop: 12 }}>
-                {resources.find(r => r.id === form.resourceId)?.code} already flies {conflict.ref} on {form.date}.
-                <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: C.text }}>
-                  <input type="checkbox" checked={form.force} onChange={e => setForm({ ...form, force: e.target.checked })} /> Insert anyway (override)
-                </label>
+                Heads up: {resources.find(r => r.id === form.resourceId)?.code} already flies {conflict.ref} on {form.date}. You can still add this one — just flagging it.
               </div>
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
               <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={generateSCR} disabled={conflict && !form.force} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Generate SCR</button>
+              <button onClick={generateSCR} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Generate SCR</button>
             </div>
           </>
         )}
@@ -1664,7 +1675,7 @@ function parseRosterWorkbook(workbook, resources, flights) {
           parsedRows.push({
             row_number: rowCounter, date, flightNo, origin: origin.toUpperCase(), destination: destination.toUpperCase(),
             depTime, arrTime, resourceId: resource.id, resourceCode: resource.code, legType: "revenue",
-            status, detail, include: status === "ok", dow: date.getUTCDay(),
+            status, detail, include: true, dow: date.getUTCDay(), // conflicts are advisory, not blocking — only genuine parse errors would exclude a row, and none exist by this point
           });
         }
       }
@@ -1729,7 +1740,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
       return {
         row_number: i + 1, date, flightNo, origin, destination, depTime, arrTime,
         resourceId: resource?.id, resourceCode: resCode, legType, status, detail,
-        include: status === "ok", dow: date ? date.getUTCDay() : null,
+        include: status !== "error", dow: date ? date.getUTCDay() : null, // conflicts are advisory, not blocking — only genuinely bad data (missing/unrecognized fields) excludes a row
       };
     });
 
@@ -1955,7 +1966,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
     dates.forEach(d => {
       const outConflict = flights.find(f => f.resourceId === pattern.resourceId && iso(f.start) === iso(d));
       const outDetail = outConflict ? `${resCode} already flies ${outConflict.ref} that day` : "";
-      rows.push({ date: d, leg: "Outbound", ref: outRef, origin: pattern.origin, destination: pattern.destination, depTime: pattern.outboundDep, arrTime: pattern.outboundArr, status: outConflict ? "conflict" : "ok", detail: outDetail, include: !outConflict });
+      rows.push({ date: d, leg: "Outbound", ref: outRef, origin: pattern.origin, destination: pattern.destination, depTime: pattern.outboundDep, arrTime: pattern.outboundArr, status: outConflict ? "conflict" : "ok", detail: outDetail, include: true });
       if (pattern.includeReturn) {
         // The return leg gets its own date (outbound date + offset), its own route (not
         // assumed to be the reverse of the outbound — a rotation can be CIT-VKO-ALA, not just
@@ -1963,7 +1974,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
         const retDate = addDays(d, pattern.returnDayOffset || 0);
         const retConflict = flights.find(f => f.resourceId === pattern.resourceId && iso(f.start) === iso(retDate));
         const retDetail = retConflict ? `${resCode} already flies ${retConflict.ref} that day` : "";
-        rows.push({ date: retDate, leg: "Return", ref: retRef, origin: retOrigin, destination: retDestination, depTime: pattern.returnDep, arrTime: pattern.returnArr, status: retConflict ? "conflict" : "ok", detail: retDetail, include: !retConflict });
+        rows.push({ date: retDate, leg: "Return", ref: retRef, origin: retOrigin, destination: retDestination, depTime: pattern.returnDep, arrTime: pattern.returnArr, status: retConflict ? "conflict" : "ok", detail: retDetail, include: true });
       }
     });
     setPreview(rows);
