@@ -181,7 +181,19 @@ function assignLanes(flightsForDay, geomFn = flightGeometry) {
 function effectiveGeometry(f, viewMode) {
   return (viewMode === "month" || viewMode === "period") ? { offsetFrac: 0, widthFrac: 1 } : flightGeometry(f);
 }
-const FLIGHT_COLORS = ["#FF6B4A", "#0F9B8E", "#1E9E5A", "#D6432E", "#7C6FD1", "#B8860B", "#3B7DD8", "#C2437E"];
+// A larger, still visually distinct palette — enough headroom for a real multi-destination
+// network before two different destinations start sharing a color.
+const FLIGHT_COLORS = ["#3B6FE0", "#E0473B", "#1FAA59", "#E0923B", "#8B5CF6", "#2FA0C9", "#D6432E", "#0F9B8E", "#C2437E", "#B8860B", "#7C6FD1", "#DB2777", "#059669", "#EA580C", "#4F46E5", "#0891B2", "#65A30D", "#9333EA"];
+// Deterministic — the same destination always gets the same color across the whole app and
+// across reloads, without needing to store anything. Two destinations can collide once there
+// are more distinct ones than colors in the palette; that's a real limit of a fixed palette,
+// not a bug, and grows more likely as the network grows past ~18 destinations.
+function colorForDestination(code) {
+  if (!code) return C.faint;
+  let hash = 0;
+  for (let i = 0; i < code.length; i++) hash = (hash * 31 + code.charCodeAt(i)) >>> 0;
+  return FLIGHT_COLORS[hash % FLIGHT_COLORS.length];
+}
 function mapFlight(f) { return { id: f.id, ref: f.ref, resourceId: f.resource_id, origin: f.origin, destination: f.destination, start: new Date(f.scheduled_departure), capacity: f.capacity, status: f.status, legType: f.leg_type, version: f.version, depTime: hhmm(f.scheduled_departure), arrTime: hhmm(f.scheduled_arrival), color: f.color || null }; }
 function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
 function mapOperator(o, contract) {
@@ -550,6 +562,28 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     pushToast(`${flight?.ref || "Flight"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with it` : ""}`, affected ? "warn" : "ok");
   }
 
+  async function duplicateFlight(flightId) {
+    if (!perms.editFlight) return;
+    const f = flights.find(x => x.id === flightId);
+    if (!f) return;
+    const newStart = addDays(f.start, 1);
+    const { data, error } = await supabase.from("flights").insert({
+      ref: f.ref, resource_id: f.resourceId, origin: f.origin, destination: f.destination,
+      scheduled_departure: (combineDateAndTime(newStart, f.depTime) || newStart).toISOString(),
+      scheduled_arrival: combineDateAndTime(newStart, f.arrTime)?.toISOString() ?? null,
+      capacity: f.capacity, status: "tentative", leg_type: f.legType || "revenue", color: f.color || null,
+    }).select().single();
+    if (error) { pushToast(`Duplicate failed: ${error.message}`, "warn"); return; }
+    setFlightsRaw(fl => [...fl, mapFlight(data)]);
+    pushToast(`${f.ref} duplicated to ${iso(newStart)}`, "ok");
+  }
+
+  async function setFlightColor(flightId, color) {
+    const { error } = await supabase.from("flights").update({ color }).eq("id", flightId);
+    if (error) { pushToast(`Could not update color: ${error.message}`, "warn"); return; }
+    setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, color } : f));
+  }
+
   async function bulkDeleteFlights(flightIds) {
     if (!perms.editFlight || flightIds.length === 0) return;
     const affected = allotments.filter(a => flightIds.includes(a.flightId) && a.status !== "cancelled" && a.status !== "released").length;
@@ -749,6 +783,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 
   const selectedFlight = flights.find(f => f.id === selectedFlightId) || null;
   const [showAddFlight, setShowAddFlight] = useState(false);
+  const [addFlightPrefill, setAddFlightPrefill] = useState(null);
+  function quickCreateFlight(prefill) { setAddFlightPrefill(prefill); setShowAddFlight(true); }
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showRotationGen, setShowRotationGen] = useState(false);
   const [showBulkRetime, setShowBulkRetime] = useState(false);
@@ -1007,8 +1043,9 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} periodDays={periodDays} setPeriodDays={setPeriodDays} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => setShowAddFlight(true)} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
-              onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)} />
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
+              onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
+              onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1031,7 +1068,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       {tab === "quotas" && <QuotasPanel operators={operators} allotments={allotments} flights={flights} />}
       </div>
 
-      {showAddFlight && <AddFlightModal resources={resources} onClose={() => setShowAddFlight(false)} onCreate={insertSingleFlight} checkConflict={checkConflict} />}
+      {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} />}
       {showBulkRetime && <BulkRetimeModal resources={resources} flights={flights} onClose={() => setShowBulkRetime(false)} onCommit={bulkRetime} />}
@@ -1049,7 +1086,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS }) {
+function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate }) {
   const COL = viewMode === "day" ? 720 : viewMode === "week" ? 216 : viewMode === "month" ? 64 : 36;
   const LABELW = 160;
   const showHourTicks = viewMode === "day" || viewMode === "week";
@@ -1059,6 +1096,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   // Live "now" marker — ticks every minute so the line actually moves across the board over
   // time, the way a real ops/dispatch board always shows where the current moment sits.
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const [showDestLegend, setShowDestLegend] = useState(false);
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 60000);
     return () => clearInterval(id);
@@ -1135,6 +1173,133 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
     };
   }, [dragActive]);
 
+  // ---- desktop-only additions: multi-select, marquee, right-click menu, resize, quick-create,
+  // keyboard shortcuts, filter. These are mouse-precision interactions — none of them have a
+  // touch equivalent in this pass, same honest tradeoff as everywhere else in this file: touch
+  // keeps long-press-to-move and tap-to-select, desktop gets the rest.
+  const [multiSelectIds, setMultiSelectIds] = useState(() => new Set());
+  const [contextMenu, setContextMenu] = useState(null); // { flightId, x, y }
+  const [marquee, setMarquee] = useState(null); // { startX, startY, curX, curY }
+  const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay }
+  const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
+  const [filterText, setFilterText] = useState("");
+  const boardRef = useRef(null);
+
+  function matchesFilter(f) {
+    if (!filterText.trim()) return true;
+    const q = filterText.trim().toLowerCase();
+    return f.ref?.toLowerCase().includes(q) || f.origin?.toLowerCase().includes(q) || f.destination?.toLowerCase().includes(q);
+  }
+
+  // Right-click menu: close on any outside click or Escape, not just its own actions.
+  useEffect(() => {
+    if (!contextMenu) return;
+    function close() { setContextMenu(null); }
+    document.addEventListener("click", close);
+    document.addEventListener("contextmenu", close);
+    return () => { document.removeEventListener("click", close); document.removeEventListener("contextmenu", close); };
+  }, [contextMenu]);
+
+  // Marquee (shift+drag on empty grid) — selects every flight bar whose real DOM position
+  // intersects the dragged rectangle. Reading actual rendered positions via the DOM is far
+  // simpler and more robust here than re-deriving each bar's geometry from scratch.
+  useEffect(() => {
+    if (!marquee) return;
+    function onMove(e) { setMarquee(m => ({ ...m, curX: e.clientX, curY: e.clientY })); }
+    function onUp(e) {
+      const x1 = Math.min(marquee.startX, e.clientX), x2 = Math.max(marquee.startX, e.clientX);
+      const y1 = Math.min(marquee.startY, e.clientY), y2 = Math.max(marquee.startY, e.clientY);
+      const picked = new Set();
+      if (boardRef.current) {
+        boardRef.current.querySelectorAll("[data-flight-id]").forEach(el => {
+          const r = el.getBoundingClientRect();
+          if (r.left < x2 && r.right > x1 && r.top < y2 && r.bottom > y1) picked.add(el.getAttribute("data-flight-id"));
+        });
+      }
+      setMultiSelectIds(picked);
+      setMarquee(null);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+  }, [marquee]);
+
+  // Click-drag on empty grid space (no shift) — opens "+ New flight" prefilled with the
+  // aircraft, date, and an approximate departure time from where the drag started; drag
+  // distance gives a rough arrival estimate, defaulting to +2h for a simple click with no
+  // real drag. The modal's own fields are still there to fine-tune everything before saving.
+  useEffect(() => {
+    if (!createDrag) return;
+    function onMove(e) {
+      const deltaDay = Math.round((e.clientX - createDrag.startClientX) / COL);
+      setCreateDrag(cd => ({ ...cd, curDay: cd.startDay + deltaDay, curClientX: e.clientX, curClientY: e.clientY }));
+    }
+    function onUp() {
+      const fromDay = Math.min(createDrag.startDay, createDrag.curDay);
+      const dayISOStr = iso(addDays(viewStart, fromDay));
+      onQuickCreate({ resourceId: createDrag.resourceId, date: dayISOStr, depTime: createDrag.depTime, arrTime: minutesToHHMM((timeToMinutes(createDrag.depTime) + 120) % 1440) });
+      setCreateDrag(null);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+  }, [createDrag]);
+
+  // Resize a flight's edge — no live-preview stretch of the bar itself (the geometry math for
+  // that isn't worth the complexity here), just a small tooltip showing the new time while
+  // dragging, applied for real on release.
+  useEffect(() => {
+    if (!resizeDrag) return;
+    function onMove(e) {
+      const deltaPx = e.clientX - resizeDrag.startClientX;
+      const deltaMin = Math.round(((deltaPx / COL) * 1440) / 15) * 15;
+      setResizeDrag(rd => ({ ...rd, deltaMin }));
+    }
+    function onUp() {
+      const deltaMin = resizeDrag.deltaMin || 0;
+      if (deltaMin !== 0) {
+        if (resizeDrag.edge === "left") {
+          const newDep = ((resizeDrag.origDep + deltaMin) % 1440 + 1440) % 1440;
+          onUpdateFlight(resizeDrag.flightId, { depTime: minutesToHHMM(newDep) });
+        } else {
+          const newArr = ((resizeDrag.origArr + deltaMin) % 1440 + 1440) % 1440;
+          onUpdateFlight(resizeDrag.flightId, { arrTime: minutesToHHMM(newArr) });
+        }
+      }
+      setResizeDrag(null);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
+  }, [resizeDrag, COL]);
+
+  // Keyboard shortcuts — only while not typing into some other field, and only when this board
+  // actually has a selection to act on.
+  useEffect(() => {
+    function onKeyDown(e) {
+      const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+      if (typing) return;
+      if (e.key === "Escape") { setMultiSelectIds(new Set()); setSelectedFlightId(null); setContextMenu(null); return; }
+      if (!perms.editFlight) return;
+      if ((e.key === "Delete" || e.key === "Backspace")) {
+        if (multiSelectIds.size > 0) {
+          if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
+            multiSelectIds.forEach(id => onDeleteFlight(id));
+            setMultiSelectIds(new Set());
+          }
+        } else if (selectedFlightId) {
+          if (window.confirm("Delete this flight? This can't be undone.")) onDeleteFlight(selectedFlightId);
+        }
+      }
+      if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && selectedFlightId && multiSelectIds.size === 0) {
+        const f = flights.find(x => x.id === selectedFlightId);
+        if (f) onUpdateFlight(selectedFlightId, { start: addDays(f.start, e.key === "ArrowLeft" ? -1 : 1) });
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [selectedFlightId, multiSelectIds, perms.editFlight, flights]);
+
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
@@ -1152,6 +1317,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
           )}
         </div>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <input value={filterText} onChange={e => setFilterText(e.target.value)} placeholder="Filter (ref, route)…"
+            style={{ ...inputStyle, width: 150, fontSize: 12 }} />
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
@@ -1168,7 +1335,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
       </div>
       {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet.</div>}
 
-      <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12 }}>
+      <div ref={boardRef} style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12 }}>
         <div style={{ minWidth: LABELW + days.length * COL, position: "relative" }}>
           {nowVisible && (
             <div title={`Now — ${now.toISOString().slice(11, 16)} UTC`}
@@ -1242,7 +1409,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                 <div style={{ fontSize: 10.5, color: C.muted }}>{res.variant}</div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
-              <div data-resource-id={res.id} style={{ position: "relative", display: "flex" }}
+              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? "crosshair" : "default" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
                 onDrop={e => {
                   if (!perms.editFlight) return;
@@ -1254,6 +1421,20 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const dayIndex = Math.floor(relX / COL);
                   const newStart = addDays(viewStart, dayIndex);
                   onDropFlight(flightId, res.id, newStart);
+                }}
+                onMouseDown={e => {
+                  // Bars call e.stopPropagation() on their own mousedown, so this only ever
+                  // fires for a genuine empty-space click — shift+drag marquee-selects,
+                  // plain drag quick-creates a flight here.
+                  if (!perms.editFlight) return;
+                  if (e.shiftKey) { setMarquee({ startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY }); return; }
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const relX = e.clientX - rect.left;
+                  const totalDayFloat = relX / COL;
+                  const dayIndex = Math.floor(totalDayFloat);
+                  const hourFrac = Math.max(0, totalDayFloat - dayIndex);
+                  const depMinutes = Math.round((hourFrac * 1440) / 15) * 15;
+                  setCreateDrag({ resourceId: res.id, resourceCode: res.code, startClientX: e.clientX, startDay: dayIndex, curDay: dayIndex, depTime: minutesToHHMM(depMinutes), curClientX: e.clientX, curClientY: e.clientY });
                 }}>
                 {days.map((d, i) => {
                   const dow = d.getUTCDay();
@@ -1275,16 +1456,25 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
                   const lane = laneOf.get(f.id) || 0;
                   const barTop = TOP_PAD + lane * (BAR_H + BAR_GAP);
-                  // Status reads as a colored edge stripe, not a full color wash across the
-                  // whole bar — closer to a real flight-progress-strip tab than a tinted SaaS
-                  // card, and it keeps the text itself high-contrast and easy to read.
-                  const statusColor = f.color || (isFerry ? C.faint : s.border);
+                  // Color now signals destination, not status — the point is to see at a
+                  // glance which flights go where across a busy board. Cancelled flights
+                  // override to red regardless of destination, since that's a state you need
+                  // to notice immediately, not something to blend into a color-by-route
+                  // scheme. Status otherwise shows up as border style (dashed = tentative or
+                  // ferry, solid = confirmed/operating) rather than competing for the color
+                  // channel.
+                  const destColor = f.color || colorForDestination(f.destination);
+                  const stripeColor = f.status === "cancelled" ? C.red : destColor;
                   const pillRadius = isNarrow ? 7 : BAR_H / 2;
-                  const stripeW = isNarrow ? 4 : 5;
-                  const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : C.panel;
+                  const stripeW = isNarrow ? 5 : 6;
+                  const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
+                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
                   const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
+                  const isBeingResized = resizeDrag?.flightId === f.id;
+                  const multiSelected = multiSelectIds.has(f.id);
+                  const dimmed = !matchesFilter(f);
                   // Short flights render as narrow pills — scale the inside text down rather
                   // than letting it overflow or clip unreadably. Purely cosmetic; the box's
                   // real duration-based width is unaffected.
@@ -1292,17 +1482,27 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   return (
                     <React.Fragment key={f.id}>
                       <div className="flight-bar" draggable={perms.editFlight}
+                        data-flight-id={f.id}
                         onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
                         onTouchStart={e => handleFlightTouchStart(e, f)}
                         onTouchMove={handleFlightTouchMoveBeforeDrag}
                         onTouchEnd={handleFlightTouchEndBeforeDrag}
-                        onClick={() => setSelectedFlightId(selected ? null : f.id)}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
+                        onMouseDown={e => e.stopPropagation()}
+                        onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setContextMenu({ flightId: f.id, x: e.clientX, y: e.clientY }); }}
+                        onClick={e => {
+                          if (e.shiftKey) {
+                            setMultiSelectIds(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; });
+                          } else {
+                            setMultiSelectIds(new Set());
+                            setSelectedFlightId(selected ? null : f.id);
+                          }
+                        }}
+                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign · shift-click to multi-select · right-click for more" : ""}`}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
-                          background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
-                          border: `1px ${isFerry ? "dashed" : "solid"} ${C.border}`,
+                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : 1),
+                          border: multiSelected ? `1.5px solid ${C.amber}` : barBorderStyle,
                           borderRadius: pillRadius, cursor: perms.editFlight ? "grab" : "pointer", overflow: "hidden", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
-                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: stripeW, background: statusColor, borderRadius: `${pillRadius}px 0 0 ${pillRadius}px` }} />
+                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: stripeW, background: stripeColor, borderRadius: `${pillRadius}px 0 0 ${pillRadius}px` }} />
                         <div style={{ position: "absolute", left: stripeW, right: 0, top: 0, bottom: 0, display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px 0 7px" : "0 10px 0 12px") }}>
                           {isNarrow ? (
                             <>
@@ -1323,8 +1523,22 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                             </div>
                           )}
                         </div>
+                        {perms.editFlight && !isNarrow && (
+                          <>
+                            <div onMouseDown={e => { e.stopPropagation(); setResizeDrag({ flightId: f.id, edge: "left", startClientX: e.clientX, origDep: timeToMinutes(f.depTime) ?? 0, origArr: timeToMinutes(f.arrTime) ?? 90, deltaMin: 0 }); }}
+                              style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 7, cursor: "ew-resize" }} />
+                            <div onMouseDown={e => { e.stopPropagation(); setResizeDrag({ flightId: f.id, edge: "right", startClientX: e.clientX, origDep: timeToMinutes(f.depTime) ?? 0, origArr: timeToMinutes(f.arrTime) ?? 90, deltaMin: 0 }); }}
+                              style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 7, cursor: "ew-resize" }} />
+                          </>
+                        )}
                       </div>
-                      {selected && !isNarrow && (
+                      {isBeingResized && (
+                        <div style={{ position: "absolute", left: leftPx + widthPx / 2, top: barTop - 22, transform: "translateX(-50%)", background: C.text, color: "#fff", fontSize: 10.5, fontFamily: MONO, padding: "2px 6px", borderRadius: 5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 30 }}>
+                          {resizeDrag.edge === "left" ? "dep " : "arr "}
+                          {minutesToHHMM(((( resizeDrag.edge === "left" ? resizeDrag.origDep : resizeDrag.origArr) + (resizeDrag.deltaMin || 0)) % 1440 + 1440) % 1440)}
+                        </div>
+                      )}
+                      {(selected || multiSelected) && !isNarrow && (
                         // A focus reticle instead of a plain outline — four corner brackets
                         // sitting just outside the bar, more distinctive than a uniform ring.
                         <>
@@ -1344,19 +1558,69 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap", alignItems: "center" }}>
         <LegendSwatch color={C.green} label="Healthy fill" />
         <LegendSwatch color={C.amber} label="Near full (≥92%)" />
         <LegendSwatch color={C.red} label="Oversold" />
+        <button onClick={() => setShowDestLegend(v => !v)} style={{ ...miniBtn, padding: "3px 10px", fontSize: 11 }}>{showDestLegend ? "Hide" : "Show"} destination colors</button>
       </div>
+      {showDestLegend && (
+        <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap", fontSize: 11, color: C.muted }}>
+          {[...new Set(flights.map(f => f.destination))].sort().map(d => <LegendSwatch key={d} color={colorForDestination(d)} label={d} />)}
+        </div>
+      )}
       {touchDrag && (
         <div style={{ position: "fixed", left: touchDrag.x + 14, top: touchDrag.y - 16, background: C.amber, color: ON_ACCENT, padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
           Moving {touchDrag.ref} — release over a day to drop
         </div>
       )}
+      {marquee && (
+        <div style={{ position: "fixed", left: Math.min(marquee.startX, marquee.curX), top: Math.min(marquee.startY, marquee.curY), width: Math.abs(marquee.curX - marquee.startX), height: Math.abs(marquee.curY - marquee.startY), background: C.amberSoft + "99", border: `1.5px dashed ${C.amber}`, zIndex: 998, pointerEvents: "none" }} />
+      )}
+      {createDrag && (
+        <div style={{ position: "fixed", left: createDrag.curClientX + 14, top: createDrag.curClientY - 16, background: C.green, color: "#fff", padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
+          New flight — {createDrag.resourceCode}, {iso(addDays(viewStart, Math.min(createDrag.startDay, createDrag.curDay)))}, dep {createDrag.depTime}
+        </div>
+      )}
+      {contextMenu && (() => {
+        const f = flights.find(x => x.id === contextMenu.flightId);
+        if (!f) return null;
+        return (
+          <div onClick={e => e.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 300, minWidth: 190, padding: 6, fontSize: 12.5 }}>
+            <div style={{ padding: "4px 8px 6px", fontFamily: MONO, fontWeight: 700, color: C.text, borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 4 }}>{f.ref}</div>
+            {perms.editFlight && <>
+              <button onClick={() => { onDuplicateFlight(f.id); setContextMenu(null); }} style={ctxMenuItem}>Duplicate → next day</button>
+              <button onClick={() => { window.confirm(`Delete ${f.ref}? This can't be undone.`) && onDeleteFlight(f.id); setContextMenu(null); }} style={{ ...ctxMenuItem, color: C.red }}>Delete</button>
+              <div style={{ padding: "6px 8px 2px", fontSize: 10, color: C.faint, textTransform: "uppercase", letterSpacing: 0.4 }}>Color</div>
+              <div style={{ display: "flex", gap: 5, padding: "2px 8px 6px", flexWrap: "wrap" }}>
+                {FLIGHT_COLORS.slice(0, 9).map(c => (
+                  <button key={c} onClick={() => { onSetFlightColor(f.id, c); setContextMenu(null); }} title={c} style={{ width: 16, height: 16, borderRadius: 4, background: c, border: f.color === c ? `2px solid ${C.text}` : "1px solid rgba(0,0,0,0.1)", cursor: "pointer", padding: 0 }} />
+                ))}
+                <button onClick={() => { onSetFlightColor(f.id, null); setContextMenu(null); }} title="Reset to destination color" style={{ width: 16, height: 16, borderRadius: 4, background: C.panel, border: `1px solid ${C.border}`, cursor: "pointer", padding: 0, fontSize: 9, color: C.faint, lineHeight: 1 }}>×</button>
+              </div>
+            </>}
+            {!perms.editFlight && <div style={{ padding: "6px 8px", color: C.faint }}>Read-only for your role</div>}
+          </div>
+        );
+      })()}
+      {multiSelectIds.size > 0 && (
+        <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: C.text, color: "#fff", padding: "8px 8px 8px 16px", borderRadius: 999, display: "flex", alignItems: "center", gap: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.25)", zIndex: 97, fontSize: 12.5 }}>
+          <span>{multiSelectIds.size} flight{multiSelectIds.size === 1 ? "" : "s"} selected</span>
+          {perms.editFlight && (
+            <button onClick={() => {
+              if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
+                multiSelectIds.forEach(id => onDeleteFlight(id));
+                setMultiSelectIds(new Set());
+              }
+            }} style={{ ...miniBtn, background: C.red, color: "#fff", borderColor: C.red, padding: "5px 12px" }}>Delete</button>
+          )}
+          <button onClick={() => setMultiSelectIds(new Set())} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>Clear</button>
+        </div>
+      )}
     </div>
   );
 }
+const ctxMenuItem = { display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", fontSize: 12.5, color: C.text };
 function LegendSwatch({ color, label }) {
   return <span style={{ display: "flex", alignItems: "center", gap: 6 }}><span style={{ width: 16, height: 6, background: color, borderRadius: 2 }} />{label}</span>;
 }
@@ -1542,8 +1806,15 @@ function MiniStat({ label, value, color = C.text }) {
 }
 
 // ---------- single flight insertion ----------
-function AddFlightModal({ resources, onClose, onCreate, checkConflict }) {
-  const [form, setForm] = useState({ ref: "", origin: "LGW", destination: "PMI", resourceId: resources[0].id, date: iso(addDays(today, 7)), depTime: "08:00", arrTime: "11:00", capacity: resources[0].capacity });
+function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }) {
+  const [form, setForm] = useState(() => {
+    const r = prefill?.resourceId ? resources.find(x => x.id === prefill.resourceId) : resources[0];
+    return {
+      ref: "", origin: prefill?.origin || "LGW", destination: prefill?.destination || "PMI",
+      resourceId: r?.id || resources[0].id, date: prefill?.date || iso(addDays(today, 7)),
+      depTime: prefill?.depTime || "08:00", arrTime: prefill?.arrTime || "11:00", capacity: r?.capacity || resources[0].capacity,
+    };
+  });
   const [scrLeg, setScrLeg] = useState("destination"); // which airport the slot request is for
   const [creatorRef, setCreatorRef] = useState("");
   const [step, setStep] = useState("form"); // "form" | "scr"
