@@ -869,6 +869,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px ${C.amber}2A; border-color: ${C.amber}; }
         .modal-pop { animation: popIn 0.16s cubic-bezier(.2,.8,.2,1); }
         .sidebar-nav-item:hover { background: ${SIDEBAR.bgActive} !important; }
+        .flight-bar:hover { box-shadow: 0 3px 10px rgba(30,42,61,0.16); transform: translateY(-1px); }
         .leaflet-container { border-radius: 10px; }
         @media (max-width: 640px) {
           /* Every modal shares this class — full-screen on a phone instead of a centered
@@ -1055,6 +1056,18 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   const TICK = COL / HOUR_TICKS.length;
   function colFor(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return Math.round((x.getTime() - viewStart.getTime()) / 86400000); }
 
+  // Live "now" marker — ticks every minute so the line actually moves across the board over
+  // time, the way a real ops/dispatch board always shows where the current moment sits.
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 60000);
+    return () => clearInterval(id);
+  }, []);
+  const now = new Date(nowTick);
+  const nowCol = colFor(now);
+  const nowVisible = nowCol >= 0 && nowCol < days.length;
+  const nowX = LABELW + nowCol * COL + ((now.getUTCHours() * 60 + now.getUTCMinutes()) / 1440) * COL;
+
   // ---- touch drag-and-drop (mobile) ----
   // HTML5 drag-and-drop (used below for desktop mouse) never fires from touch input at all —
   // this is a separate implementation, not a "make it responsive" tweak. A long-press (350ms,
@@ -1156,7 +1169,13 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
       {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet.</div>}
 
       <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12 }}>
-        <div style={{ minWidth: LABELW + days.length * COL }}>
+        <div style={{ minWidth: LABELW + days.length * COL, position: "relative" }}>
+          {nowVisible && (
+            <div title={`Now — ${now.toISOString().slice(11, 16)} UTC`}
+              style={{ position: "absolute", left: nowX, top: 0, bottom: 0, width: 2, background: C.red, zIndex: 20, pointerEvents: "none" }}>
+              <div style={{ position: "absolute", top: -5, left: -4, width: 10, height: 10, borderRadius: 999, background: C.red, boxShadow: `0 0 0 3px ${C.redSoft}` }} />
+            </div>
+          )}
           <div style={{ display: "flex", background: C.panel2, borderBottom: `1px solid ${C.border}`, flexDirection: "column" }}>
             <div style={{ display: "flex" }}>
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>RESOURCE</div>
@@ -1236,7 +1255,17 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const newStart = addDays(viewStart, dayIndex);
                   onDropFlight(flightId, res.id, newStart);
                 }}>
-                {days.map((d, i) => <div key={i} style={{ width: COL, flexShrink: 0, borderLeft: `1px solid ${C.borderSoft}`, height: rowHeight, backgroundImage: `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)` }} />)}
+                {days.map((d, i) => {
+                  const dow = d.getUTCDay();
+                  const isWeekend = dow === 0 || dow === 6;
+                  const isToday = iso(d) === iso(new Date());
+                  return <div key={i} style={{
+                    width: COL, flexShrink: 0, height: rowHeight,
+                    borderLeft: `1.5px solid ${C.border}`, // heavier than the hour-tick lines within a day — real day boundaries should read as the dominant grid line
+                    backgroundColor: isToday ? C.amberSoft : (isWeekend ? C.panel2 : "transparent"),
+                    backgroundImage: `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)`,
+                  }} />;
+                })}
                 {resFlights.map(({ f, c }) => {
                   const isFerry = f.legType === "ferry";
                   const s = STATUS_STYLE[f.status];
@@ -1245,9 +1274,14 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const leftPx = c * COL + geom.offsetFrac * COL + 3;
                   const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
                   const lane = laneOf.get(f.id) || 0;
-                  const barBg = isFerry ? "repeating-linear-gradient(45deg, rgba(58,54,47,0.03), rgba(58,54,47,0.03) 5px, rgba(58,54,47,0.07) 5px, rgba(58,54,47,0.07) 10px)" : (f.color ? f.color + "70" : s.bg);
-                  const barBorder = selected ? C.amber : (f.color || (isFerry ? C.faint : s.border));
-                  const refColor = f.color || (isFerry ? C.muted : s.text);
+                  const barTop = TOP_PAD + lane * (BAR_H + BAR_GAP);
+                  // Status reads as a colored edge stripe, not a full color wash across the
+                  // whole bar — closer to a real flight-progress-strip tab than a tinted SaaS
+                  // card, and it keeps the text itself high-contrast and easy to read.
+                  const statusColor = f.color || (isFerry ? C.faint : s.border);
+                  const pillRadius = isNarrow ? 7 : BAR_H / 2;
+                  const stripeW = isNarrow ? 4 : 5;
+                  const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : C.panel;
                   const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
@@ -1256,36 +1290,51 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   // real duration-based width is unaffected.
                   const boxFontScale = isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1);
                   return (
-                    <div key={f.id} draggable={perms.editFlight}
-                      onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
-                      onTouchStart={e => handleFlightTouchStart(e, f)}
-                      onTouchMove={handleFlightTouchMoveBeforeDrag}
-                      onTouchEnd={handleFlightTouchEndBeforeDrag}
-                      onClick={() => setSelectedFlightId(selected ? null : f.id)}
-                      title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
-                      style={{ position: "absolute", left: leftPx, top: TOP_PAD + lane * (BAR_H + BAR_GAP), width: widthPx, height: BAR_H,
-                        background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
-                        border: `1.5px ${isFerry ? "dashed" : (s.dash ? "dashed" : "solid")} ${barBorder}`,
-                        borderRadius: isNarrow ? 7 : BAR_H / 2, cursor: perms.editFlight ? "grab" : "pointer", boxShadow: selected ? `0 0 0 2px ${C.amber}55` : "none", overflow: "hidden", display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px" : "0 10px"), touchAction: perms.editFlight ? "pan-y" : "auto" }}>
-                      {isNarrow ? (
-                        <>
-                          <div style={{ fontFamily: MONO, fontSize: 9.5, color: refColor, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
-                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
-                          <div style={{ fontFamily: MONO, fontSize: 8, color: refColor, opacity: 0.9, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
-                        </>
-                      ) : (
-                        // Single line, everything inside the box: FLIGHT# ORIGIN dep-arr DEST.
-                        // The ref never shrinks or truncates (flexShrink:0) — if the box is too
-                        // narrow for the rest, that part ellipsizes first, since the flight
-                        // number is the one thing you always need to be able to read.
-                        <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(5 * boxFontScale), overflow: "hidden" }}>
-                          <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: refColor, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
-                          <span style={{ fontFamily: MONO, fontSize: 9 * boxFontScale, color: refColor, opacity: 0.85, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {f.origin} {depLabel || "--"}-{arrLabel || "--"} {f.destination}{isFerry ? " · FERRY" : ""}
-                          </span>
+                    <React.Fragment key={f.id}>
+                      <div className="flight-bar" draggable={perms.editFlight}
+                        onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
+                        onTouchStart={e => handleFlightTouchStart(e, f)}
+                        onTouchMove={handleFlightTouchMoveBeforeDrag}
+                        onTouchEnd={handleFlightTouchEndBeforeDrag}
+                        onClick={() => setSelectedFlightId(selected ? null : f.id)}
+                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign (or press and hold on touch)" : ""}`}
+                        style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
+                          background: barBg, opacity: isBeingTouchDragged ? 0.35 : 1,
+                          border: `1px ${isFerry ? "dashed" : "solid"} ${C.border}`,
+                          borderRadius: pillRadius, cursor: perms.editFlight ? "grab" : "pointer", overflow: "hidden", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: stripeW, background: statusColor, borderRadius: `${pillRadius}px 0 0 ${pillRadius}px` }} />
+                        <div style={{ position: "absolute", left: stripeW, right: 0, top: 0, bottom: 0, display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px 0 7px" : "0 10px 0 12px") }}>
+                          {isNarrow ? (
+                            <>
+                              <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.text, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
+                              <div style={{ fontFamily: MONO, fontSize: 8, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
+                              <div style={{ fontFamily: MONO, fontSize: 8, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
+                            </>
+                          ) : (
+                            // Single line, everything inside the box: FLIGHT# ORIGIN dep-arr DEST.
+                            // The ref never shrinks or truncates (flexShrink:0) — if the box is too
+                            // narrow for the rest, that part ellipsizes first, since the flight
+                            // number is the one thing you always need to be able to read.
+                            <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(5 * boxFontScale), overflow: "hidden" }}>
+                              <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: C.text, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
+                              <span style={{ fontFamily: MONO, fontSize: 9 * boxFontScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {f.origin} {depLabel || "--"}-{arrLabel || "--"} {f.destination}{isFerry ? " · FERRY" : ""}
+                              </span>
+                            </div>
+                          )}
                         </div>
+                      </div>
+                      {selected && !isNarrow && (
+                        // A focus reticle instead of a plain outline — four corner brackets
+                        // sitting just outside the bar, more distinctive than a uniform ring.
+                        <>
+                          <div style={{ position: "absolute", left: leftPx - 3, top: barTop - 3, width: 9, height: 9, borderTop: `2px solid ${C.amber}`, borderLeft: `2px solid ${C.amber}`, pointerEvents: "none" }} />
+                          <div style={{ position: "absolute", left: leftPx + widthPx - 6, top: barTop - 3, width: 9, height: 9, borderTop: `2px solid ${C.amber}`, borderRight: `2px solid ${C.amber}`, pointerEvents: "none" }} />
+                          <div style={{ position: "absolute", left: leftPx - 3, top: barTop + BAR_H - 6, width: 9, height: 9, borderBottom: `2px solid ${C.amber}`, borderLeft: `2px solid ${C.amber}`, pointerEvents: "none" }} />
+                          <div style={{ position: "absolute", left: leftPx + widthPx - 6, top: barTop + BAR_H - 6, width: 9, height: 9, borderBottom: `2px solid ${C.amber}`, borderRight: `2px solid ${C.amber}`, pointerEvents: "none" }} />
+                        </>
                       )}
-                    </div>
+                    </React.Fragment>
                   );
                 })}
               </div>
