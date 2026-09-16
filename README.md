@@ -171,6 +171,18 @@ or putting the app behind Vercel's password/SSO protection.
   schema but never had a screen: add/remove date-range blocks per aircraft with an optional
   reason. The scheduling engine treats a grounded aircraft as ineligible for the whole span,
   inclusive of both dates.
+- **The Schedule board now runs on vis-timeline** (a free, MIT-licensed library) instead of
+  the earlier hand-rolled absolute-positioned grid. This was a deliberate rewrite, not a
+  patch — it replaces several custom systems that had recurring bugs (drag-and-drop, resize,
+  panning, the "now" line, the sticky aircraft column) with the library's native handling of
+  the same things. What's genuinely different from before: **click-drag on empty space now
+  pans and zooms natively** (mouse wheel/pinch zoom, not the old manual slider-driven zoom),
+  **multi-select works via ctrl/shift-click** (not drag-a-box — vis-timeline doesn't support
+  rubber-band marquee selection, so that's a real capability that didn't carry over), and the
+  size slider now controls row/font density only, since zoom is native. Right-click for
+  "+ New flight here" or a flight's own menu (duplicate/delete/color) still works the same way.
+  Maintenance blocks render as shaded background regions per aircraft. This is a large,
+  actively-tested-for-the-first-time change — expect to find rough edges and report them.
 - **Excel roster importer** — Bulk Import now has an "Upload Excel roster" mode alongside the
   existing CSV paste, parsing the actual per-aircraft weekly grid format (one sheet per tail,
   flight number and route string in adjacent cells under each weekday column) via the `xlsx`

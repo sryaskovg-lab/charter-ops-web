@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import "leaflet/dist/leaflet.css";
+import "vis-timeline/styles/vis-timeline-graph2d.css";
 import * as XLSX from "xlsx";
 
 // Leaflet touches `window`/`document` at import time, so it can only load client-side —
@@ -1124,7 +1125,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
-              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} />
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1167,118 +1168,28 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange }) {
-  // Live local value while dragging the slider — updates the board instantly; the parent only
-  // persists to the database once you release it, not on every intermediate tick.
-  const [liveScale, setLiveScale] = useState(ganttScale);
-  // Day mode is a fixed hour-tick zoom (the whole point of it), always pannable rather than
-  // paginated. Period mode's column width is driven continuously by the same size slider — all
-  // the way from "a whole year at a glance" to "a week with real detail" — since seeing more or
-  // less of a custom range at once is exactly what that slider is for there.
-  const PERIOD_COL_MIN = 20, PERIOD_COL_MAX = 180;
-  const sliderT = Math.min(1, Math.max(0, (liveScale - 0.7) / 0.7));
-  const COL = viewMode === "day" ? 720 : Math.round(PERIOD_COL_MIN + sliderT * (PERIOD_COL_MAX - PERIOD_COL_MIN));
-  const LABELW = 160;
-  const isNarrow = viewMode !== "day" && COL < 70;
-  const showHourTicks = viewMode === "day" || COL >= 160;
-  const TICK = COL / HOUR_TICKS.length;
-  function colFor(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return Math.round((x.getTime() - viewStart.getTime()) / 86400000); }
-
-  // Live "now" marker — ticks every minute so the line actually moves across the board over
-  // time, the way a real ops/dispatch board always shows where the current moment sits.
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  const [showDestLegend, setShowDestLegend] = useState(false);
-  useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 60000);
-    return () => clearInterval(id);
-  }, []);
-  const now = new Date(nowTick);
-  const nowCol = colFor(now);
-  const nowVisible = nowCol >= 0 && nowCol < days.length;
-  const nowX = LABELW + nowCol * COL + ((now.getUTCHours() * 60 + now.getUTCMinutes()) / 1440) * COL;
-
-  // ---- touch drag-and-drop (mobile) ----
-  // HTML5 drag-and-drop (used below for desktop mouse) never fires from touch input at all —
-  // this is a separate implementation, not a "make it responsive" tweak. A long-press (350ms,
-  // without much finger movement) enters drag mode, the same way iOS/Android apps distinguish
-  // a scroll gesture from a drag gesture on the same surface. Once dragging, page/board
-  // scrolling is blocked via a native (non-passive) touchmove listener — React's synthetic
-  // touch handlers are passive by default and can't reliably call preventDefault().
-  const [touchDrag, setTouchDrag] = useState(null); // { flightId, ref, x, y } | null
-  const touchDragRef = useRef(null);
-  const longPressTimerRef = useRef(null);
-  const touchStartPosRef = useRef(null);
-  const dragActive = !!touchDrag;
-
-  function handleFlightTouchStart(e, f) {
-    if (!perms.editFlight) return;
-    const t = e.touches[0];
-    touchStartPosRef.current = { x: t.clientX, y: t.clientY };
-    longPressTimerRef.current = setTimeout(() => {
-      const drag = { flightId: f.id, ref: f.ref, x: t.clientX, y: t.clientY };
-      touchDragRef.current = drag;
-      setTouchDrag(drag);
-    }, 350);
-  }
-  function handleFlightTouchMoveBeforeDrag(e) {
-    if (touchDragRef.current || !touchStartPosRef.current || !longPressTimerRef.current) return;
-    const t = e.touches[0];
-    const dx = Math.abs(t.clientX - touchStartPosRef.current.x), dy = Math.abs(t.clientY - touchStartPosRef.current.y);
-    if (dx > 10 || dy > 10) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; } // real scroll, not a drag — let it through
-  }
-  function handleFlightTouchEndBeforeDrag() {
-    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null; }
-  }
-
-  useEffect(() => {
-    if (!dragActive) return;
-    function onMove(e) {
-      e.preventDefault();
-      const t = e.touches[0];
-      const next = { ...touchDragRef.current, x: t.clientX, y: t.clientY };
-      touchDragRef.current = next;
-      setTouchDrag(next);
-    }
-    function onEnd() {
-      const drag = touchDragRef.current;
-      if (drag) {
-        const el = document.elementFromPoint(drag.x, drag.y);
-        const rowEl = el?.closest("[data-resource-id]");
-        if (rowEl) {
-          const resourceId = rowEl.getAttribute("data-resource-id");
-          const rect = rowEl.getBoundingClientRect();
-          const dayIndex = Math.floor((drag.x - rect.left) / COL);
-          onDropFlight(drag.flightId, resourceId, addDays(viewStart, dayIndex));
-        }
-      }
-      touchDragRef.current = null;
-      setTouchDrag(null);
-    }
-    document.addEventListener("touchmove", onMove, { passive: false });
-    document.addEventListener("touchend", onEnd);
-    document.addEventListener("touchcancel", onEnd);
-    return () => {
-      document.removeEventListener("touchmove", onMove);
-      document.removeEventListener("touchend", onEnd);
-      document.removeEventListener("touchcancel", onEnd);
-    };
-  }, [dragActive]);
-
-  // ---- desktop-only additions: multi-select, marquee, right-click menu, resize, quick-create,
-  // keyboard shortcuts, filter. These are mouse-precision interactions — none of them have a
-  // touch equivalent in this pass, same honest tradeoff as everywhere else in this file: touch
-  // keeps long-press-to-move and tap-to-select, desktop gets the rest.
+function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks }) {
+  // ---- vis-timeline powered board ----
+  // Replaces the hand-rolled absolute-positioned grid with a real timeline library. This gets
+  // several things natively that were previously custom, bug-prone code: dragging/resizing a
+  // flight, panning the board (click-drag on empty space), pinch/scroll zoom, the "now" line,
+  // multi-select via ctrl/shift-click, and the sticky aircraft column (the library's group
+  // labels are always a separate fixed panel by design, not something we position with CSS).
+  // What's NOT ported from the old implementation: rubber-band marquee select (drag a box to
+  // select several flights) — vis-timeline doesn't support that natively, only click-based
+  // multi-select. If that's missed, it's a real gap, not an oversight to paper over.
+  const containerRef = useRef(null);
+  const timelineRef = useRef(null);
+  const itemsDataRef = useRef(null);
+  const groupsDataRef = useRef(null);
+  const [visReady, setVisReady] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null); // { type: 'flight'|'create', ... }
   const [multiSelectIds, setMultiSelectIds] = useState(() => new Set());
-  const [contextMenu, setContextMenu] = useState(null); // { flightId, x, y }
-  const [marquee, setMarquee] = useState(null); // { startX, startY, curX, curY }
-  const [panDrag, setPanDrag] = useState(null); // { startClientX, startClientY, panStartScrollLeft, panStartScrollTop }
-  const panDragRef = useRef(null);
-  const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const [filterText, setFilterText] = useState("");
-  // Live local value while dragging the slider — updates the board instantly; the parent only
-  // persists to the database once you release it, not on every intermediate tick.
+  const [showDestLegend, setShowDestLegend] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [liveScale, setLiveScale] = useState(ganttScale);
   useEffect(() => { setLiveScale(ganttScale); }, [ganttScale]);
-  const boardRef = useRef(null);
 
   function matchesFilter(f) {
     if (!filterText.trim()) return true;
@@ -1286,7 +1197,128 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     return f.ref?.toLowerCase().includes(q) || f.origin?.toLowerCase().includes(q) || f.destination?.toLowerCase().includes(q);
   }
 
-  // Right-click menu: close on any outside click or Escape, not just its own actions.
+  // Always-current copies of props/state the imperative vis-timeline event handlers need —
+  // those handlers are attached once (see the setup effect below) and would otherwise close
+  // over the first render's stale values forever.
+  const latestRef = useRef({});
+  useEffect(() => {
+    latestRef.current = { flights, resources, onDropFlight, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, setSelectedFlightId, perms };
+  }, [flights, resources, onDropFlight, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, setSelectedFlightId, perms]);
+
+  // One-time setup — create the Timeline instance client-side only (it touches the DOM at
+  // import time, same reason Leaflet needs a client-only load elsewhere in this app).
+  useEffect(() => {
+    let cancelled = false;
+    let timeline = null;
+    (async () => {
+      const visMod = await import("vis-timeline/standalone"); // CSS is a static top-level import above — dynamically importing CSS at runtime isn't a reliably supported bundler pattern
+      if (cancelled || !containerRef.current) return;
+      const { Timeline, DataSet } = visMod;
+      const groupsData = new DataSet([]);
+      const itemsData = new DataSet([]);
+      groupsDataRef.current = groupsData;
+      itemsDataRef.current = itemsData;
+      timeline = new Timeline(containerRef.current, itemsData, groupsData, {
+        stack: true,
+        showCurrentTime: true,
+        selectable: true,
+        multiselect: true,
+        editable: { updateTime: true, updateGroup: true, remove: false, add: false },
+        margin: { item: { horizontal: 4, vertical: 6 }, axis: 12 },
+        orientation: "top",
+        zoomMin: 1000 * 60 * 30,
+        zoomMax: 1000 * 60 * 60 * 24 * 400,
+        moveable: true,
+        zoomable: true,
+        onMove: (item, callback) => {
+          const L = latestRef.current;
+          if (!L.perms.editFlight) return callback(null);
+          L.onDropFlight(item.id, item.group, new Date(item.start));
+          callback(null); // our own state update re-renders the item with the real (unchanged-time) values
+        },
+        onMoving: (item, callback) => callback(item),
+      });
+      timelineRef.current = timeline;
+
+      timeline.on("select", props => {
+        const L = latestRef.current;
+        if (props.items.length === 1) { setSelectedFlightId(props.items[0]); setMultiSelectIds(new Set()); }
+        else if (props.items.length > 1) { setSelectedFlightId(null); setMultiSelectIds(new Set(props.items)); }
+        else { setSelectedFlightId(null); setMultiSelectIds(new Set()); }
+      });
+
+      containerRef.current.addEventListener("contextmenu", e => {
+        const L = latestRef.current;
+        if (!L.perms.editFlight) return;
+        e.preventDefault();
+        const props = timeline.getEventProperties(e);
+        if (props.item) {
+          setContextMenu({ type: "flight", flightId: props.item, x: e.clientX, y: e.clientY });
+        } else if (props.group != null && props.time) {
+          const t = new Date(props.time);
+          const depMin = Math.round((t.getUTCHours() * 60 + t.getUTCMinutes()) / 15) * 15;
+          setContextMenu({ type: "create", resourceId: props.group, resourceCode: L.resources.find(r => r.id === props.group)?.code, date: iso(t), depTime: minutesToHHMM(depMin), x: e.clientX, y: e.clientY });
+        }
+      });
+
+      setVisReady(true);
+    })();
+    return () => { cancelled = true; if (timeline) timeline.destroy(); };
+  }, []); // created once — everything it needs is read via latestRef, not closure
+
+  // Aircraft rows — grouped by type, capacity badge inline, matching the old design.
+  useEffect(() => {
+    if (!groupsDataRef.current) return;
+    const sorted = [...resources].sort((a, b) => (a.variant || "").localeCompare(b.variant || "") || a.code.localeCompare(b.code));
+    groupsDataRef.current.clear();
+    groupsDataRef.current.add(sorted.map(r => ({
+      id: r.id,
+      content: `<div class="gantt-group"><span class="gg-code">${r.code}</span><span class="gg-cap">${r.capacity}Y</span><div class="gg-variant">${r.variant || ""}</div></div>`,
+    })));
+  }, [resources]);
+
+  // Flight bars + maintenance-block shading — destination color as a left stripe (cancelled
+  // flights override to red regardless of destination, same reasoning as before: that state
+  // needs to stand out, not blend into a color-by-route scheme).
+  useEffect(() => {
+    if (!itemsDataRef.current) return;
+    const flightItems = flights.map(f => {
+      const isFerry = f.legType === "ferry";
+      const destColor = f.color || colorForDestination(f.destination);
+      const stripeColor = f.status === "cancelled" ? "#E0473B" : destColor;
+      const dep = f.depTime ? combineDateAndTime(f.start, f.depTime) : f.start;
+      const arr = f.arrTime ? combineDateAndTime(f.start, f.arrTime) : new Date(dep.getTime() + 90 * 60000);
+      const dimmed = filterText.trim() && !matchesFilter(f);
+      return {
+        id: f.id, group: f.resourceId, start: dep, end: arr,
+        content: `<b>${f.ref}</b> ${f.origin}-${f.destination}${isFerry ? " · F" : ""}`,
+        className: isFerry ? "flight-item flight-ferry" : "flight-item",
+        style: `border-left: 4px solid ${stripeColor}; background: ${stripeColor}1c; opacity: ${dimmed ? 0.22 : 1};`,
+        editable: !!perms.editFlight,
+      };
+    });
+    const maintItems = (maintenanceBlocks || []).map(m => ({
+      id: "maint-" + m.id, group: m.resourceId, start: m.start, end: m.end, type: "background", className: "maintenance-block",
+    }));
+    itemsDataRef.current.clear();
+    itemsDataRef.current.add([...flightItems, ...maintItems]);
+  }, [flights, maintenanceBlocks, filterText, perms.editFlight]);
+
+  // Window sync — explicit nav (◀ / Today / ▶ / mode switch / From-To pickers) moves the
+  // visible window; free scroll/zoom via the mouse or touch in between is untouched, since
+  // this effect only re-fires when those specific inputs change, not on every render.
+  useEffect(() => {
+    if (!timelineRef.current) return;
+    timelineRef.current.setWindow(viewStart, addDays(viewStart, DAYS), { animation: false });
+  }, [viewStart, DAYS, viewMode]);
+
+  // The size slider now controls visual density (row height / font size) via a CSS variable —
+  // it no longer needs to drive zoom directly, since vis-timeline's own scroll/pinch zoom
+  // already does that natively, and better than a manual slider ever could.
+  useEffect(() => {
+    if (containerRef.current) containerRef.current.style.setProperty("--gantt-scale", liveScale);
+  }, [liveScale]);
+
   useEffect(() => {
     if (!contextMenu) return;
     function close() { setContextMenu(null); }
@@ -1295,92 +1327,13 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     return () => { document.removeEventListener("click", close); document.removeEventListener("contextmenu", close); };
   }, [contextMenu]);
 
-  // Marquee (shift+drag on empty grid) — selects every flight bar whose real DOM position
-  // intersects the dragged rectangle. Reading actual rendered positions via the DOM is far
-  // simpler and more robust here than re-deriving each bar's geometry from scratch.
-  useEffect(() => {
-    if (!marquee) return;
-    function onMove(e) { setMarquee(m => ({ ...m, curX: e.clientX, curY: e.clientY })); }
-    function onUp(e) {
-      const x1 = Math.min(marquee.startX, e.clientX), x2 = Math.max(marquee.startX, e.clientX);
-      const y1 = Math.min(marquee.startY, e.clientY), y2 = Math.max(marquee.startY, e.clientY);
-      const picked = new Set();
-      if (boardRef.current) {
-        boardRef.current.querySelectorAll("[data-flight-id]").forEach(el => {
-          const r = el.getBoundingClientRect();
-          if (r.left < x2 && r.right > x1 && r.top < y2 && r.bottom > y1) picked.add(el.getAttribute("data-flight-id"));
-        });
-      }
-      setMultiSelectIds(picked);
-      setMarquee(null);
-    }
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [marquee]);
-
-  // Click-drag on empty grid space (no shift) — opens "+ New flight" prefilled with the
-  // aircraft, date, and an approximate departure time from where the drag started; drag
-  // distance gives a rough arrival estimate, defaulting to +2h for a simple click with no
-  // real drag. The modal's own fields are still there to fine-tune everything before saving.
-  // Left-click-drag on empty grid space always pans — both axes, following the cursor exactly
-  // — and only for as long as the mouse button is actually held; it stops dead on mouseup, no
-  // lingering momentum or continued motion. It never creates a flight; creating one from empty
-  // space is a right-click action now (see the context menu below), not a side effect of a
-  // plain click.
-  const panDragActive = !!panDrag;
-  useEffect(() => {
-    if (!panDragActive) return;
-    function onMove(e) {
-      const pd = panDragRef.current;
-      if (boardRef.current) {
-        boardRef.current.scrollLeft = pd.panStartScrollLeft - (e.clientX - pd.startClientX);
-        boardRef.current.scrollTop = pd.panStartScrollTop - (e.clientY - pd.startClientY);
-      }
-    }
-    function onUp() { panDragRef.current = null; setPanDrag(null); }
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [panDragActive]);
-
-  // Resize a flight's edge — no live-preview stretch of the bar itself (the geometry math for
-  // that isn't worth the complexity here), just a small tooltip showing the new time while
-  // dragging, applied for real on release.
-  useEffect(() => {
-    if (!resizeDrag) return;
-    function onMove(e) {
-      const deltaPx = e.clientX - resizeDrag.startClientX;
-      const deltaMin = Math.round(((deltaPx / COL) * 1440) / 15) * 15;
-      setResizeDrag(rd => ({ ...rd, deltaMin }));
-    }
-    function onUp() {
-      const deltaMin = resizeDrag.deltaMin || 0;
-      if (deltaMin !== 0) {
-        if (resizeDrag.edge === "left") {
-          const newDep = ((resizeDrag.origDep + deltaMin) % 1440 + 1440) % 1440;
-          onUpdateFlight(resizeDrag.flightId, { depTime: minutesToHHMM(newDep) });
-        } else {
-          const newArr = ((resizeDrag.origArr + deltaMin) % 1440 + 1440) % 1440;
-          onUpdateFlight(resizeDrag.flightId, { arrTime: minutesToHHMM(newArr) });
-        }
-      }
-      setResizeDrag(null);
-    }
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [resizeDrag, COL]);
-
-  // Keyboard shortcuts — only while not typing into some other field, and only when this board
-  // actually has a selection to act on.
   useEffect(() => {
     function onKeyDown(e) {
       const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
       if (typing) return;
-      if (e.key === "Escape") { setMultiSelectIds(new Set()); setSelectedFlightId(null); setContextMenu(null); return; }
+      if (e.key === "Escape") { setSelectedFlightId(null); setMultiSelectIds(new Set()); setContextMenu(null); timelineRef.current?.setSelection([]); return; }
       if (!perms.editFlight) return;
-      if ((e.key === "Delete" || e.key === "Backspace")) {
+      if (e.key === "Delete" || e.key === "Backspace") {
         if (multiSelectIds.size > 0) {
           if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
             multiSelectIds.forEach(id => onDeleteFlight(id));
@@ -1399,13 +1352,6 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [selectedFlightId, multiSelectIds, perms.editFlight, flights]);
 
-  const [showMoreMenu, setShowMoreMenu] = useState(false);
-  useEffect(() => {
-    if (!showMoreMenu) return;
-    function close() { setShowMoreMenu(false); }
-    document.addEventListener("click", close);
-    return () => document.removeEventListener("click", close);
-  }, [showMoreMenu]);
 
   return (
     <div style={{ padding: 16 }}>
@@ -1435,7 +1381,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
-          <div title="Box size — saved to your account, same on next login" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
+          <div title="Box size / row density" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
             <span style={{ fontSize: 10 }}>A</span>
             <input type="range" min={0.7} max={1.4} step={0.05} value={liveScale}
               onChange={e => setLiveScale(+e.target.value)}
@@ -1462,266 +1408,11 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
           {perms.editFlight && <button onClick={onNewFlight} style={{ ...navBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New flight</button>}
         </div>
       </div>
-      {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet.</div>}
+      {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet. (Note: the timeline itself still renders using the browser's UTC-based Date handling — station-local display applies to details shown elsewhere, e.g. the flight drawer.)</div>}
 
-      <div ref={boardRef} style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 12 }}>
-        <div style={{ minWidth: LABELW + days.length * COL, position: "relative" }}>
-          {nowVisible && (
-            <div title={`Now — ${now.toISOString().slice(11, 16)} UTC`}
-              style={{ position: "absolute", left: nowX, top: 0, bottom: 0, width: 2, background: C.red, zIndex: 20, pointerEvents: "none" }}>
-              <div style={{ position: "absolute", top: -5, left: -4, width: 10, height: 10, borderRadius: 999, background: C.red, boxShadow: `0 0 0 3px ${C.redSoft}` }} />
-            </div>
-          )}
-          <div style={{ display: "flex", background: C.panel2, borderBottom: `1px solid ${C.border}`, flexDirection: "column" }}>
-            <div style={{ display: "flex" }}>
-              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO, position: "sticky", left: 0, zIndex: 30, background: C.panel }}>Aircraft</div>
-              {days.map((d, i) => {
-                const isToday = iso(d) === iso(new Date());
-                return <div key={i} onClick={() => { if (viewMode !== "day") onJumpToDate(d); }}
-                  title={viewMode !== "day" ? "Click to view this day alone" : undefined}
-                  style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 11, fontFamily: MONO, color: isToday ? C.amber : C.muted, borderLeft: `1px solid ${C.borderSoft}`, background: isToday ? C.amberSoft + "55" : "transparent", cursor: viewMode !== "day" ? "pointer" : "default" }}>
-                  <div>{d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })}</div>
-                  <div style={{ color: isToday ? C.amber : C.faint }}>{d.getUTCDate()}/{d.getUTCMonth() + 1}</div>
-                </div>;
-              })}
-            </div>
-            {showHourTicks && (
-              <div style={{ display: "flex", borderTop: `1px solid ${C.borderSoft}` }}>
-                <div style={{ width: LABELW, flexShrink: 0 }} />
-                {days.map((d, i) => (
-                  <div key={i} style={{ width: COL, flexShrink: 0, display: "flex", borderLeft: `1px solid ${C.borderSoft}` }}>
-                    {HOUR_TICKS.map(h => (
-                      <div key={h} style={{ width: TICK, flexShrink: 0, textAlign: "left", paddingLeft: 2, fontFamily: MONO, fontSize: 7.5, color: C.faint, borderLeft: h === 0 ? "none" : `1px solid ${C.borderSoft}` }}>{hourTickLabel(h)}</div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {(() => {
-            const sortedResources = [...resources].sort((a, b) => (a.variant || "").localeCompare(b.variant || "") || a.code.localeCompare(b.code));
-            const filterActive = filterText.trim().length > 0;
-            const anyMatch = !filterActive || flights.some(matchesFilter);
-            let lastVariant = null;
-            return (
-              <>
-                {filterActive && !anyMatch && (
-                  <div style={{ padding: "28px 16px", textAlign: "center", color: C.muted, fontSize: 12.5 }}>
-                    Nothing matches "{filterText}". Try a flight number or a 3-4 letter airport code.
-                  </div>
-                )}
-                {sortedResources.map(res => {
-                  const showDivider = res.variant !== lastVariant;
-                  lastVariant = res.variant;
-                  const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
-                  const laneOf = new Map();
-                  let maxLanes = 1;
-                  // Lane assignment runs once across this resource's WHOLE visible timeline, not
-                  // per-day — a flight ending late on one day and the next one starting early the
-                  // next day are adjacent in real time even though they sit in different day
-                  // columns, and need to be compared against each other, not reset to a clean slate
-                  // at midnight. Each flight's offsetFrac is shifted by its own day index (c) so the
-                  // whole resource shares one continuous coordinate space.
-                  // A small extra buffer is added around each flight's real duration too — not just
-                  // for genuine time overlaps, but so two flights that are merely *close* (one lands
-                  // 10:00, the next departs 10:05) don't end up with their outside ETD/ETA labels
-                  // visually colliding even though the bars themselves don't truly overlap. Narrow
-                  // (Month/Period) mode skips this — those are full-day blocks with no outside
-                  // labels to protect.
-                  if (resFlights.length > 0) {
-                    const cById = new Map(resFlights.map(x => [x.f.id, x.c]));
-                    const geomFn = f => {
-                      const c = cById.get(f.id);
-                      const g = effectiveGeometry(f, isNarrow);
-                      if (isNarrow) return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
-                      const bufferFrac = 42 / COL;
-                      return { offsetFrac: c + g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
-                    };
-                    const { laneOf: allLaneOf, laneCount } = assignLanes(resFlights.map(x => x.f), geomFn);
-                    allLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
-                    maxLanes = Math.max(maxLanes, laneCount);
-                  }
-                  const baseBarH = isNarrow ? 44 : 30;
-                  const BAR_H = Math.round(baseBarH * liveScale);
-                  const BAR_GAP = Math.round(8 * liveScale), TOP_PAD = Math.round(12 * liveScale);
-                  const rowHeight = Math.max(Math.round(58 * liveScale), TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
-                  return (
-                    <React.Fragment key={res.id}>
-                    {showDivider && (
-                      <div style={{ display: "flex", alignItems: "center", padding: "5px 12px", background: C.panel2, borderBottom: `1px solid ${C.borderSoft}`, borderTop: lastVariant !== null ? `1px solid ${C.border}` : "none" }}>
-                        <span style={{ fontSize: 10.5, fontWeight: 600, color: C.muted }}>{res.variant || "Unclassified"}</span>
-                      </div>
-                    )}
-                    <div style={{ display: "flex", borderBottom: `1px solid ${C.text}`, position: "relative", minHeight: rowHeight }}>
-
-              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2, position: "sticky", left: 0, zIndex: 30 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span style={{ fontFamily: MONO, fontSize: 12.5, color: C.text, fontWeight: 600 }}>{res.code}</span>
-                  <span title="Seat capacity" style={{ fontFamily: MONO, fontSize: 9.5, color: C.muted, background: C.panel, border: `1px solid ${C.borderSoft}`, borderRadius: 5, padding: "1px 5px" }}>{res.capacity}Y</span>
-                </div>
-                <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{res.variant}</div>
-                {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
-              </div>
-              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? (panDragActive ? "grabbing" : "grab") : "default" }}
-                onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
-                onDrop={e => {
-                  if (!perms.editFlight) return;
-                  e.preventDefault();
-                  const flightId = e.dataTransfer.getData("text/flight-id");
-                  if (!flightId) return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const relX = e.clientX - rect.left;
-                  const dayIndex = Math.floor(relX / COL);
-                  const newStart = addDays(viewStart, dayIndex);
-                  onDropFlight(flightId, res.id, newStart);
-                }}
-                onMouseDown={e => {
-                  // Bars call e.stopPropagation() on their own mousedown, so this only ever
-                  // fires for a genuine empty-space click. Shift+drag marquee-selects; a plain
-                  // drag always pans (never creates a flight) — for as long as, and only as
-                  // long as, the button stays down.
-                  if (!perms.editFlight) return;
-                  if (e.shiftKey) { setMarquee({ startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY }); return; }
-                  const initial = { startClientX: e.clientX, startClientY: e.clientY, panStartScrollLeft: boardRef.current ? boardRef.current.scrollLeft : 0, panStartScrollTop: boardRef.current ? boardRef.current.scrollTop : 0 };
-                  panDragRef.current = initial;
-                  setPanDrag(initial);
-                }}
-                onContextMenu={e => {
-                  if (!perms.editFlight) return;
-                  e.preventDefault();
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const relX = e.clientX - rect.left;
-                  const totalDayFloat = relX / COL;
-                  const dayIndex = Math.floor(totalDayFloat);
-                  const hourFrac = Math.max(0, totalDayFloat - dayIndex);
-                  const depMinutes = Math.round((hourFrac * 1440) / 15) * 15;
-                  setContextMenu({ type: "create", resourceId: res.id, resourceCode: res.code, date: iso(addDays(viewStart, dayIndex)), depTime: minutesToHHMM(depMinutes), x: e.clientX, y: e.clientY });
-                }}>
-                {days.map((d, i) => {
-                  const dow = d.getUTCDay();
-                  const isWeekend = dow === 0 || dow === 6;
-                  const isToday = iso(d) === iso(new Date());
-                  return <div key={i} style={{
-                    width: COL, flexShrink: 0, height: rowHeight,
-                    borderLeft: `1.5px solid ${C.border}`, // heavier than the hour-tick lines within a day — real day boundaries should read as the dominant grid line
-                    backgroundColor: isToday ? C.amberSoft : (isWeekend ? C.panel2 : "transparent"),
-                    backgroundImage: `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)`,
-                  }} />;
-                })}
-                {resFlights.map(({ f, c }) => {
-                  const isFerry = f.legType === "ferry";
-                  const s = STATUS_STYLE[f.status];
-                  const selected = f.id === selectedFlightId;
-                  const geom = effectiveGeometry(f, isNarrow);
-                  const leftPx = c * COL + geom.offsetFrac * COL + 3;
-                  const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
-                  const lane = laneOf.get(f.id) || 0;
-                  const barTop = TOP_PAD + lane * (BAR_H + BAR_GAP);
-                  // Color now signals destination, not status — the point is to see at a
-                  // glance which flights go where across a busy board. Cancelled flights
-                  // override to red regardless of destination, since that's a state you need
-                  // to notice immediately, not something to blend into a color-by-route
-                  // scheme. Status otherwise shows up as border style (dashed = tentative or
-                  // ferry, solid = confirmed/operating) rather than competing for the color
-                  // channel.
-                  const destColor = f.color || colorForDestination(f.destination);
-                  const stripeColor = f.status === "cancelled" ? C.red : destColor;
-                  const pillRadius = isNarrow ? 7 : BAR_H / 2;
-                  const stripeW = isNarrow ? 5 : 6;
-                  const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
-                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
-                  const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
-                  const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
-                  const isBeingTouchDragged = touchDrag?.flightId === f.id;
-                  const isBeingResized = resizeDrag?.flightId === f.id;
-                  const multiSelected = multiSelectIds.has(f.id);
-                  const dimmed = !matchesFilter(f);
-                  // Short flights render as narrow pills — scale the inside text down rather
-                  // than letting it overflow or clip unreadably. Purely cosmetic; the box's
-                  // real duration-based width is unaffected.
-                  const boxFontScale = (isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1)) * liveScale;
-                  return (
-                    <React.Fragment key={f.id}>
-                      <div className="flight-bar" draggable={perms.editFlight}
-                        data-flight-id={f.id}
-                        onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
-                        onTouchStart={e => handleFlightTouchStart(e, f)}
-                        onTouchMove={handleFlightTouchMoveBeforeDrag}
-                        onTouchEnd={handleFlightTouchEndBeforeDrag}
-                        onMouseDown={e => e.stopPropagation()}
-                        onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setContextMenu({ type: "flight", flightId: f.id, x: e.clientX, y: e.clientY }); }}
-                        onClick={e => {
-                          if (e.shiftKey) {
-                            setMultiSelectIds(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; });
-                          } else {
-                            setMultiSelectIds(new Set());
-                            setSelectedFlightId(selected ? null : f.id);
-                          }
-                        }}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to reassign · shift-click to multi-select · right-click for more" : ""}`}
-                        style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
-                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : 1),
-                          border: multiSelected ? `1.5px solid ${C.amber}` : barBorderStyle,
-                          borderRadius: pillRadius, cursor: perms.editFlight ? "grab" : "pointer", overflow: "hidden", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
-                        <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: stripeW, background: stripeColor, borderRadius: `${pillRadius}px 0 0 ${pillRadius}px` }} />
-                        <div style={{ position: "absolute", left: stripeW, right: 0, top: 0, bottom: 0, display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px 0 7px" : "0 10px 0 12px") }}>
-                          {isNarrow ? (
-                            <>
-                              <div style={{ fontFamily: MONO, fontSize: 9.5 * liveScale, color: C.text, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
-                              <div style={{ fontFamily: MONO, fontSize: 8 * liveScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
-                              <div style={{ fontFamily: MONO, fontSize: 8 * liveScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
-                            </>
-                          ) : (
-                            // Single line, everything inside the box: FLIGHT# ORIGIN dep-arr DEST.
-                            // The ref never shrinks or truncates (flexShrink:0) — if the box is too
-                            // narrow for the rest, that part ellipsizes first, since the flight
-                            // number is the one thing you always need to be able to read.
-                            <div style={{ display: "flex", alignItems: "center", height: "100%", gap: Math.round(5 * boxFontScale), overflow: "hidden" }}>
-                              <span style={{ fontFamily: MONO, fontSize: 10.5 * boxFontScale, color: C.text, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0 }}>{f.ref}</span>
-                              <span style={{ fontFamily: MONO, fontSize: 9 * boxFontScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                {f.origin} {depLabel || "--"}-{arrLabel || "--"} {f.destination}{isFerry ? " · FERRY" : ""}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                        {perms.editFlight && !isNarrow && (
-                          <>
-                            <div onMouseDown={e => { e.stopPropagation(); setResizeDrag({ flightId: f.id, edge: "left", startClientX: e.clientX, origDep: timeToMinutes(f.depTime) ?? 0, origArr: timeToMinutes(f.arrTime) ?? 90, deltaMin: 0 }); }}
-                              style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: 7, cursor: "ew-resize" }} />
-                            <div onMouseDown={e => { e.stopPropagation(); setResizeDrag({ flightId: f.id, edge: "right", startClientX: e.clientX, origDep: timeToMinutes(f.depTime) ?? 0, origArr: timeToMinutes(f.arrTime) ?? 90, deltaMin: 0 }); }}
-                              style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 7, cursor: "ew-resize" }} />
-                          </>
-                        )}
-                      </div>
-                      {isBeingResized && (
-                        <div style={{ position: "absolute", left: leftPx + widthPx / 2, top: barTop - 22, transform: "translateX(-50%)", background: C.text, color: "#fff", fontSize: 10.5, fontFamily: MONO, padding: "2px 6px", borderRadius: 5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 30 }}>
-                          {resizeDrag.edge === "left" ? "dep " : "arr "}
-                          {minutesToHHMM(((( resizeDrag.edge === "left" ? resizeDrag.origDep : resizeDrag.origArr) + (resizeDrag.deltaMin || 0)) % 1440 + 1440) % 1440)}
-                        </div>
-                      )}
-                      {(selected || multiSelected) && !isNarrow && (
-                        // A focus reticle instead of a plain outline — four corner brackets
-                        // sitting just outside the bar, more distinctive than a uniform ring.
-                        <>
-                          <div style={{ position: "absolute", left: leftPx - 3, top: barTop - 3, width: 9, height: 9, borderTop: `2px solid ${C.amber}`, borderLeft: `2px solid ${C.amber}`, pointerEvents: "none" }} />
-                          <div style={{ position: "absolute", left: leftPx + widthPx - 6, top: barTop - 3, width: 9, height: 9, borderTop: `2px solid ${C.amber}`, borderRight: `2px solid ${C.amber}`, pointerEvents: "none" }} />
-                          <div style={{ position: "absolute", left: leftPx - 3, top: barTop + BAR_H - 6, width: 9, height: 9, borderBottom: `2px solid ${C.amber}`, borderLeft: `2px solid ${C.amber}`, pointerEvents: "none" }} />
-                          <div style={{ position: "absolute", left: leftPx + widthPx - 6, top: barTop + BAR_H - 6, width: 9, height: 9, borderBottom: `2px solid ${C.amber}`, borderRight: `2px solid ${C.amber}`, pointerEvents: "none" }} />
-                        </>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </div>
-            </div>
-            </React.Fragment>
-                  );
-                })}
-              </>
-            );
-          })()}
-        </div>
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", position: "relative" }}>
+        <div ref={containerRef} style={{ minHeight: 420 }} />
+        {!visReady && <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", color: C.faint, fontSize: 12.5, background: C.panel }}>Loading schedule…</div>}
       </div>
 
       <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap", alignItems: "center" }}>
@@ -1735,14 +1426,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
           {[...new Set(flights.map(f => f.destination))].sort().map(d => <LegendSwatch key={d} color={colorForDestination(d)} label={d} />)}
         </div>
       )}
-      {touchDrag && (
-        <div style={{ position: "fixed", left: touchDrag.x + 14, top: touchDrag.y - 16, background: C.amber, color: ON_ACCENT, padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
-          Moving {touchDrag.ref} — release over a day to drop
-        </div>
-      )}
-      {marquee && (
-        <div style={{ position: "fixed", left: Math.min(marquee.startX, marquee.curX), top: Math.min(marquee.startY, marquee.curY), width: Math.abs(marquee.curX - marquee.startX), height: Math.abs(marquee.curY - marquee.startY), background: C.amberSoft + "99", border: `1.5px dashed ${C.amber}`, zIndex: 998, pointerEvents: "none" }} />
-      )}
+
       {contextMenu && contextMenu.type === "create" && (
         <div onClick={e => e.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 300, minWidth: 200, padding: 6, fontSize: 12.5 }}>
           <div style={{ padding: "4px 8px 6px", fontFamily: MONO, fontSize: 11, color: C.muted, borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 4 }}>{contextMenu.resourceCode} · {contextMenu.date} · {contextMenu.depTime}</div>
@@ -1781,12 +1465,33 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
               if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
                 multiSelectIds.forEach(id => onDeleteFlight(id));
                 setMultiSelectIds(new Set());
+                timelineRef.current?.setSelection([]);
               }
             }} style={{ ...miniBtn, background: C.red, color: "#fff", borderColor: C.red, padding: "5px 12px" }}>Delete</button>
           )}
-          <button onClick={() => setMultiSelectIds(new Set())} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>Clear</button>
+          <button onClick={() => { setMultiSelectIds(new Set()); timelineRef.current?.setSelection([]); }} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>Clear</button>
         </div>
       )}
+
+      <style>{`
+        .vis-timeline { border: none !important; font-family: ${SANS}; }
+        .vis-panel.vis-center, .vis-panel.vis-left, .vis-panel.vis-top, .vis-panel.vis-bottom { border-color: ${C.borderSoft} !important; }
+        .vis-labelset .vis-label { border-color: ${C.borderSoft} !important; background: ${C.panel2}; }
+        .gantt-group { padding: calc(6px * var(--gantt-scale, 1)) 10px; font-size: calc(12px * var(--gantt-scale, 1)); }
+        .gg-code { font-family: ${MONO}; font-weight: 600; color: ${C.text}; }
+        .gg-cap { font-family: ${MONO}; font-size: 9.5px; color: ${C.muted}; background: ${C.panel}; border: 1px solid ${C.borderSoft}; border-radius: 5px; padding: 1px 5px; margin-left: 6px; }
+        .gg-variant { font-size: 10.5px; color: ${C.muted}; margin-top: 2px; }
+        .vis-item.flight-item { border-radius: 7px; background: ${C.panel}; color: ${C.text}; font-size: calc(11px * var(--gantt-scale, 1)); padding: calc(3px * var(--gantt-scale, 1)) 6px; font-family: ${MONO}; }
+        .vis-item.flight-item.vis-selected { box-shadow: 0 0 0 2px ${C.amber}; }
+        .vis-item.flight-ferry { background-image: repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px); border-style: dashed !important; }
+        .vis-item .vis-item-content { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .maintenance-block { background: repeating-linear-gradient(45deg, rgba(224,71,59,0.05), rgba(224,71,59,0.05) 6px, rgba(224,71,59,0.12) 6px, rgba(224,71,59,0.12) 12px) !important; }
+        .vis-time-axis .vis-text { color: ${C.muted}; font-size: 11px; }
+        .vis-time-axis .vis-grid.vis-minor { border-color: ${C.borderSoft} !important; }
+        .vis-time-axis .vis-grid.vis-major { border-color: ${C.text} !important; opacity: 0.15; }
+        .vis-current-time { background-color: ${C.red} !important; width: 2px !important; }
+        .vis-today { background: ${C.amberSoft}; }
+      `}</style>
     </div>
   );
 }
