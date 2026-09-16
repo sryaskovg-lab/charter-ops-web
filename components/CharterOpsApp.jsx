@@ -137,6 +137,7 @@ const ROLES = {
 // only controls which buttons render, matching the design doc's principle that the client-side
 // role is never trusted for writes.
 function mapResource(r) { return { id: r.id, code: r.code, variant: r.variant, base: r.base_station, capacity: r.capacity }; }
+function mapMaintenanceBlock(m) { return { id: m.id, resourceId: m.resource_id, start: new Date(m.start_at), end: new Date(m.end_at), reason: m.reason }; }
 function hhmm(dateStr) { if (!dateStr) return null; const d = new Date(dateStr); return String(d.getUTCHours()).padStart(2, "0") + ":" + String(d.getUTCMinutes()).padStart(2, "0"); }
 function combineDateAndTime(baseDate, hhmmStr) {
   if (!hhmmStr) return null;
@@ -209,7 +210,7 @@ function mapOperator(o, contract) {
 function rateFor(op, destination) { return op?.ratesByDestination?.[destination] ?? op?.defaultRate ?? 0; }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }] = await Promise.all([
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     supabase.from("flights").select("*").order("scheduled_departure"),
     supabase.from("tour_operators").select("*").order("name"),
@@ -219,6 +220,7 @@ async function fetchAll() {
     supabase.from("profiles").select("*").order("name"),
     supabase.from("tasks").select("*").order("created_at"),
     supabase.from("notifications").select("*").order("created_at", { ascending: false }).limit(30),
+    supabase.from("maintenance_blocks").select("*").order("start_at"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
@@ -230,6 +232,7 @@ async function fetchAll() {
     profiles: profiles || [],
     tasks: tasks || [],
     notifications: notifications || [],
+    maintenanceBlocks: (maintenanceBlocks || []).map(mapMaintenanceBlock),
   };
 }
 
@@ -346,6 +349,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 
   const [loaded, setLoaded] = useState(false);
   const [resources, setResources] = useState([]);
+  const [maintenanceBlocks, setMaintenanceBlocks] = useState([]);
   const [flights, setFlightsRaw] = useState([]);
   const [operators, setOperatorsRaw] = useState([]);
   const [allotments, setAllotmentsRaw] = useState([]);
@@ -468,14 +472,37 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     pushToast(`${r?.code || "Aircraft"} removed from fleet`, "ok");
   }
 
+  async function addMaintenanceBlock(resourceId, start, end, reason) {
+    const { data, error } = await supabase.from("maintenance_blocks").insert({ resource_id: resourceId, start_at: start.toISOString(), end_at: end.toISOString(), reason }).select().single();
+    if (error) { pushToast(`Could not add maintenance block: ${error.message}`, "warn"); return; }
+    setMaintenanceBlocks(mb => [...mb, mapMaintenanceBlock(data)]);
+    const r = resources.find(x => x.id === resourceId);
+    pushToast(`Maintenance block added for ${r?.code || "aircraft"}`, "ok");
+  }
+
+  async function deleteMaintenanceBlock(id) {
+    const { error } = await supabase.from("maintenance_blocks").delete().eq("id", id);
+    if (error) { pushToast(`Could not remove block: ${error.message}`, "warn"); return; }
+    setMaintenanceBlocks(mb => mb.filter(m => m.id !== id));
+  }
+
+  // A date/resource pair is grounded if any maintenance block for that aircraft covers that
+  // calendar day. Used both by the Aircraft tab display and by the scheduling engine, so the
+  // engine never proposes a flight on a tail that's actually down.
+  function isGrounded(resourceId, date) {
+    const d0 = new Date(date); d0.setUTCHours(0, 0, 0, 0);
+    const d1 = new Date(d0); d1.setUTCDate(d1.getUTCDate() + 1);
+    return maintenanceBlocks.some(m => m.resourceId === resourceId && m.start < d1 && m.end > d0);
+  }
+
   // initial load, straight from Supabase — everyone hitting this deployment reads the same rows.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks } = await fetchAll();
       if (cancelled) return;
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
-      setTasks(tasks); setNotifications(notifications);
+      setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks);
       setLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -787,6 +814,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   function quickCreateFlight(prefill) { setAddFlightPrefill(prefill); setShowAddFlight(true); }
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showRotationGen, setShowRotationGen] = useState(false);
+  const [showSchedulingEngine, setShowSchedulingEngine] = useState(false);
   const [showBulkRetime, setShowBulkRetime] = useState(false);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showSCR, setShowSCR] = useState(false);
@@ -876,6 +904,22 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}⇄${pattern.destination})${pattern.includeReturn ? " — outbound + return" : ""}`, "ok");
     pushNotification("Rotation generated", `${newFlights.length} flights · ${pattern.origin}⇄${pattern.destination}`, "flight");
     setShowRotationGen(false);
+  }
+
+  async function commitSchedulingEngineRows(rows) {
+    const inserts = rows.map(r => ({
+      resource_id: r.resourceId, origin: r.origin, destination: r.destination,
+      scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
+      scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
+      capacity: resources.find(res => res.id === r.resourceId)?.capacity, status: "tentative", ref: r.ref,
+    }));
+    const { data, error } = await supabase.from("flights").insert(inserts).select();
+    if (error) { pushToast(`Scheduling engine commit failed: ${error.message}`, "warn"); return; }
+    const newFlights = (data || []).map(mapFlight);
+    setFlightsRaw(fl => [...fl, ...newFlights]);
+    pushToast(`Scheduling engine added ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"} across the fleet`, "ok");
+    pushNotification("Schedule generated", `${newFlights.length} flights via scheduling engine`, "flight");
+    setShowSchedulingEngine(false);
   }
 
   const NAV_ITEMS = [
@@ -1045,7 +1089,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
-              onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight} />
+              onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1064,13 +1109,15 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
-      {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource} />}
+      {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
+        maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
       {tab === "quotas" && <QuotasPanel operators={operators} allotments={allotments} flights={flights} />}
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} />}
+      {showSchedulingEngine && <SchedulingEngineModal resources={resources} flights={flights} isGrounded={isGrounded} onClose={() => setShowSchedulingEngine(false)} onCommit={commitSchedulingEngineRows} />}
       {showBulkRetime && <BulkRetimeModal resources={resources} flights={flights} onClose={() => setShowBulkRetime(false)} onCommit={bulkRetime} />}
       {showBulkDelete && <BulkDeleteModal resources={resources} flights={flights} allotments={allotments} onClose={() => setShowBulkDelete(false)} onCommit={bulkDeleteFlights} />}
       {showSCR && <SCRModal resources={resources} flights={flights} onClose={() => { setShowSCR(false); setScrSeed(null); }} seedFlights={scrSeed?.flights} seedRole={scrSeed?.role} />}
@@ -1086,7 +1133,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate }) {
+function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine }) {
   const COL = viewMode === "day" ? 720 : viewMode === "week" ? 216 : viewMode === "month" ? 64 : 36;
   const LABELW = 160;
   const showHourTicks = viewMode === "day" || viewMode === "week";
@@ -1346,6 +1393,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                 <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
                 {perms.editFlight && <>
                   <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate rotation</button>
+                  <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>Scheduling engine</button>
                   <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk import</button>
                   <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk retime</button>
                   <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>Bulk delete</button>
@@ -2307,9 +2355,198 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
 
 
 
-// ---------- rotation-template generator ----------
+// ---------- scheduling engine ----------
+// A real assignment algorithm, not a mock: given a set of route requirements (route,
+// frequency, aircraft type, date range), it expands every requirement into individual dated
+// legs, then greedily assigns each one to whichever eligible aircraft has flown the fewest
+// legs so far in this run — spreading load across the fleet rather than dumping everything on
+// one tail. Eligibility excludes aircraft already grounded by a maintenance block that day,
+// already double-booked with a real existing flight, or already claimed by an earlier
+// requirement in this same run. This is honestly a greedy heuristic, not a global optimizer —
+// it processes requirements in date order and never goes back to reshuffle an earlier
+// assignment to make a later one fit better.
+function emptyRequirement() {
+  return { id: Math.random().toString(36).slice(2), origin: "", destination: "", aircraftType: "any", daysOfWeek: [1, 3, 5], depTime: "08:00", arrTime: "11:00", startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)), ref: "" };
+}
+function runSchedulingEngine(requirements, resources, flights, isGrounded) {
+  const entries = [];
+  requirements.forEach((req, ri) => {
+    if (!req.origin || !req.destination) return;
+    const start = new Date(req.startDate), end = new Date(req.endDate);
+    for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
+      if (req.daysOfWeek.includes(d.getUTCDay())) {
+        entries.push({ reqIndex: ri, date: new Date(d), origin: req.origin.toUpperCase(), destination: req.destination.toUpperCase(), aircraftType: req.aircraftType, depTime: req.depTime, arrTime: req.arrTime, ref: req.ref.trim() });
+      }
+    }
+  });
+  entries.sort((a, b) => a.date - b.date);
+
+  const loadCount = new Map(resources.map(r => [r.id, 0]));
+  const assignedThisRun = new Set(); // `${resourceId}|${dateISO}`
+  const refByReq = new Map(); // one auto-generated ref per requirement, reused across its dates — same flight number flying the pattern, not a new one every date
+
+  return entries.map(e => {
+    const dateKey = iso(e.date);
+    const eligible = resources.filter(r => {
+      if (e.aircraftType !== "any" && r.variant !== e.aircraftType) return false;
+      if (isGrounded(r.id, e.date)) return false;
+      if (assignedThisRun.has(`${r.id}|${dateKey}`)) return false;
+      return !flights.some(f => f.resourceId === r.id && iso(f.start) === dateKey);
+    });
+    if (!refByReq.has(e.reqIndex)) refByReq.set(e.reqIndex, e.ref || ("DV" + (4800 + Math.floor(Math.random() * 900))));
+    const ref = refByReq.get(e.reqIndex);
+    if (eligible.length === 0) {
+      const anyTypeInFleet = resources.some(r => e.aircraftType === "any" || r.variant === e.aircraftType);
+      const detail = !anyTypeInFleet ? `No ${e.aircraftType} in the fleet` : "All matching aircraft busy or grounded that day";
+      return { date: e.date, origin: e.origin, destination: e.destination, depTime: e.depTime, arrTime: e.arrTime, ref, status: "unassigned", detail, resourceId: null, resourceCode: null, include: false };
+    }
+    eligible.sort((a, b) => loadCount.get(a.id) - loadCount.get(b.id));
+    const chosen = eligible[0];
+    loadCount.set(chosen.id, loadCount.get(chosen.id) + 1);
+    assignedThisRun.add(`${chosen.id}|${dateKey}`);
+    return { date: e.date, origin: e.origin, destination: e.destination, depTime: e.depTime, arrTime: e.arrTime, ref, status: "ok", detail: "", resourceId: chosen.id, resourceCode: chosen.code, include: true };
+  });
+}
+
+function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
+  const variants = [...new Set(resources.map(r => r.variant).filter(Boolean))];
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <FieldSm label="Origin"><input value={req.origin} onChange={e => onChange({ origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+        <FieldSm label="Destination"><input value={req.destination} onChange={e => onChange({ destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+        <FieldSm label="Aircraft type">
+          <select value={req.aircraftType} onChange={e => onChange({ aircraftType: e.target.value })} style={inputStyle}>
+            <option value="any">Any available</option>
+            {variants.map(v => <option key={v} value={v}>{v}</option>)}
+          </select>
+        </FieldSm>
+        <FieldSm label="Flight number"><input value={req.ref} onChange={e => onChange({ ref: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+        <FieldSm label="Departure (UTC)"><input type="time" value={req.depTime} onChange={e => onChange({ depTime: e.target.value })} style={inputStyle} /></FieldSm>
+        <FieldSm label="Arrival (UTC)"><input type="time" value={req.arrTime} onChange={e => onChange({ arrTime: e.target.value })} style={inputStyle} /></FieldSm>
+        <FieldSm label="Start date"><input type="date" value={req.startDate} onChange={e => onChange({ startDate: e.target.value })} style={inputStyle} /></FieldSm>
+        <FieldSm label="End date"><input type="date" value={req.endDate} onChange={e => onChange({ endDate: e.target.value })} style={inputStyle} /></FieldSm>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {DOW.map((d, i) => (
+            <button key={i} onClick={() => onChange({ daysOfWeek: req.daysOfWeek.includes(i) ? req.daysOfWeek.filter(x => x !== i) : [...req.daysOfWeek, i].sort() })}
+              style={{ ...miniBtn, padding: "4px 7px", fontSize: 11, background: req.daysOfWeek.includes(i) ? C.amber : "transparent", color: req.daysOfWeek.includes(i) ? ON_ACCENT : C.text, borderColor: req.daysOfWeek.includes(i) ? C.amber : C.border }}>{d}</button>
+          ))}
+        </div>
+        {canRemove && <button onClick={onRemove} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove route</button>}
+      </div>
+    </div>
+  );
+}
+
+function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onCommit }) {
+  const [requirements, setRequirements] = useState([emptyRequirement()]);
+  const [results, setResults] = useState(null);
+  const [scrRole, setScrRole] = useState("destination");
+  const [output, setOutput] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  function updateReq(id, patch) { setRequirements(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r)); }
+  function generate() { setResults(runSchedulingEngine(requirements, resources, flights, isGrounded)); }
+
+  const included = results?.filter(r => r.include) ?? [];
+  const okCount = included.length;
+  const unassignedCount = results?.filter(r => r.status === "unassigned").length ?? 0;
+  const canGenerate = requirements.some(r => r.origin.trim() && r.destination.trim() && r.daysOfWeek.length > 0);
+
+  function generateSCR() {
+    const draftFlights = included.map((r, i) => ({ id: "draft" + i, resourceId: r.resourceId, origin: r.origin, destination: r.destination, start: r.date, ref: r.ref, depTime: r.depTime, arrTime: r.arrTime }));
+    const seed = deriveSCRSeedFromFlights(draftFlights, resources, scrRole);
+    const header = { creatorRef: "", season: iataSeasonFor(draftFlights[0].start), messageDate: iso(today), clearanceAirport: seed.clearanceAirport, si: "", gi: "BRGDS" };
+    setOutput(buildSCRMessage(header, seed.lines, draftFlights));
+    setCopied(false);
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 680, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Scheduling engine</div>
+
+        {!results && (
+          <>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 14 }}>
+              Define the routes you need covered. The engine fills in aircraft automatically — avoiding double-booking and respecting maintenance downtime — and spreads the load evenly across whatever's eligible. It's a greedy fill processed in date order, not a global optimizer: it won't rearrange an earlier assignment to make a later requirement fit better.
+            </div>
+            {requirements.map(req => (
+              <RequirementRow key={req.id} req={req} resources={resources} onChange={patch => updateReq(req.id, patch)}
+                onRemove={() => setRequirements(rs => rs.filter(r => r.id !== req.id))} canRemove={requirements.length > 1} />
+            ))}
+            <button onClick={() => setRequirements(rs => [...rs, emptyRequirement()])} style={{ ...miniBtn, marginBottom: 14 }}>+ Add another route</button>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button onClick={onClose} style={miniBtn}>Cancel</button>
+              <button onClick={generate} disabled={!canGenerate} style={{ ...miniBtn, background: canGenerate ? GRADIENT_PRIMARY : C.faint, boxShadow: canGenerate ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: canGenerate ? C.amber : C.faint, fontWeight: 600 }}>Generate schedule</button>
+            </div>
+          </>
+        )}
+
+        {results && !output && (
+          <>
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 340, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Flight</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Aircraft</th><th style={{ padding: "6px 8px" }}>Status</th>
+                </tr></thead>
+                <tbody>
+                  {results.map((r, i) => (
+                    <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: r.status === "unassigned" ? 0.65 : 1 }}>
+                      <td style={{ padding: "6px 8px" }}><input type="checkbox" checked={r.include} disabled={r.status === "unassigned"} onChange={e => setResults(rs => rs.map((x, xi) => xi === i ? { ...x, include: e.target.checked } : x))} /></td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{iso(r.date)}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.ref}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 11 }}>{r.origin}→{r.destination} {r.depTime}–{r.arrTime}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.resourceCode || "—"}</td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <Badge color={r.status === "ok" ? C.green : C.red}>{r.status === "ok" ? "ASSIGNED" : "UNASSIGNED"}</Badge>
+                        {r.detail && <div style={{ fontSize: 10, color: C.faint, marginTop: 2 }}>{r.detail}</div>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} assignable{unassignedCount > 0 ? `, ${unassignedCount} couldn't be assigned` : ""}</span>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button onClick={() => setResults(null)} style={miniBtn}>Back</button>
+                <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
+                <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
+                <button onClick={generateSCR} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, boxShadow: okCount ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {output && (
+          <>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 10 }}>Copy this and send it to the coordinator. Nothing is added to the schedule until you confirm below.</div>
+            <textarea readOnly value={output} rows={8} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => onCommit(included)} disabled={!copied}
+                  title={!copied ? "Copy the message above first" : undefined}
+                  style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okCount} flight{okCount === 1 ? "" : "s"}</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+// ---------- rotation-template generator ----------
 function RotationGenModal({ resources, flights, onClose, onCommit }) {
   const [pattern, setPattern] = useState({
     origin: "LGW", destination: "DBV", resourceId: resources[0].id, capacity: resources[0].capacity,
@@ -3658,9 +3895,10 @@ const card = { background: C.panel, border: `1px solid ${C.borderSoft}`, borderR
 const cardTitle = { fontSize: 11.5, color: C.muted, fontWeight: 600, marginBottom: 6 };
 
 // ---------- Aircraft (fleet management) ----------
-function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResource, onDeleteResource }) {
+function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResource, onDeleteResource, maintenanceBlocks, onAddMaintenanceBlock, onDeleteMaintenanceBlock }) {
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [showAddMaint, setShowAddMaint] = useState(false);
   return (
     <div style={{ padding: 20 }}>
       {perms.editFlight && (
@@ -3692,7 +3930,65 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
           </tbody>
         </table>
       </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24, marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Maintenance schedule</div>
+        {perms.editFlight && <button onClick={() => setShowAddMaint(true)} style={{ ...miniBtn, fontWeight: 600 }}>+ Add block</button>}
+      </div>
+      <div style={{ ...card, padding: 0, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, background: C.panel2 }}>
+            <th style={th}>Aircraft</th><th style={th}>From</th><th style={th}>To</th><th style={th}>Reason</th><th style={th}></th>
+          </tr></thead>
+          <tbody>
+            {[...maintenanceBlocks].sort((a, b) => a.start - b.start).map(m => {
+              const r = resources.find(x => x.id === m.resourceId);
+              const isPast = m.end < new Date();
+              return (
+                <tr key={m.id} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: isPast ? 0.5 : 1 }}>
+                  <td style={{ ...td, fontFamily: MONO, fontWeight: 600 }}>{r?.code || "—"}</td>
+                  <td style={{ ...td, fontFamily: MONO }}>{iso(m.start)}</td>
+                  <td style={{ ...td, fontFamily: MONO }}>{iso(m.end)}</td>
+                  <td style={td}>{m.reason || "—"}</td>
+                  <td style={td}>{perms.editFlight && <button onClick={() => onDeleteMaintenanceBlock(m.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove</button>}</td>
+                </tr>
+              );
+            })}
+            {maintenanceBlocks.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.faint, padding: 20 }}>No maintenance blocks scheduled. Aircraft here are treated as available every day.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+
       {showAdd && <AddAircraftModal onClose={() => setShowAdd(false)} onCreate={r => { onAddResource(r); setShowAdd(false); }} />}
+      {showAddMaint && <AddMaintenanceModal resources={resources} onClose={() => setShowAddMaint(false)} onCreate={(resourceId, start, end, reason) => { onAddMaintenanceBlock(resourceId, start, end, reason); setShowAddMaint(false); }} />}
+    </div>
+  );
+}
+function AddMaintenanceModal({ resources, onClose, onCreate }) {
+  const [form, setForm] = useState({ resourceId: resources[0]?.id, startDate: iso(addDays(today, 1)), endDate: iso(addDays(today, 3)), reason: "" });
+  const valid = form.resourceId && form.startDate && form.endDate && form.startDate <= form.endDate;
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 380, maxWidth: "92vw" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Add maintenance block</div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>This aircraft is treated as unavailable for the whole span, inclusive of both dates — the scheduling engine and conflict checks respect it.</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <FieldSm label="Aircraft">
+            <select value={form.resourceId} onChange={e => setForm({ ...form, resourceId: e.target.value })} style={inputStyle}>
+              {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.variant}</option>)}
+            </select>
+          </FieldSm>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <FieldSm label="From"><input type="date" value={form.startDate} onChange={e => setForm({ ...form, startDate: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label="To"><input type="date" value={form.endDate} onChange={e => setForm({ ...form, endDate: e.target.value })} style={inputStyle} /></FieldSm>
+          </div>
+          <FieldSm label="Reason (optional)"><input value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} placeholder="C-check, AOG repair, …" style={inputStyle} /></FieldSm>
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+          <button onClick={onClose} style={miniBtn}>Cancel</button>
+          <button disabled={!valid} onClick={() => onCreate(form.resourceId, new Date(form.startDate), addDays(new Date(form.endDate), 1), form.reason)} style={{ ...miniBtn, background: valid ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: valid ? C.amber : C.faint, fontWeight: 600 }}>Add block</button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -157,6 +157,20 @@ or putting the app behind Vercel's password/SSO protection.
   refreshing the page picks up where you left off. Needs `ANTHROPIC_API_KEY` set to actually
   respond (see above); without it, the widget still opens but shows a clear error rather than
   failing silently.
+- **Scheduling engine** (Schedule → More → Scheduling engine) — a real assignment algorithm,
+  not a mock: define one or more route requirements (route, aircraft type or "any", days of
+  week, times, date range), and it expands every requirement into individual dated legs, then
+  greedily assigns each to whichever eligible aircraft has flown the fewest legs so far in
+  this run — spreading load across the fleet instead of dumping it all on one tail. It respects
+  the maintenance schedule (see below) and never double-books a tail already flying that day,
+  including against other requirements assigned earlier in the same run. This is honestly a
+  greedy heuristic processed in date order, not a global optimizer — it never goes back to
+  reshuffle an earlier pick to make a later requirement fit better. Same SCR-first,
+  confirm-to-create flow as everywhere else.
+- **Maintenance schedule** (Aircraft tab) — new UI over a table that already existed in the
+  schema but never had a screen: add/remove date-range blocks per aircraft with an optional
+  reason. The scheduling engine treats a grounded aircraft as ineligible for the whole span,
+  inclusive of both dates.
 - **Excel roster importer** — Bulk Import now has an "Upload Excel roster" mode alongside the
   existing CSV paste, parsing the actual per-aircraft weekly grid format (one sheet per tail,
   flight number and route string in adjacent cells under each weekday column) via the `xlsx`
