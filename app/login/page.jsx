@@ -3,8 +3,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "../../lib/supabaseClient";
 
-const C = { bg: "#0E1B33", panel: "#152442", border: "#223052", text: "#E7ECF6", muted: "#8592AC", amber: "#3B6FE0", red: "#E0473B" };
-const inputStyle = { background: "#0E1626", border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "9px 11px", fontSize: 13.5 };
+const C = { bg: "#F4F6FA", panel: "#FFFFFF", border: "#E2E7F0", text: "#1E2A3D", muted: "#6B7686", amber: "#3B6FE0", red: "#E0473B" };
+const inputStyle = { background: "#F4F6FA", border: `1px solid ${C.border}`, color: C.text, borderRadius: 6, padding: "9px 11px", fontSize: 13.5 };
 const btnStyle = { background: C.amber, color: "#FFFFFF", fontWeight: 600, border: "none", borderRadius: 6, padding: "10px 0", cursor: "pointer", fontSize: 13.5 };
 
 export default function LoginPage() {
@@ -44,8 +44,9 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: C.text, background: C.bg, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" }}>
-      <form onSubmit={mode === "signin" ? handleSignIn : handleSignUp} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 28, width: 340 }}>
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.text, background: C.bg, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif" }}>
+      <img src="/logo-full.png" alt="SCAT Airlines — Non-Scheduled Operations Complex" style={{ width: 260, maxWidth: "80vw", height: "auto", marginBottom: 28 }} />
+      <form onSubmit={mode === "signin" ? handleSignIn : handleSignUp} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 12, padding: 28, width: 340, boxShadow: "0 8px 30px rgba(30,42,61,0.08)" }}>
         <div style={{ fontWeight: 700, letterSpacing: 0.3, marginBottom: 4, fontSize: 15 }}>CHARTER OPS</div>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 18 }}>{mode === "signin" ? "Sign in to your account" : "Create your account — takes a minute"}</div>
 

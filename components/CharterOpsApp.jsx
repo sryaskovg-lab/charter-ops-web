@@ -179,8 +179,8 @@ function assignLanes(flightsForDay, geomFn = flightGeometry) {
 // depTime/arrTime. At Day/Week zoom there's enough room to show a flight's actual duration; at
 // Month/Period the columns are too narrow for that to be legible, so every flight there just
 // renders as a clean full-day block instead of a sliver sized to a few pixels.
-function effectiveGeometry(f, viewMode) {
-  return (viewMode === "month" || viewMode === "period") ? { offsetFrac: 0, widthFrac: 1 } : flightGeometry(f);
+function effectiveGeometry(f, isNarrow) {
+  return isNarrow ? { offsetFrac: 0, widthFrac: 1 } : flightGeometry(f);
 }
 // A larger, still visually distinct palette — enough headroom for a real multi-destination
 // network before two different destinations start sharing a color.
@@ -341,11 +341,17 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     return () => window.removeEventListener("resize", check);
   }, []);
   const [showLocal, setShowLocal] = useState(false);
-  const [viewMode, setViewMode] = useState("week"); // "day" | "week" | "month" | "period"
-  const [periodDays, setPeriodDays] = useState(90); // custom span when viewMode === "period"
+  const [viewMode, setViewMode] = useState("day"); // "day" | "period"
+  // "Day" is a continuous, pannable strip of many days at hour-tick zoom — not one page at a
+  // time. "Period" is an explicit From/To range, zoomed via the size slider to fit whatever
+  // span was picked.
+  const [rangeFrom, setRangeFrom] = useState(iso(addDays(today, -1)));
+  const [rangeTo, setRangeTo] = useState(iso(addDays(today, 29)));
   const [viewStart, setViewStart] = useState(addDays(today, -1));
-  const VIEW_MODE_DAYS = { day: 1, week: 7, month: 30 };
-  const DAYS = viewMode === "period" ? periodDays : VIEW_MODE_DAYS[viewMode];
+  const DAY_MODE_SPAN = 45;
+  const periodSpan = Math.max(1, Math.round((new Date(rangeTo) - new Date(rangeFrom)) / 86400000) + 1);
+  const DAYS = viewMode === "period" ? periodSpan : DAY_MODE_SPAN;
+  const effectiveViewStart = viewMode === "period" ? new Date(rangeFrom) : viewStart;
 
   const [loaded, setLoaded] = useState(false);
   const [resources, setResources] = useState([]);
@@ -545,7 +551,25 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     return () => { supabase.removeChannel(channel); };
   }, [loaded]);
 
-  const days = useMemo(() => Array.from({ length: DAYS }, (_, i) => addDays(viewStart, i)), [viewStart, DAYS]);
+  const days = useMemo(() => Array.from({ length: DAYS }, (_, i) => addDays(effectiveViewStart, i)), [effectiveViewStart, DAYS]);
+  function shiftView(sign) {
+    if (viewMode === "period") {
+      setRangeFrom(iso(addDays(new Date(rangeFrom), sign * periodSpan)));
+      setRangeTo(iso(addDays(new Date(rangeTo), sign * periodSpan)));
+    } else {
+      setViewStart(addDays(viewStart, sign * DAYS));
+    }
+  }
+  function jumpToDate(d) {
+    setViewMode("day");
+    setViewStart(d);
+  }
+  function jumpToToday() {
+    const t = new Date(); t.setUTCHours(0, 0, 0, 0);
+    if (viewMode === "period") { setRangeFrom(iso(t)); setRangeTo(iso(addDays(t, periodSpan - 1))); }
+    else setViewStart(addDays(t, -1));
+  }
+
 
   function flightInventory(flightId) {
     const fl = flights.find(f => f.id === flightId);
@@ -1001,7 +1025,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
           </button>
         )}
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: (sidebarCollapsed && !isMobile) ? "0" : "0 8px", marginBottom: 26, justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start" }}>
-          <span style={{ color: C.amber }}><IconPlaneLogo /></span>
+          <img src="/logo-mark.png" alt="" style={{ height: 24, width: "auto", flexShrink: 0 }} />
           {!(sidebarCollapsed && !isMobile) && <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text, whiteSpace: "nowrap" }}>CHARTER OPS</div>}
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
@@ -1093,8 +1117,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       {tab === "schedule" && (
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           <div style={{ flex: 1, overflow: "auto" }}>
-            <ScheduleBoard resources={resources} flights={flights} days={days} viewStart={viewStart} setViewStart={setViewStart}
-              viewMode={viewMode} setViewMode={setViewMode} periodDays={periodDays} setPeriodDays={setPeriodDays} DAYS={DAYS}
+            <ScheduleBoard resources={resources} flights={flights} days={days} viewStart={effectiveViewStart} onShiftView={shiftView} onJumpToday={jumpToToday} onJumpToDate={jumpToDate}
+              viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
@@ -1143,10 +1167,20 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange }) {
-  const COL = viewMode === "day" ? 720 : viewMode === "week" ? 216 : viewMode === "month" ? 64 : 36;
+function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange }) {
+  // Live local value while dragging the slider — updates the board instantly; the parent only
+  // persists to the database once you release it, not on every intermediate tick.
+  const [liveScale, setLiveScale] = useState(ganttScale);
+  // Day mode is a fixed hour-tick zoom (the whole point of it), always pannable rather than
+  // paginated. Period mode's column width is driven continuously by the same size slider — all
+  // the way from "a whole year at a glance" to "a week with real detail" — since seeing more or
+  // less of a custom range at once is exactly what that slider is for there.
+  const PERIOD_COL_MIN = 20, PERIOD_COL_MAX = 180;
+  const sliderT = Math.min(1, Math.max(0, (liveScale - 0.7) / 0.7));
+  const COL = viewMode === "day" ? 720 : Math.round(PERIOD_COL_MIN + sliderT * (PERIOD_COL_MAX - PERIOD_COL_MIN));
   const LABELW = 160;
-  const showHourTicks = viewMode === "day" || viewMode === "week";
+  const isNarrow = viewMode !== "day" && COL < 70;
+  const showHourTicks = viewMode === "day" || COL >= 160;
   const TICK = COL / HOUR_TICKS.length;
   function colFor(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return Math.round((x.getTime() - viewStart.getTime()) / 86400000); }
 
@@ -1237,12 +1271,12 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   const [multiSelectIds, setMultiSelectIds] = useState(() => new Set());
   const [contextMenu, setContextMenu] = useState(null); // { flightId, x, y }
   const [marquee, setMarquee] = useState(null); // { startX, startY, curX, curY }
-  const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay }
+  const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay, hasPanned }
+  const createDragRef = useRef(null);
   const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const [filterText, setFilterText] = useState("");
   // Live local value while dragging the slider — updates the board instantly; the parent only
   // persists to the database once you release it, not on every intermediate tick.
-  const [liveScale, setLiveScale] = useState(ganttScale);
   useEffect(() => { setLiveScale(ganttScale); }, [ganttScale]);
   const boardRef = useRef(null);
 
@@ -1289,22 +1323,46 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   // aircraft, date, and an approximate departure time from where the drag started; drag
   // distance gives a rough arrival estimate, defaulting to +2h for a simple click with no
   // real drag. The modal's own fields are still there to fine-tune everything before saving.
+  // Click-drag on empty grid space (no shift). A *small* drag (under ~6px) is still a click —
+  // it opens "+ New flight" prefilled with the aircraft, date, and an approximate departure
+  // time from where it started. Anything past that threshold switches to grabbing and panning
+  // the whole board horizontally instead — the standard "grab the canvas and drag" gesture —
+  // and the create-flight intent is dropped for that gesture.
+  const createDragActive = !!createDrag;
   useEffect(() => {
-    if (!createDrag) return;
+    if (!createDragActive) return;
     function onMove(e) {
-      const deltaDay = Math.round((e.clientX - createDrag.startClientX) / COL);
-      setCreateDrag(cd => ({ ...cd, curDay: cd.startDay + deltaDay, curClientX: e.clientX, curClientY: e.clientY }));
+      const cd = createDragRef.current;
+      const dx = e.clientX - cd.startClientX;
+      if (!cd.hasPanned && Math.abs(dx) > 6) {
+        const next = { ...cd, hasPanned: true, panStartScrollLeft: boardRef.current ? boardRef.current.scrollLeft : 0 };
+        createDragRef.current = next;
+        setCreateDrag(next);
+        return;
+      }
+      if (cd.hasPanned) {
+        if (boardRef.current) boardRef.current.scrollLeft = cd.panStartScrollLeft - dx;
+      } else {
+        const deltaDay = Math.round(dx / COL);
+        const next = { ...cd, curDay: cd.startDay + deltaDay, curClientX: e.clientX, curClientY: e.clientY };
+        createDragRef.current = next;
+        setCreateDrag(next);
+      }
     }
     function onUp() {
-      const fromDay = Math.min(createDrag.startDay, createDrag.curDay);
-      const dayISOStr = iso(addDays(viewStart, fromDay));
-      onQuickCreate({ resourceId: createDrag.resourceId, date: dayISOStr, depTime: createDrag.depTime, arrTime: minutesToHHMM((timeToMinutes(createDrag.depTime) + 120) % 1440) });
+      const cd = createDragRef.current;
+      if (!cd.hasPanned) {
+        const fromDay = Math.min(cd.startDay, cd.curDay);
+        const dayISOStr = iso(addDays(viewStart, fromDay));
+        onQuickCreate({ resourceId: cd.resourceId, date: dayISOStr, depTime: cd.depTime, arrTime: minutesToHHMM((timeToMinutes(cd.depTime) + 120) % 1440) });
+      }
+      createDragRef.current = null;
       setCreateDrag(null);
     }
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [createDrag]);
+  }, [createDragActive]);
 
   // Resize a flight's edge — no live-preview stretch of the bar itself (the geometry math for
   // that isn't worth the complexity here), just a small tooltip showing the new time while
@@ -1374,20 +1432,21 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3 }}>
-            {[["day", "Day"], ["week", "Week"], ["month", "Month"], ["period", "Period"]].map(([k, l]) => (
+            {[["day", "Day"], ["period", "Period"]].map(([k, l]) => (
               <button key={k} onClick={() => setViewMode(k)} style={{ background: viewMode === k ? C.panel : "transparent", color: viewMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: viewMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: viewMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
             ))}
           </div>
           {viewMode === "period" && (
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <input type="number" value={periodDays} min={1} max={365} onChange={e => setPeriodDays(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 60, padding: "6px 8px" }} />
-              <span style={{ fontSize: 11.5, color: C.muted }}>days</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input type="date" value={rangeFrom} onChange={e => setRangeFrom(e.target.value)} style={{ ...inputStyle, padding: "6px 8px" }} />
+              <span style={{ fontSize: 11.5, color: C.muted }}>to</span>
+              <input type="date" value={rangeTo} min={rangeFrom} onChange={e => setRangeTo(e.target.value)} style={{ ...inputStyle, padding: "6px 8px" }} />
             </div>
           )}
           <div style={{ display: "flex", gap: 4, borderLeft: `1px solid ${C.borderSoft}`, paddingLeft: 12 }}>
-            <button onClick={() => setViewStart(addDays(viewStart, -DAYS))} style={navBtn}>◀</button>
-            <button onClick={() => { const t = new Date(); t.setUTCHours(0, 0, 0, 0); setViewStart(addDays(t, -1)); }} style={navBtn}>Today</button>
-            <button onClick={() => setViewStart(addDays(viewStart, DAYS))} style={navBtn}>▶</button>
+            <button onClick={() => onShiftView(-1)} style={navBtn}>◀</button>
+            <button onClick={onJumpToday} style={navBtn}>Today</button>
+            <button onClick={() => onShiftView(1)} style={navBtn}>▶</button>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1438,7 +1497,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>Aircraft</div>
               {days.map((d, i) => {
                 const isToday = iso(d) === iso(new Date());
-                return <div key={i} onClick={() => { if (viewMode !== "day") { setViewMode("day"); setViewStart(d); } }}
+                return <div key={i} onClick={() => { if (viewMode !== "day") onJumpToDate(d); }}
                   title={viewMode !== "day" ? "Click to view this day alone" : undefined}
                   style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 11, fontFamily: MONO, color: isToday ? C.amber : C.muted, borderLeft: `1px solid ${C.borderSoft}`, background: isToday ? C.amberSoft + "55" : "transparent", cursor: viewMode !== "day" ? "pointer" : "default" }}>
                   <div>{d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })}</div>
@@ -1494,8 +1553,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                     const cById = new Map(resFlights.map(x => [x.f.id, x.c]));
                     const geomFn = f => {
                       const c = cById.get(f.id);
-                      const g = effectiveGeometry(f, viewMode);
-                      if (viewMode === "month" || viewMode === "period") return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
+                      const g = effectiveGeometry(f, isNarrow);
+                      if (isNarrow) return { offsetFrac: c + g.offsetFrac, widthFrac: g.widthFrac };
                       const bufferFrac = 42 / COL;
                       return { offsetFrac: c + g.offsetFrac - bufferFrac / 2, widthFrac: g.widthFrac + bufferFrac };
                     };
@@ -1503,7 +1562,6 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                     allLaneOf.forEach((lane, fid) => laneOf.set(fid, lane));
                     maxLanes = Math.max(maxLanes, laneCount);
                   }
-                  const isNarrow = viewMode === "month" || viewMode === "period";
                   const baseBarH = isNarrow ? 44 : 30;
                   const BAR_H = Math.round(baseBarH * liveScale);
                   const BAR_GAP = Math.round(8 * liveScale), TOP_PAD = Math.round(12 * liveScale);
@@ -1525,7 +1583,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                 <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{res.variant}</div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
-              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? "crosshair" : "default" }}
+              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? "grab" : "default" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
                 onDrop={e => {
                   if (!perms.editFlight) return;
@@ -1550,7 +1608,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const dayIndex = Math.floor(totalDayFloat);
                   const hourFrac = Math.max(0, totalDayFloat - dayIndex);
                   const depMinutes = Math.round((hourFrac * 1440) / 15) * 15;
-                  setCreateDrag({ resourceId: res.id, resourceCode: res.code, startClientX: e.clientX, startDay: dayIndex, curDay: dayIndex, depTime: minutesToHHMM(depMinutes), curClientX: e.clientX, curClientY: e.clientY });
+                  const initial = { resourceId: res.id, resourceCode: res.code, startClientX: e.clientX, startDay: dayIndex, curDay: dayIndex, depTime: minutesToHHMM(depMinutes), curClientX: e.clientX, curClientY: e.clientY, hasPanned: false, panStartScrollLeft: 0 };
+                  createDragRef.current = initial;
+                  setCreateDrag(initial);
                 }}>
                 {days.map((d, i) => {
                   const dow = d.getUTCDay();
@@ -1567,7 +1627,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   const isFerry = f.legType === "ferry";
                   const s = STATUS_STYLE[f.status];
                   const selected = f.id === selectedFlightId;
-                  const geom = effectiveGeometry(f, viewMode);
+                  const geom = effectiveGeometry(f, isNarrow);
                   const leftPx = c * COL + geom.offsetFrac * COL + 3;
                   const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
                   const lane = laneOf.get(f.id) || 0;
@@ -1697,7 +1757,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
       {marquee && (
         <div style={{ position: "fixed", left: Math.min(marquee.startX, marquee.curX), top: Math.min(marquee.startY, marquee.curY), width: Math.abs(marquee.curX - marquee.startX), height: Math.abs(marquee.curY - marquee.startY), background: C.amberSoft + "99", border: `1.5px dashed ${C.amber}`, zIndex: 998, pointerEvents: "none" }} />
       )}
-      {createDrag && (
+      {createDrag && !createDrag.hasPanned && (
         <div style={{ position: "fixed", left: createDrag.curClientX + 14, top: createDrag.curClientY - 16, background: C.green, color: "#fff", padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
           New flight — {createDrag.resourceCode}, {iso(addDays(viewStart, Math.min(createDrag.startDay, createDrag.curDay)))}, dep {createDrag.depTime}
         </div>
