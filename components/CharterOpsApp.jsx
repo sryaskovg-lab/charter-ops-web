@@ -394,6 +394,16 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   }, []);
   const [showNotifPanel, setShowNotifPanel] = useState(false);
 
+  // Gantt box-size scale — a personal preference, saved per-user so it's the same next login
+  // regardless of device, not just remembered in this browser.
+  const [ganttScale, setGanttScale] = useState(() => profile.preferences?.ganttScale ?? 1);
+  async function persistGanttScale(value) {
+    setGanttScale(value);
+    const { error } = await supabase.from("profiles").update({ preferences: { ...(profile.preferences || {}), ganttScale: value } }).eq("id", profile.id);
+    if (error) pushToast(`Could not save your size preference: ${error.message}`, "warn");
+  }
+
+
   // ---- Chat assistant — tool-use against real data, scoped to the caller's own session on
   // the server side (see /api/chat), so it never sees more than this user already can.
   const [chatOpen, setChatOpen] = useState(false);
@@ -1090,7 +1100,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
-              onSchedulingEngine={() => setShowSchedulingEngine(true)} />
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1133,7 +1143,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
-function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine }) {
+function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, periodDays, setPeriodDays, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange }) {
   const COL = viewMode === "day" ? 720 : viewMode === "week" ? 216 : viewMode === "month" ? 64 : 36;
   const LABELW = 160;
   const showHourTicks = viewMode === "day" || viewMode === "week";
@@ -1230,7 +1240,10 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
   const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay }
   const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const [filterText, setFilterText] = useState("");
-  const [density, setDensity] = useState("comfortable"); // "comfortable" | "compact"
+  // Live local value while dragging the slider — updates the board instantly; the parent only
+  // persists to the database once you release it, not on every intermediate tick.
+  const [liveScale, setLiveScale] = useState(ganttScale);
+  useEffect(() => { setLiveScale(ganttScale); }, [ganttScale]);
   const boardRef = useRef(null);
 
   function matchesFilter(f) {
@@ -1383,9 +1396,15 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
           </button>
-          <button onClick={() => setDensity(d => d === "compact" ? "comfortable" : "compact")} title="Row height for aircraft with several flights a day" style={navBtn}>
-            {density === "compact" ? "Compact" : "Comfortable"}
-          </button>
+          <div title="Box size — saved to your account, same on next login" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
+            <span style={{ fontSize: 10 }}>A</span>
+            <input type="range" min={0.7} max={1.4} step={0.05} value={liveScale}
+              onChange={e => setLiveScale(+e.target.value)}
+              onMouseUp={e => onGanttScaleChange(+e.target.value)}
+              onTouchEnd={e => onGanttScaleChange(liveScale)}
+              style={{ width: 70, accentColor: C.amber }} />
+            <span style={{ fontSize: 13 }}>A</span>
+          </div>
           <div style={{ position: "relative" }}>
             <button onClick={e => { e.stopPropagation(); setShowMoreMenu(v => !v); }} style={navBtn}>More ▾</button>
             {showMoreMenu && (
@@ -1485,10 +1504,10 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                     maxLanes = Math.max(maxLanes, laneCount);
                   }
                   const isNarrow = viewMode === "month" || viewMode === "period";
-                  const compact = density === "compact";
-                  const BAR_H = isNarrow ? (compact ? 34 : 44) : (compact ? 22 : 30);
-                  const BAR_GAP = compact ? 4 : 8, TOP_PAD = compact ? 8 : 12;
-                  const rowHeight = Math.max(compact ? 40 : 58, TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
+                  const baseBarH = isNarrow ? 44 : 30;
+                  const BAR_H = Math.round(baseBarH * liveScale);
+                  const BAR_GAP = Math.round(8 * liveScale), TOP_PAD = Math.round(12 * liveScale);
+                  const rowHeight = Math.max(Math.round(58 * liveScale), TOP_PAD + maxLanes * (BAR_H + BAR_GAP));
                   return (
                     <React.Fragment key={res.id}>
                     {showDivider && (
@@ -1575,7 +1594,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                   // Short flights render as narrow pills — scale the inside text down rather
                   // than letting it overflow or clip unreadably. Purely cosmetic; the box's
                   // real duration-based width is unaffected.
-                  const boxFontScale = isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1);
+                  const boxFontScale = (isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1)) * liveScale;
                   return (
                     <React.Fragment key={f.id}>
                       <div className="flight-bar" draggable={perms.editFlight}
@@ -1603,9 +1622,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, setViewStart, sele
                         <div style={{ position: "absolute", left: stripeW, right: 0, top: 0, bottom: 0, display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px 0 7px" : "0 10px 0 12px") }}>
                           {isNarrow ? (
                             <>
-                              <div style={{ fontFamily: MONO, fontSize: 9.5, color: C.text, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
-                              <div style={{ fontFamily: MONO, fontSize: 8, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
-                              <div style={{ fontFamily: MONO, fontSize: 8, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
+                              <div style={{ fontFamily: MONO, fontSize: 9.5 * liveScale, color: C.text, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.ref}{isFerry ? " · F" : ""}</div>
+                              <div style={{ fontFamily: MONO, fontSize: 8 * liveScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.origin} {depLabel || "—"}</div>
+                              <div style={{ fontFamily: MONO, fontSize: 8 * liveScale, color: C.muted, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.destination} {arrLabel || "—"}</div>
                             </>
                           ) : (
                             // Single line, everything inside the box: FLIGHT# ORIGIN dep-arr DEST.
