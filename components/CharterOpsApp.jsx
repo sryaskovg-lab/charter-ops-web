@@ -1271,8 +1271,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   const [multiSelectIds, setMultiSelectIds] = useState(() => new Set());
   const [contextMenu, setContextMenu] = useState(null); // { flightId, x, y }
   const [marquee, setMarquee] = useState(null); // { startX, startY, curX, curY }
-  const [createDrag, setCreateDrag] = useState(null); // { resourceId, resourceCode, startClientX, startDay, curDay, hasPanned }
-  const createDragRef = useRef(null);
+  const [panDrag, setPanDrag] = useState(null); // { startClientX, startClientY, panStartScrollLeft, panStartScrollTop }
+  const panDragRef = useRef(null);
   const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const [filterText, setFilterText] = useState("");
   // Live local value while dragging the slider — updates the board instantly; the parent only
@@ -1323,46 +1323,26 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   // aircraft, date, and an approximate departure time from where the drag started; drag
   // distance gives a rough arrival estimate, defaulting to +2h for a simple click with no
   // real drag. The modal's own fields are still there to fine-tune everything before saving.
-  // Click-drag on empty grid space (no shift). A *small* drag (under ~6px) is still a click —
-  // it opens "+ New flight" prefilled with the aircraft, date, and an approximate departure
-  // time from where it started. Anything past that threshold switches to grabbing and panning
-  // the whole board horizontally instead — the standard "grab the canvas and drag" gesture —
-  // and the create-flight intent is dropped for that gesture.
-  const createDragActive = !!createDrag;
+  // Left-click-drag on empty grid space always pans — both axes, following the cursor exactly
+  // — and only for as long as the mouse button is actually held; it stops dead on mouseup, no
+  // lingering momentum or continued motion. It never creates a flight; creating one from empty
+  // space is a right-click action now (see the context menu below), not a side effect of a
+  // plain click.
+  const panDragActive = !!panDrag;
   useEffect(() => {
-    if (!createDragActive) return;
+    if (!panDragActive) return;
     function onMove(e) {
-      const cd = createDragRef.current;
-      const dx = e.clientX - cd.startClientX;
-      if (!cd.hasPanned && Math.abs(dx) > 6) {
-        const next = { ...cd, hasPanned: true, panStartScrollLeft: boardRef.current ? boardRef.current.scrollLeft : 0 };
-        createDragRef.current = next;
-        setCreateDrag(next);
-        return;
-      }
-      if (cd.hasPanned) {
-        if (boardRef.current) boardRef.current.scrollLeft = cd.panStartScrollLeft - dx;
-      } else {
-        const deltaDay = Math.round(dx / COL);
-        const next = { ...cd, curDay: cd.startDay + deltaDay, curClientX: e.clientX, curClientY: e.clientY };
-        createDragRef.current = next;
-        setCreateDrag(next);
+      const pd = panDragRef.current;
+      if (boardRef.current) {
+        boardRef.current.scrollLeft = pd.panStartScrollLeft - (e.clientX - pd.startClientX);
+        boardRef.current.scrollTop = pd.panStartScrollTop - (e.clientY - pd.startClientY);
       }
     }
-    function onUp() {
-      const cd = createDragRef.current;
-      if (!cd.hasPanned) {
-        const fromDay = Math.min(cd.startDay, cd.curDay);
-        const dayISOStr = iso(addDays(viewStart, fromDay));
-        onQuickCreate({ resourceId: cd.resourceId, date: dayISOStr, depTime: cd.depTime, arrTime: minutesToHHMM((timeToMinutes(cd.depTime) + 120) % 1440) });
-      }
-      createDragRef.current = null;
-      setCreateDrag(null);
-    }
+    function onUp() { panDragRef.current = null; setPanDrag(null); }
     document.addEventListener("mousemove", onMove);
     document.addEventListener("mouseup", onUp);
     return () => { document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
-  }, [createDragActive]);
+  }, [panDragActive]);
 
   // Resize a flight's edge — no live-preview stretch of the bar itself (the geometry math for
   // that isn't worth the complexity here), just a small tooltip showing the new time while
@@ -1494,7 +1474,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
           )}
           <div style={{ display: "flex", background: C.panel2, borderBottom: `1px solid ${C.border}`, flexDirection: "column" }}>
             <div style={{ display: "flex" }}>
-              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO }}>Aircraft</div>
+              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO, position: "sticky", left: 0, zIndex: 30, background: C.panel }}>Aircraft</div>
               {days.map((d, i) => {
                 const isToday = iso(d) === iso(new Date());
                 return <div key={i} onClick={() => { if (viewMode !== "day") onJumpToDate(d); }}
@@ -1575,7 +1555,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                     )}
                     <div style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, position: "relative", minHeight: rowHeight }}>
 
-              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2 }}>
+              <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2, position: "sticky", left: 0, zIndex: 30 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ fontFamily: MONO, fontSize: 12.5, color: C.text, fontWeight: 600 }}>{res.code}</span>
                   <span title="Seat capacity" style={{ fontFamily: MONO, fontSize: 9.5, color: C.muted, background: C.panel, border: `1px solid ${C.borderSoft}`, borderRadius: 5, padding: "1px 5px" }}>{res.capacity}Y</span>
@@ -1583,7 +1563,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                 <div style={{ fontSize: 10.5, color: C.muted, marginTop: 2 }}>{res.variant}</div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
               </div>
-              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? "grab" : "default" }}
+              <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? (panDragActive ? "grabbing" : "grab") : "default" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
                 onDrop={e => {
                   if (!perms.editFlight) return;
@@ -1598,19 +1578,25 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                 }}
                 onMouseDown={e => {
                   // Bars call e.stopPropagation() on their own mousedown, so this only ever
-                  // fires for a genuine empty-space click — shift+drag marquee-selects,
-                  // plain drag quick-creates a flight here.
+                  // fires for a genuine empty-space click. Shift+drag marquee-selects; a plain
+                  // drag always pans (never creates a flight) — for as long as, and only as
+                  // long as, the button stays down.
                   if (!perms.editFlight) return;
                   if (e.shiftKey) { setMarquee({ startX: e.clientX, startY: e.clientY, curX: e.clientX, curY: e.clientY }); return; }
+                  const initial = { startClientX: e.clientX, startClientY: e.clientY, panStartScrollLeft: boardRef.current ? boardRef.current.scrollLeft : 0, panStartScrollTop: boardRef.current ? boardRef.current.scrollTop : 0 };
+                  panDragRef.current = initial;
+                  setPanDrag(initial);
+                }}
+                onContextMenu={e => {
+                  if (!perms.editFlight) return;
+                  e.preventDefault();
                   const rect = e.currentTarget.getBoundingClientRect();
                   const relX = e.clientX - rect.left;
                   const totalDayFloat = relX / COL;
                   const dayIndex = Math.floor(totalDayFloat);
                   const hourFrac = Math.max(0, totalDayFloat - dayIndex);
                   const depMinutes = Math.round((hourFrac * 1440) / 15) * 15;
-                  const initial = { resourceId: res.id, resourceCode: res.code, startClientX: e.clientX, startDay: dayIndex, curDay: dayIndex, depTime: minutesToHHMM(depMinutes), curClientX: e.clientX, curClientY: e.clientY, hasPanned: false, panStartScrollLeft: 0 };
-                  createDragRef.current = initial;
-                  setCreateDrag(initial);
+                  setContextMenu({ type: "create", resourceId: res.id, resourceCode: res.code, date: iso(addDays(viewStart, dayIndex)), depTime: minutesToHHMM(depMinutes), x: e.clientX, y: e.clientY });
                 }}>
                 {days.map((d, i) => {
                   const dow = d.getUTCDay();
@@ -1664,7 +1650,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                         onTouchMove={handleFlightTouchMoveBeforeDrag}
                         onTouchEnd={handleFlightTouchEndBeforeDrag}
                         onMouseDown={e => e.stopPropagation()}
-                        onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setContextMenu({ flightId: f.id, x: e.clientX, y: e.clientY }); }}
+                        onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setContextMenu({ type: "flight", flightId: f.id, x: e.clientX, y: e.clientY }); }}
                         onClick={e => {
                           if (e.shiftKey) {
                             setMultiSelectIds(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; });
@@ -1757,12 +1743,16 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       {marquee && (
         <div style={{ position: "fixed", left: Math.min(marquee.startX, marquee.curX), top: Math.min(marquee.startY, marquee.curY), width: Math.abs(marquee.curX - marquee.startX), height: Math.abs(marquee.curY - marquee.startY), background: C.amberSoft + "99", border: `1.5px dashed ${C.amber}`, zIndex: 998, pointerEvents: "none" }} />
       )}
-      {createDrag && !createDrag.hasPanned && (
-        <div style={{ position: "fixed", left: createDrag.curClientX + 14, top: createDrag.curClientY - 16, background: C.green, color: "#fff", padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
-          New flight — {createDrag.resourceCode}, {iso(addDays(viewStart, Math.min(createDrag.startDay, createDrag.curDay)))}, dep {createDrag.depTime}
+      {contextMenu && contextMenu.type === "create" && (
+        <div onClick={e => e.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 300, minWidth: 200, padding: 6, fontSize: 12.5 }}>
+          <div style={{ padding: "4px 8px 6px", fontFamily: MONO, fontSize: 11, color: C.muted, borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 4 }}>{contextMenu.resourceCode} · {contextMenu.date} · {contextMenu.depTime}</div>
+          <button onClick={() => {
+            onQuickCreate({ resourceId: contextMenu.resourceId, date: contextMenu.date, depTime: contextMenu.depTime, arrTime: minutesToHHMM((timeToMinutes(contextMenu.depTime) + 120) % 1440) });
+            setContextMenu(null);
+          }} style={ctxMenuItem}>+ New flight here</button>
         </div>
       )}
-      {contextMenu && (() => {
+      {contextMenu && contextMenu.type === "flight" && (() => {
         const f = flights.find(x => x.id === contextMenu.flightId);
         if (!f) return null;
         return (
