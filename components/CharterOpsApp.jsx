@@ -1273,7 +1273,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     groupsDataRef.current.clear();
     groupsDataRef.current.add(sorted.map(r => ({
       id: r.id,
-      content: `<div class="gantt-group"><span class="gg-code">${r.code}</span><span class="gg-cap">${r.capacity}Y</span><div class="gg-variant">${r.variant || ""}</div></div>`,
+      content: `<div class="gantt-group"><span class="gg-code">${r.code}</span><span class="gg-cap">${r.capacity}Y</span></div>`,
     })));
   }, [resources, visReady]);
 
@@ -1288,10 +1288,12 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       const stripeColor = f.status === "cancelled" ? "#E0473B" : destColor;
       const dep = f.depTime ? combineDateAndTime(f.start, f.depTime) : f.start;
       const arr = f.arrTime ? combineDateAndTime(f.start, f.arrTime) : new Date(dep.getTime() + 90 * 60000);
+      const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : "--";
+      const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : "--";
       const dimmed = filterText.trim() && !matchesFilter(f);
       return {
         id: f.id, group: f.resourceId, start: dep, end: arr,
-        content: `<b>${f.ref}</b> ${f.origin}-${f.destination}${isFerry ? " · F" : ""}`,
+        content: `<b>${f.ref}</b> ${f.origin} ${depLabel}-${arrLabel} ${f.destination}${isFerry ? " · F" : ""}`,
         className: isFerry ? "flight-item flight-ferry" : "flight-item",
         style: `border-left: 4px solid ${stripeColor}; background: ${stripeColor}1c; opacity: ${dimmed ? 0.22 : 1};`,
         editable: !!perms.editFlight,
@@ -1302,7 +1304,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     }));
     itemsDataRef.current.clear();
     itemsDataRef.current.add([...flightItems, ...maintItems]);
-  }, [flights, maintenanceBlocks, filterText, perms.editFlight, visReady]);
+  }, [flights, maintenanceBlocks, filterText, perms.editFlight, visReady, showLocal]);
 
   // Window sync — explicit nav (◀ / Today / ▶ / mode switch / From-To pickers) moves the
   // visible window; free scroll/zoom via the mouse or touch in between is untouched, since
@@ -1477,10 +1479,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         .vis-timeline { border: none !important; font-family: ${SANS}; }
         .vis-panel.vis-center, .vis-panel.vis-left, .vis-panel.vis-top, .vis-panel.vis-bottom { border-color: ${C.borderSoft} !important; }
         .vis-labelset .vis-label { border-color: ${C.borderSoft} !important; background: ${C.panel2}; }
-        .gantt-group { padding: calc(6px * var(--gantt-scale, 1)) 10px; font-size: calc(12px * var(--gantt-scale, 1)); }
-        .gg-code { font-family: ${MONO}; font-weight: 600; color: ${C.text}; }
-        .gg-cap { font-family: ${MONO}; font-size: 9.5px; color: ${C.muted}; background: ${C.panel}; border: 1px solid ${C.borderSoft}; border-radius: 5px; padding: 1px 5px; margin-left: 6px; }
-        .gg-variant { font-size: 10.5px; color: ${C.muted}; margin-top: 2px; }
+        .gantt-group { padding: calc(10px * var(--gantt-scale, 1)) 10px; font-size: calc(13px * var(--gantt-scale, 1)); display: flex; align-items: center; }
+        .gg-code { font-family: ${MONO}; font-weight: 700; color: ${C.text}; }
+        .gg-cap { font-family: ${MONO}; font-weight: 700; font-size: 10.5px; color: ${C.text}; background: ${C.panel2}; border: 1px solid ${C.border}; border-radius: 5px; padding: 1px 6px; margin-left: 8px; }
         .vis-item.flight-item { border-radius: 7px; background: ${C.panel}; color: ${C.text}; font-size: calc(11px * var(--gantt-scale, 1)); padding: calc(3px * var(--gantt-scale, 1)) 6px; font-family: ${MONO}; }
         .vis-item.flight-item.vis-selected { box-shadow: 0 0 0 2px ${C.amber}; }
         .vis-item.flight-ferry { background-image: repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px); border-style: dashed !important; }
