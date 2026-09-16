@@ -1263,8 +1263,29 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         onMove: (item, callback) => {
           const L = latestRef.current;
           if (!L.perms.editFlight) return callback(null);
-          L.onDropFlight(item.id, item.group, fromVisDate(item.start));
-          callback(null); // our own state update re-renders the item with the real (unchanged-time) values
+          const orig = L.flights.find(x => x.id === item.id);
+          if (!orig) return callback(null);
+          const newStart = fromVisDate(item.start);
+          const newEnd = fromVisDate(item.end);
+          const origEnd = orig.arrivalAt || new Date(orig.start.getTime() + 90 * 60000);
+          const origDurMin = Math.round((origEnd - orig.start) / 60000);
+          const newDurMin = Math.round((newEnd - newStart) / 60000);
+          if (Math.abs(newDurMin - origDurMin) > 1) {
+            // Duration changed — this was a genuine resize (dragging an edge), not a move.
+            // vis-timeline fires the same callback for both, so telling them apart matters:
+            // apply the new times directly instead of routing through the "preserve time"
+            // move logic below, which would otherwise silently discard the resize.
+            L.onUpdateFlight(item.id, {
+              depTime: minutesToHHMM(newStart.getUTCHours() * 60 + newStart.getUTCMinutes()),
+              arrTime: minutesToHHMM(newEnd.getUTCHours() * 60 + newEnd.getUTCMinutes()),
+            });
+          } else {
+            // Same duration — a plain drag to a new day/aircraft. Per the earlier explicit
+            // decision in this app, dragging never changes the time-of-day, only the date
+            // and/or aircraft — onDropFlight enforces exactly that.
+            L.onDropFlight(item.id, item.group, newStart);
+          }
+          callback(null); // our own state update re-renders the item with the corrected values either way
         },
         onMoving: (item, callback) => callback(item),
       });
@@ -1277,17 +1298,20 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         else { setSelectedFlightId(null); setMultiSelectIds(new Set()); }
       });
 
-      containerRef.current.addEventListener("contextmenu", e => {
+      // vis-timeline has its own native "contextmenu" event (like "select", "click", etc.) — a
+      // manual DOM listener attached to the outer container risks being intercepted by the
+      // library's own internal event handling before it ever bubbles up. Using the library's
+      // documented event hook is the correct, reliable way to catch this, not a workaround.
+      timeline.on("contextmenu", props => {
         const L = latestRef.current;
         if (!L.perms.editFlight) return;
-        e.preventDefault();
-        const props = timeline.getEventProperties(e);
+        if (props.event) props.event.preventDefault();
         if (props.item) {
-          setContextMenu({ type: "flight", flightId: props.item, x: e.clientX, y: e.clientY });
+          setContextMenu({ type: "flight", flightId: props.item, x: props.event.clientX, y: props.event.clientY });
         } else if (props.group != null && props.time) {
           const t = fromVisDate(props.time);
           const depMin = Math.round((t.getUTCHours() * 60 + t.getUTCMinutes()) / 15) * 15;
-          setContextMenu({ type: "create", resourceId: props.group, resourceCode: L.resources.find(r => r.id === props.group)?.code, date: iso(t), depTime: minutesToHHMM(depMin), x: e.clientX, y: e.clientY });
+          setContextMenu({ type: "create", resourceId: props.group, resourceCode: L.resources.find(r => r.id === props.group)?.code, date: iso(t), depTime: minutesToHHMM(depMin), x: props.event.clientX, y: props.event.clientY });
         }
       });
 
@@ -1320,7 +1344,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     const flightItems = flights.map(f => {
       const isFerry = f.legType === "ferry";
       const destColor = f.color || colorForDestination(f.destination);
-      const stripeColor = f.status === "cancelled" ? "#E0473B" : destColor;
+      const stripeColor = f.status === "cancelled" ? C.red : destColor;
+      const borderStyle = f.status === "cancelled" ? `2px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
       // f.start is already the exact scheduled_departure timestamp — no need to recombine it
       // with depTime. Arrival is the real bug fix: f.arrivalAt is the actual scheduled_arrival
       // timestamp from the database, which correctly rolls over to the next calendar day for
@@ -1337,7 +1362,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         id: f.id, group: f.resourceId, start: toVisDate(dep), end: toVisDate(arr),
         content: `<b>${f.ref}</b> ${f.origin} ${depLabel}-${arrLabel} ${f.destination}${isFerry ? " · F" : ""}`,
         className: isFerry ? "flight-item flight-ferry" : "flight-item",
-        style: `border-left: 4px solid ${stripeColor}; background: ${stripeColor}1c; opacity: ${dimmed ? 0.22 : 1};`,
+        style: `border-left: 4px solid ${stripeColor}; border-top: ${borderStyle}; border-right: ${borderStyle}; border-bottom: ${borderStyle}; background: ${stripeColor}1c; opacity: ${dimmed ? 0.22 : 1};`,
         editable: !!perms.editFlight,
       };
     });
