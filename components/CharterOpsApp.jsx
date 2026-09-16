@@ -1553,7 +1553,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                         <span style={{ fontSize: 10.5, fontWeight: 600, color: C.muted }}>{res.variant || "Unclassified"}</span>
                       </div>
                     )}
-                    <div style={{ display: "flex", borderBottom: `2px solid ${C.text}`, position: "relative", minHeight: rowHeight }}>
+                    <div style={{ display: "flex", borderBottom: `1px solid ${C.text}`, position: "relative", minHeight: rowHeight }}>
 
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2, position: "sticky", left: 0, zIndex: 30 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
