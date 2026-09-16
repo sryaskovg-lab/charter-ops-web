@@ -160,6 +160,21 @@ function combineArrivalDateTime(depDateTime, hhmmStr) {
   if (d <= depDateTime) d.setUTCDate(d.getUTCDate() + 1);
   return d;
 }
+// vis-timeline positions and labels everything using the BROWSER's local timezone — it has no
+// concept of "this data is UTC". Our whole scheduling model is UTC. Rather than fighting the
+// library, every Date fed into it is built from the real UTC calendar/clock fields but
+// constructed as a *local* Date — so when vis-timeline reads its local hours/minutes to draw
+// the axis and position items, the numbers it shows are our real UTC numbers, regardless of
+// what timezone the viewer's browser is actually in. Dates coming back OUT of the library
+// (after a drag or a right-click) go through the exact reverse.
+function toVisDate(utcDate) {
+  const d = new Date(utcDate);
+  return new Date(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds());
+}
+function fromVisDate(localDate) {
+  const d = new Date(localDate);
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds()));
+}
 // ---------- minutes-of-day helpers (drag/drop targeting + duration-based bar sizing) ----------
 function timeToMinutes(hhmmStr) { if (!hhmmStr) return null; const [h, m] = hhmmStr.split(":").map(Number); return h * 60 + m; }
 function minutesToHHMM(min) { min = ((min % 1440) + 1440) % 1440; const h = Math.floor(min / 60), m = min % 60; return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0"); }
@@ -1224,6 +1239,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   useEffect(() => {
     let cancelled = false;
     let timeline = null;
+    let nowInterval = null;
     (async () => {
       const visMod = await import("vis-timeline/standalone"); // CSS is a static top-level import above — dynamically importing CSS at runtime isn't a reliably supported bundler pattern
       if (cancelled || !containerRef.current) return;
@@ -1234,7 +1250,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       itemsDataRef.current = itemsData;
       timeline = new Timeline(containerRef.current, itemsData, groupsData, {
         stack: true,
-        showCurrentTime: true,
+        showCurrentTime: false, // the built-in version uses the browser's real local "now" — wrong relative to our UTC-as-local-disguised items; a custom time marker below replaces it correctly
         selectable: true,
         multiselect: true,
         editable: { updateTime: true, updateGroup: true, remove: false, add: false },
@@ -1247,7 +1263,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         onMove: (item, callback) => {
           const L = latestRef.current;
           if (!L.perms.editFlight) return callback(null);
-          L.onDropFlight(item.id, item.group, new Date(item.start));
+          L.onDropFlight(item.id, item.group, fromVisDate(item.start));
           callback(null); // our own state update re-renders the item with the real (unchanged-time) values
         },
         onMoving: (item, callback) => callback(item),
@@ -1269,15 +1285,20 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         if (props.item) {
           setContextMenu({ type: "flight", flightId: props.item, x: e.clientX, y: e.clientY });
         } else if (props.group != null && props.time) {
-          const t = new Date(props.time);
+          const t = fromVisDate(props.time);
           const depMin = Math.round((t.getUTCHours() * 60 + t.getUTCMinutes()) / 15) * 15;
           setContextMenu({ type: "create", resourceId: props.group, resourceCode: L.resources.find(r => r.id === props.group)?.code, date: iso(t), depTime: minutesToHHMM(depMin), x: e.clientX, y: e.clientY });
         }
       });
 
+      // Custom "now" marker, replacing the disabled built-in one — ticks forward every minute,
+      // positioned using the same UTC-as-local disguise as everything else on this board.
+      timeline.addCustomTime(toVisDate(new Date()), "now");
+      nowInterval = setInterval(() => { if (timeline) timeline.setCustomTime(toVisDate(new Date()), "now"); }, 60000);
+
       setVisReady(true);
     })();
-    return () => { cancelled = true; if (timeline) timeline.destroy(); };
+    return () => { cancelled = true; if (nowInterval) clearInterval(nowInterval); if (timeline) timeline.destroy(); };
   }, []); // created once — everything it needs is read via latestRef, not closure
 
   // Aircraft rows — grouped by type, capacity badge inline, matching the old design.
@@ -1313,7 +1334,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : "--";
       const dimmed = filterText.trim() && !matchesFilter(f);
       return {
-        id: f.id, group: f.resourceId, start: dep, end: arr,
+        id: f.id, group: f.resourceId, start: toVisDate(dep), end: toVisDate(arr),
         content: `<b>${f.ref}</b> ${f.origin} ${depLabel}-${arrLabel} ${f.destination}${isFerry ? " · F" : ""}`,
         className: isFerry ? "flight-item flight-ferry" : "flight-item",
         style: `border-left: 4px solid ${stripeColor}; background: ${stripeColor}1c; opacity: ${dimmed ? 0.22 : 1};`,
@@ -1321,7 +1342,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       };
     });
     const maintItems = (maintenanceBlocks || []).map(m => ({
-      id: "maint-" + m.id, group: m.resourceId, start: m.start, end: m.end, type: "background", className: "maintenance-block",
+      id: "maint-" + m.id, group: m.resourceId, start: toVisDate(m.start), end: toVisDate(m.end), type: "background", className: "maintenance-block",
     }));
     itemsDataRef.current.clear();
     itemsDataRef.current.add([...flightItems, ...maintItems]);
@@ -1332,7 +1353,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   // this effect only re-fires when those specific inputs change, not on every render.
   useEffect(() => {
     if (!timelineRef.current) return;
-    timelineRef.current.setWindow(viewStart, addDays(viewStart, DAYS), { animation: false });
+    timelineRef.current.setWindow(toVisDate(viewStart), toVisDate(addDays(viewStart, DAYS)), { animation: false });
   }, [viewStart, DAYS, viewMode]);
 
   // The size slider now controls visual density (row height / font size) via a CSS variable —
@@ -1511,7 +1532,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         .vis-time-axis .vis-text { color: ${C.muted}; font-size: 11px; }
         .vis-time-axis .vis-grid.vis-minor { border-color: ${C.borderSoft} !important; }
         .vis-time-axis .vis-grid.vis-major { border-color: ${C.text} !important; opacity: 0.15; }
-        .vis-current-time { background-color: ${C.red} !important; width: 2px !important; }
+        .vis-custom-time { background-color: ${C.red} !important; width: 2px !important; }
         .vis-today { background: ${C.amberSoft}; }
       `}</style>
     </div>
