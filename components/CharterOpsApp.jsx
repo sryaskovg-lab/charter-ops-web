@@ -1275,7 +1275,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       id: r.id,
       content: `<div class="gantt-group"><span class="gg-code">${r.code}</span><span class="gg-cap">${r.capacity}Y</span><div class="gg-variant">${r.variant || ""}</div></div>`,
     })));
-  }, [resources]);
+  }, [resources, visReady]);
 
   // Flight bars + maintenance-block shading — destination color as a left stripe (cancelled
   // flights override to red regardless of destination, same reasoning as before: that state
@@ -1302,7 +1302,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
     }));
     itemsDataRef.current.clear();
     itemsDataRef.current.add([...flightItems, ...maintItems]);
-  }, [flights, maintenanceBlocks, filterText, perms.editFlight]);
+  }, [flights, maintenanceBlocks, filterText, perms.editFlight, visReady]);
 
   // Window sync — explicit nav (◀ / Today / ▶ / mode switch / From-To pickers) moves the
   // visible window; free scroll/zoom via the mouse or touch in between is untouched, since
