@@ -147,6 +147,19 @@ function combineDateAndTime(baseDate, hhmmStr) {
   d.setUTCHours(h, m, 0, 0);
   return d;
 }
+// Computes the real arrival timestamp from a departure timestamp + an arrival "HH:MM" string.
+// If the arrival lands on-or-before the departure once combined with the departure's own
+// calendar day, the flight is assumed to cross midnight and actually lands the following day —
+// this is the fix for overnight flights (e.g. depart 23:00, arrive 02:00) computing an arrival
+// that's chronologically before takeoff, which is wrong in both the database and the display.
+function combineArrivalDateTime(depDateTime, hhmmStr) {
+  if (!hhmmStr || !depDateTime) return null;
+  const [h, m] = hhmmStr.split(":").map(Number);
+  const d = new Date(depDateTime);
+  d.setUTCHours(h, m, 0, 0);
+  if (d <= depDateTime) d.setUTCDate(d.getUTCDate() + 1);
+  return d;
+}
 // ---------- minutes-of-day helpers (drag/drop targeting + duration-based bar sizing) ----------
 function timeToMinutes(hhmmStr) { if (!hhmmStr) return null; const [h, m] = hhmmStr.split(":").map(Number); return h * 60 + m; }
 function minutesToHHMM(min) { min = ((min % 1440) + 1440) % 1440; const h = Math.floor(min / 60), m = min % 60; return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0"); }
@@ -196,7 +209,7 @@ function colorForDestination(code) {
   for (let i = 0; i < code.length; i++) hash = (hash * 31 + code.charCodeAt(i)) >>> 0;
   return FLIGHT_COLORS[hash % FLIGHT_COLORS.length];
 }
-function mapFlight(f) { return { id: f.id, ref: f.ref, resourceId: f.resource_id, origin: f.origin, destination: f.destination, start: new Date(f.scheduled_departure), capacity: f.capacity, status: f.status, legType: f.leg_type, version: f.version, depTime: hhmm(f.scheduled_departure), arrTime: hhmm(f.scheduled_arrival), color: f.color || null }; }
+function mapFlight(f) { return { id: f.id, ref: f.ref, resourceId: f.resource_id, origin: f.origin, destination: f.destination, start: new Date(f.scheduled_departure), arrivalAt: f.scheduled_arrival ? new Date(f.scheduled_arrival) : null, capacity: f.capacity, status: f.status, legType: f.leg_type, version: f.version, depTime: hhmm(f.scheduled_departure), arrTime: hhmm(f.scheduled_arrival), color: f.color || null }; }
 function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
 function mapOperator(o, contract) {
   return {
@@ -594,8 +607,9 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     if ("color" in patch) dbPatch.color = patch.color;
     // depTime/arrTime are HH:mm strings from the drawer's time inputs — combine them with the
     // flight's existing date rather than overwriting it, since only the time-of-day changed.
-    if (patch.depTime !== undefined) dbPatch.scheduled_departure = combineDateAndTime(patch.start || current.start, patch.depTime)?.toISOString() ?? dbPatch.scheduled_departure;
-    if (patch.arrTime !== undefined) dbPatch.scheduled_arrival = combineDateAndTime(patch.start || current.start, patch.arrTime)?.toISOString() ?? null;
+    const newDep = patch.depTime !== undefined ? combineDateAndTime(patch.start || current.start, patch.depTime) : null;
+    if (patch.depTime !== undefined) dbPatch.scheduled_departure = newDep?.toISOString() ?? dbPatch.scheduled_departure;
+    if (patch.arrTime !== undefined) dbPatch.scheduled_arrival = combineArrivalDateTime(newDep || patch.start || current.start, patch.arrTime)?.toISOString() ?? null;
     const { error } = await supabase.from("flights").update(dbPatch).eq("id", flightId);
     if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return; }
     setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, ...patch } : f));
@@ -632,7 +646,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const { data, error } = await supabase.from("flights").insert({
       ref: f.ref, resource_id: f.resourceId, origin: f.origin, destination: f.destination,
       scheduled_departure: (combineDateAndTime(newStart, f.depTime) || newStart).toISOString(),
-      scheduled_arrival: combineDateAndTime(newStart, f.arrTime)?.toISOString() ?? null,
+      scheduled_arrival: combineArrivalDateTime(combineDateAndTime(newStart, f.depTime) || newStart, f.arrTime)?.toISOString() ?? null,
       capacity: f.capacity, status: "tentative", leg_type: f.legType || "revenue", color: f.color || null,
     }).select().single();
     if (error) { pushToast(`Duplicate failed: ${error.message}`, "warn"); return; }
@@ -894,7 +908,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const { data, error } = await supabase.from("flights").insert({
       ref, resource_id: draft.resourceId, origin: draft.origin, destination: draft.destination,
       scheduled_departure: (combineDateAndTime(draft.start, draft.depTime) || draft.start).toISOString(),
-      scheduled_arrival: combineDateAndTime(draft.start, draft.arrTime)?.toISOString() ?? null,
+      scheduled_arrival: combineArrivalDateTime(combineDateAndTime(draft.start, draft.depTime) || draft.start, draft.arrTime)?.toISOString() ?? null,
       capacity: draft.capacity, status: "tentative",
     }).select().single();
     if (error) { pushToast(`Insert failed: ${error.message}`, "warn"); return false; }
@@ -911,7 +925,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const inserts = rows.map((r, i) => ({
       resource_id: r.resourceId, origin: r.origin, destination: r.destination,
       scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
-      scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
+      scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: resources.find(res => res.id === r.resourceId)?.capacity,
       status: "tentative", ref: r.flightNo ? "DV" + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
     }));
@@ -929,7 +943,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const inserts = rows.map(r => ({
       resource_id: pattern.resourceId, origin: r.origin, destination: r.destination,
       scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
-      scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
+      scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: pattern.capacity, status: "tentative", ref: r.ref,
     }));
     const { data, error } = await supabase.from("flights").insert(inserts).select();
@@ -945,7 +959,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const inserts = rows.map(r => ({
       resource_id: r.resourceId, origin: r.origin, destination: r.destination,
       scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
-      scheduled_arrival: combineDateAndTime(r.date, r.arrTime)?.toISOString() ?? null,
+      scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: resources.find(res => res.id === r.resourceId)?.capacity, status: "tentative", ref: r.ref,
     }));
     const { data, error } = await supabase.from("flights").insert(inserts).select();
@@ -1286,8 +1300,15 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
       const isFerry = f.legType === "ferry";
       const destColor = f.color || colorForDestination(f.destination);
       const stripeColor = f.status === "cancelled" ? "#E0473B" : destColor;
-      const dep = f.depTime ? combineDateAndTime(f.start, f.depTime) : f.start;
-      const arr = f.arrTime ? combineDateAndTime(f.start, f.arrTime) : new Date(dep.getTime() + 90 * 60000);
+      // f.start is already the exact scheduled_departure timestamp — no need to recombine it
+      // with depTime. Arrival is the real bug fix: f.arrivalAt is the actual scheduled_arrival
+      // timestamp from the database, which correctly rolls over to the next calendar day for
+      // an overnight flight. Recombining f.start's date with just the arrTime string (the
+      // previous approach) collapsed the arrival back onto the departure's own day, which is
+      // simply wrong for any flight that lands after midnight — it produced an arrival before
+      // the departure.
+      const dep = f.start;
+      const arr = f.arrivalAt || new Date(dep.getTime() + 90 * 60000);
       const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : "--";
       const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : "--";
       const dimmed = filterText.trim() && !matchesFilter(f);
