@@ -1984,7 +1984,7 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 420, maxWidth: "92vw" }}>
         {step === "form" && (
           <>
@@ -2266,7 +2266,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 720, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk import flights</div>
 
@@ -2411,10 +2411,17 @@ function emptyRequirement() {
     dateMode: "weekly", // "weekly" | "everyN" | "specific"
     daysOfWeek: [1, 3, 5], intervalDays: 2, specificDates: [],
     depTime: "08:00", arrTime: "11:00", startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)), ref: "",
+    hasReturn: false, returnRef: "", returnDepTime: "16:00", returnArrTime: "19:00", returnDayOffset: 0,
   };
 }
+// Each date this requirement matches becomes one "occurrence" — one leg if it's one-way, two
+// legs (outbound + return, reversed route) if hasReturn is set. Both legs of one occurrence
+// are always assigned the SAME aircraft, checked against BOTH dates before committing — a
+// round trip can't fly outbound on one tail and come home on another. The return leg's date
+// defaults to the same day as the outbound (a same-day turnaround) but can be offset forward
+// for a rotation that doesn't return until a later day.
 function runSchedulingEngine(requirements, resources, flights, isGrounded) {
-  const entries = [];
+  const occurrences = [];
   requirements.forEach((req, ri) => {
     if (!req.origin || !req.destination) return;
     let reqDates = [];
@@ -2431,36 +2438,56 @@ function runSchedulingEngine(requirements, resources, flights, isGrounded) {
       }
     }
     reqDates.forEach(d => {
-      entries.push({ reqIndex: ri, date: d, origin: req.origin.toUpperCase(), destination: req.destination.toUpperCase(), aircraftType: req.aircraftType, depTime: req.depTime, arrTime: req.arrTime, ref: req.ref.trim() });
+      const legs = [{ date: d, origin: req.origin.toUpperCase(), destination: req.destination.toUpperCase(), depTime: req.depTime, arrTime: req.arrTime, refField: "ref" }];
+      if (req.hasReturn) {
+        legs.push({
+          date: addDays(d, req.returnDayOffset || 0), origin: req.destination.toUpperCase(), destination: req.origin.toUpperCase(),
+          depTime: req.returnDepTime, arrTime: req.returnArrTime, refField: "returnRef",
+        });
+      }
+      occurrences.push({ reqIndex: ri, aircraftType: req.aircraftType, legs });
     });
   });
-  entries.sort((a, b) => a.date - b.date);
+  occurrences.sort((a, b) => a.legs[0].date - b.legs[0].date);
 
   const loadCount = new Map(resources.map(r => [r.id, 0]));
   const assignedThisRun = new Set(); // `${resourceId}|${dateISO}`
-  const refByReq = new Map(); // one auto-generated ref per requirement, reused across its dates — same flight number flying the pattern, not a new one every date
+  const refByReqField = new Map(); // one auto-generated ref per requirement+leg — same flight number every occurrence, not a new one each date
 
-  return entries.map(e => {
-    const dateKey = iso(e.date);
+  const results = [];
+  occurrences.forEach(occ => {
+    const req = requirements[occ.reqIndex];
+    const dateKeys = occ.legs.map(leg => iso(leg.date));
     const eligible = resources.filter(r => {
-      if (e.aircraftType !== "any" && r.variant !== e.aircraftType) return false;
-      if (isGrounded(r.id, e.date)) return false;
-      if (assignedThisRun.has(`${r.id}|${dateKey}`)) return false;
-      return !flights.some(f => f.resourceId === r.id && iso(f.start) === dateKey);
+      if (occ.aircraftType !== "any" && r.variant !== occ.aircraftType) return false;
+      return dateKeys.every(dateKey => {
+        if (isGrounded(r.id, new Date(dateKey))) return false;
+        if (assignedThisRun.has(`${r.id}|${dateKey}`)) return false;
+        return !flights.some(f => f.resourceId === r.id && iso(f.start) === dateKey);
+      });
     });
-    if (!refByReq.has(e.reqIndex)) refByReq.set(e.reqIndex, e.ref || ("DV" + (4800 + Math.floor(Math.random() * 900))));
-    const ref = refByReq.get(e.reqIndex);
-    if (eligible.length === 0) {
-      const anyTypeInFleet = resources.some(r => e.aircraftType === "any" || r.variant === e.aircraftType);
-      const detail = !anyTypeInFleet ? `No ${e.aircraftType} in the fleet` : "All matching aircraft busy or grounded that day";
-      return { date: e.date, origin: e.origin, destination: e.destination, depTime: e.depTime, arrTime: e.arrTime, ref, status: "unassigned", detail, resourceId: null, resourceCode: null, include: false };
+    let chosen = null;
+    if (eligible.length > 0) {
+      eligible.sort((a, b) => loadCount.get(a.id) - loadCount.get(b.id));
+      chosen = eligible[0];
+      loadCount.set(chosen.id, loadCount.get(chosen.id) + 1);
+      dateKeys.forEach(dateKey => assignedThisRun.add(`${chosen.id}|${dateKey}`));
     }
-    eligible.sort((a, b) => loadCount.get(a.id) - loadCount.get(b.id));
-    const chosen = eligible[0];
-    loadCount.set(chosen.id, loadCount.get(chosen.id) + 1);
-    assignedThisRun.add(`${chosen.id}|${dateKey}`);
-    return { date: e.date, origin: e.origin, destination: e.destination, depTime: e.depTime, arrTime: e.arrTime, ref, status: "ok", detail: "", resourceId: chosen.id, resourceCode: chosen.code, include: true };
+    const anyTypeInFleet = resources.some(r => occ.aircraftType === "any" || r.variant === occ.aircraftType);
+    const detail = !anyTypeInFleet ? `No ${occ.aircraftType} in the fleet` : "All matching aircraft busy or grounded on one of this rotation's dates";
+    occ.legs.forEach(leg => {
+      const refKey = `${occ.reqIndex}|${leg.refField}`;
+      if (!refByReqField.has(refKey)) {
+        const explicit = (req[leg.refField] || "").trim();
+        refByReqField.set(refKey, explicit || ("DV" + (4800 + Math.floor(Math.random() * 900))));
+      }
+      const ref = refByReqField.get(refKey);
+      results.push(chosen
+        ? { date: leg.date, origin: leg.origin, destination: leg.destination, depTime: leg.depTime, arrTime: leg.arrTime, ref, status: "ok", detail: "", resourceId: chosen.id, resourceCode: chosen.code, include: true }
+        : { date: leg.date, origin: leg.origin, destination: leg.destination, depTime: leg.depTime, arrTime: leg.arrTime, ref, status: "unassigned", detail, resourceId: null, resourceCode: null, include: false });
+    });
   });
+  return results;
 }
 
 // A small self-contained month-grid calendar for hand-picking exact, non-recurring dates —
@@ -2532,6 +2559,24 @@ function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
         <FieldSm label="Arrival (UTC)"><input type="time" value={req.arrTime} onChange={e => onChange({ arrTime: e.target.value })} style={inputStyle} /></FieldSm>
       </div>
 
+      <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, cursor: "pointer", fontSize: 12 }}>
+        <input type="checkbox" checked={req.hasReturn} onChange={e => onChange({ hasReturn: e.target.checked })} />
+        Round trip — add a return leg ({req.destination || "destination"} → {req.origin || "origin"})
+      </label>
+      {req.hasReturn && (
+        <div style={{ border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 10, marginBottom: 8, background: C.panel2 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+            <FieldSm label="Return flight number"><input value={req.returnRef} onChange={e => onChange({ returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+            <FieldSm label="Return departs (UTC)"><input type="time" value={req.returnDepTime} onChange={e => onChange({ returnDepTime: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label="Return arrives (UTC)"><input type="time" value={req.returnArrTime} onChange={e => onChange({ returnArrTime: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label="Days after outbound">
+              <input type="number" min={0} value={req.returnDayOffset} onChange={e => onChange({ returnDayOffset: Math.max(0, +e.target.value) })} style={{ ...inputStyle, width: 70 }} />
+            </FieldSm>
+          </div>
+          <div style={{ fontSize: 10.5, color: C.faint }}>0 = same-day turnaround at {req.destination || "the destination"}. The same aircraft flies both legs — the engine won't assign the outbound to one tail and the return to another.</div>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 10, width: "fit-content" }}>
         {[["weekly", "Days of week"], ["everyN", "Every N days"], ["specific", "Pick dates"]].map(([k, l]) => (
           <button key={k} onClick={() => onChange({ dateMode: k })} style={{ background: req.dateMode === k ? C.panel : "transparent", color: req.dateMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "5px 11px", fontSize: 11.5, fontWeight: req.dateMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: req.dateMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
@@ -2602,7 +2647,7 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 680, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Scheduling engine</div>
 
@@ -2746,7 +2791,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 560, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Generate rotation</div>
 
@@ -2895,7 +2940,7 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
   const activeAllotmentCount = included.reduce((s, f) => s + allotments.filter(a => a.flightId === f.id && a.status !== "cancelled" && a.status !== "released").length, 0);
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk delete flights</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Filter to the flights you want gone, review exactly what's affected, then commit. This can't be undone.</div>
@@ -2993,7 +3038,7 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
   const included = matches ? matches.filter(f => !excluded.has(f.id)) : [];
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk retime</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Shift dates and/or times across a whole season (or any filtered set) in one go. Nothing changes until you commit below.</div>
@@ -3196,16 +3241,23 @@ function deriveSCRSeedFromFlights(flightList, resources, role) {
   const arrivals = flightList.filter(f => f.destination === clearanceAirport);
   const departures = flightList.filter(f => f.origin === clearanceAirport);
 
-  // Same aircraft, same calendar day: this is a genuine turnaround through the clearance
-  // airport, not two unrelated movements that happen to touch it.
-  const usedArr = new Set(), usedDep = new Set();
+  // Same-day arrival+departure pairing only makes sense when requesting slots at the
+  // turnaround airport (role "destination") — that's a real single movement pair the
+  // coordinator expects combined into one line. At the departure/home airport (role
+  // "origin"), the outbound departure and the eventual return arrival are two distinct
+  // movements days or legs apart in the rotation, not a same-airport turnaround, and stay as
+  // two separate lines by design, even if they happen to land on the same calendar day.
+  let soloArrivals = arrivals, soloDepartures = departures;
   const pairs = [];
-  arrivals.forEach(a => {
-    const match = departures.find(d => !usedDep.has(d.id) && d.resourceId === a.resourceId && iso(d.start) === iso(a.start));
-    if (match) { pairs.push({ arr: a, dep: match }); usedArr.add(a.id); usedDep.add(match.id); }
-  });
-  const soloArrivals = arrivals.filter(a => !usedArr.has(a.id));
-  const soloDepartures = departures.filter(d => !usedDep.has(d.id));
+  if (role === "destination") {
+    const usedArr = new Set(), usedDep = new Set();
+    arrivals.forEach(a => {
+      const match = departures.find(d => !usedDep.has(d.id) && d.resourceId === a.resourceId && iso(d.start) === iso(a.start));
+      if (match) { pairs.push({ arr: a, dep: match }); usedArr.add(a.id); usedDep.add(match.id); }
+    });
+    soloArrivals = arrivals.filter(a => !usedArr.has(a.id));
+    soloDepartures = departures.filter(d => !usedDep.has(d.id));
+  }
 
   function daysOf(dateGetter, items) { return [...new Set(items.map(dateGetter))].map(String); }
   const lines = [];
@@ -3400,7 +3452,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
   }
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 680, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Generate SCR (Slot Clearance Request)</div>
         <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>Format per IATA SSIM Ch.6. One message, one clearance airport, any number of flights/periods as separate data lines below. Aircraft type is a best-effort guess — verify before sending.</div>
@@ -3689,7 +3741,7 @@ const td = { padding: "8px 10px" };
 function AddOperatorModal({ onClose, onCreate }) {
   const [form, setForm] = useState({ name: "", country: "", defaultRate: 100, ratesByDestination: {}, allotmentType: "fixed", optionReleaseDays: 14, status: "active" });
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 380, maxWidth: "92vw" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>New tour operator</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -3776,7 +3828,7 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
   const okCount = rows?.filter(r => r.include).length ?? 0;
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 640, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk import tour operators</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>One row per operator sets the default rate (leave destination blank); add one more row per operator for each destination-specific rate. Nothing is written until you commit below.</div>
@@ -3889,7 +3941,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
 function AddUserModal({ onClose, onCreate }) {
   const [form, setForm] = useState({ name: "", email: "", role: "commercial" });
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 360, maxWidth: "92vw" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Add a teammate</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -4180,7 +4232,7 @@ function AddMaintenanceModal({ resources, onClose, onCreate }) {
   const [form, setForm] = useState({ resourceId: resources[0]?.id, startDate: iso(addDays(today, 1)), endDate: iso(addDays(today, 3)), reason: "" });
   const valid = form.resourceId && form.startDate && form.endDate && form.startDate <= form.endDate;
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 380, maxWidth: "92vw" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Add maintenance block</div>
         <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>This aircraft is treated as unavailable for the whole span, inclusive of both dates — the scheduling engine and conflict checks respect it.</div>
@@ -4207,7 +4259,7 @@ function AddMaintenanceModal({ resources, onClose, onCreate }) {
 function AddAircraftModal({ onClose, onCreate }) {
   const [form, setForm] = useState({ code: "", variant: "", capacity: 189 });
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 340, maxWidth: "92vw" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Add aircraft</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
