@@ -62,7 +62,14 @@ function guessAcType(variant) {
 // B38M and B752 follow the same convention (737 MAX 8 -> 7M8, 757-200 -> 752) but are inferred,
 // not independently confirmed the way 7M9 is — worth double-checking these two specifically.
 const AC_TYPE_MAP = { B38M: "7M8", B39M: "7M9", B752: "752" };
-function acTypeCodeFor(variant) { return AC_TYPE_MAP[variant] || guessAcType(variant); }
+// Resource variants are stored as "B39M · 213Y" (type + seats combined in one label), not the
+// bare code — matching AC_TYPE_MAP against the whole string always missed, silently falling
+// through to the regex guess, which is what produced the wrong "39M" instead of "7M9". Pulling
+// out just the leading token before doing the lookup fixes that.
+function acTypeCodeFor(variant) {
+  const key = (variant || "").split(/[·\s]/)[0].trim();
+  return AC_TYPE_MAP[key] || guessAcType(key || variant);
+}
 function padFlightNo(ref) { return (ref || "").replace(/^[A-Z]+/, ""); }
 function airlineCodeFromRef(ref) { const m = (ref || "").match(/^[A-Z]+/); return m ? m[0] : ""; }
 
@@ -2625,11 +2632,19 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
   const [requirements, setRequirements] = useState([emptyRequirement()]);
   const [results, setResults] = useState(null);
   const [scrRole, setScrRole] = useState("destination");
+  const [scrSeason, setScrSeason] = useState("");
   const [output, setOutput] = useState(null);
   const [copied, setCopied] = useState(false);
 
   function updateReq(id, patch) { setRequirements(rs => rs.map(r => r.id === id ? { ...r, ...patch } : r)); }
-  function generate() { setResults(runSchedulingEngine(requirements, resources, flights, isGrounded)); }
+  function generate() {
+    const r = runSchedulingEngine(requirements, resources, flights, isGrounded);
+    setResults(r);
+    // Auto-preselect the season from the actual dates generated — editable afterward in case a
+    // rotation straddles a season boundary and a different message needs the other side of it.
+    const firstOk = r.find(x => x.include);
+    if (firstOk) setScrSeason(iataSeasonFor(firstOk.date));
+  }
 
   const included = results?.filter(r => r.include) ?? [];
   const okCount = included.length;
@@ -2641,7 +2656,7 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
   function generateSCR() {
     const draftFlights = included.map((r, i) => ({ id: "draft" + i, resourceId: r.resourceId, origin: r.origin, destination: r.destination, start: r.date, ref: r.ref, depTime: r.depTime, arrTime: r.arrTime }));
     const seed = deriveSCRSeedFromFlights(draftFlights, resources, scrRole);
-    const header = { creatorRef: "", season: iataSeasonFor(draftFlights[0].start), messageDate: iso(today), clearanceAirport: seed.clearanceAirport, si: "", gi: "BRGDS" };
+    const header = { creatorRef: "", season: scrSeason || iataSeasonFor(draftFlights[0].start), messageDate: iso(today), clearanceAirport: seed.clearanceAirport, si: "", gi: "BRGDS" };
     setOutput(buildSCRMessage(header, seed.lines, draftFlights));
     setCopied(false);
   }
@@ -2692,10 +2707,13 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
                 </tbody>
               </table>
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
               <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} assignable{unassignedCount > 0 ? `, ${unassignedCount} couldn't be assigned` : ""}</span>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                 <button onClick={() => setResults(null)} style={miniBtn}>Back</button>
+                <FieldSm label="Season">
+                  <input value={scrSeason} onChange={e => setScrSeason(e.target.value.toUpperCase())} placeholder="e.g. W26" title="Auto-set from the generated dates — override if this rotation should be filed under the other season" style={{ ...inputStyle, width: 56, padding: "6px 6px", textAlign: "center" }} />
+                </FieldSm>
                 <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
                 <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
                 <button onClick={generateSCR} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, boxShadow: okCount ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
