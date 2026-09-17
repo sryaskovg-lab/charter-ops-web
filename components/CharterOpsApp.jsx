@@ -1431,9 +1431,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
               const isToday = iso(d) === iso(new Date());
               return <div key={i} onClick={() => { if (viewMode !== "day") onJumpToDate(d); }}
                 title={viewMode !== "day" ? "Click to view this day alone" : undefined}
-                style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 11, fontFamily: MONO, color: isToday ? C.amber : C.muted, borderLeft: `1.5px solid ${C.border}`, background: isToday ? C.amberSoft : (isWeekend ? C.panel2 : "transparent"), cursor: viewMode !== "day" ? "pointer" : "default" }}>
-                <div>{d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })}</div>
-                <div style={{ color: isToday ? C.amber : C.faint }}>{d.getUTCDate()}/{d.getUTCMonth() + 1}</div>
+                style={{ width: COL, flexShrink: 0, textAlign: "center", padding: "8px 0 2px", fontSize: 12, fontFamily: MONO, color: isToday ? C.amber : C.text, borderLeft: `1.5px solid ${C.border}`, background: isToday ? C.amberSoft : (isWeekend ? C.panel2 : "transparent"), cursor: viewMode !== "day" ? "pointer" : "default" }}>
+                <div style={{ fontWeight: 700, color: isToday ? C.amber : C.text }}>{d.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" })}</div>
+                <div style={{ fontWeight: 700, color: isToday ? C.amber : C.text }}>{d.getUTCDate()}/{d.getUTCMonth() + 1}</div>
                 {showHourTicks && (
                   <div style={{ display: "flex", borderTop: `1px solid ${C.borderSoft}`, marginTop: 2 }}>
                     {HOUR_TICKS.map((h, hi) => <div key={hi} style={{ width: TICK, fontSize: 8.5, color: C.faint }}>{h}</div>)}
