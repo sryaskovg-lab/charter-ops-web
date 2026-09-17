@@ -1181,6 +1181,48 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 // ---------- schedule board ----------
 const HOUR_TICKS = [0, 3, 6, 9, 12, 15, 18, 21]; // every 3h — labeled 0000/0300/.../2100, always UTC
 function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
+// ---------- schedule validation engine ----------
+// Real operational checks, not decorative ones: turnaround time, route continuity (does the
+// next flight actually depart from where this aircraft just landed), capacity vs the
+// aircraft's current configuration, and double-booking. Each issue names the actual numbers
+// involved rather than just flagging a flight, matching how a real duty officer would want it
+// explained. Advisory only — nothing here blocks or auto-corrects anything.
+const MIN_TURNAROUND_MIN = 45;
+function computeScheduleIssues(flights, resources) {
+  const issues = [];
+  const byResource = new Map(resources.map(r => [r.id, []]));
+  flights.forEach(f => { if (byResource.has(f.resourceId)) byResource.get(f.resourceId).push(f); });
+
+  byResource.forEach((resFlights, resourceId) => {
+    const resource = resources.find(r => r.id === resourceId);
+    const sorted = [...resFlights].sort((a, b) => a.start - b.start);
+    sorted.forEach((f, i) => {
+      if (resource && f.capacity && f.capacity > resource.capacity && f.status !== "cancelled") {
+        issues.push({ id: `cap-${f.id}`, severity: "error", flightId: f.id, kind: "Capacity",
+          message: `${f.ref} is booked for ${f.capacity} seats, but ${resource.code} is currently configured for ${resource.capacity}.` });
+      }
+      if (i > 0) {
+        const prev = sorted[i - 1];
+        if (prev.status === "cancelled" || f.status === "cancelled") return;
+        const prevArr = prev.arrivalAt || new Date(prev.start.getTime() + 90 * 60000);
+        const gapMin = Math.round((f.start - prevArr) / 60000);
+        if (gapMin < 0) {
+          issues.push({ id: `overlap-${f.id}`, severity: "error", flightId: f.id, kind: "Double-booked",
+            message: `${f.ref} departs before ${prev.ref} has landed — ${resource?.code || "this aircraft"} is double-booked.` });
+        } else if (gapMin < MIN_TURNAROUND_MIN) {
+          issues.push({ id: `turn-${f.id}`, severity: "warn", flightId: f.id, kind: "Turnaround",
+            message: `${prev.ref} arrives ${iso(prevArr)} — only ${gapMin} min before ${f.ref} departs, against a ${MIN_TURNAROUND_MIN} min minimum.` });
+        }
+        if (prev.destination && f.origin && prev.destination !== f.origin && prev.legType !== "ferry" && f.legType !== "ferry") {
+          issues.push({ id: `geo-${f.id}`, severity: "warn", flightId: f.id, kind: "Route gap",
+            message: `${f.ref} departs from ${f.origin}, but ${resource?.code || "this aircraft"} last landed at ${prev.destination} on ${prev.ref}. Add a ferry leg or check the routing.` });
+        }
+      }
+    });
+  });
+  return issues.sort((a, b) => (a.severity === "error" ? 0 : 1) - (b.severity === "error" ? 0 : 1));
+}
+
 function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks }) {
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -1210,6 +1252,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   const nowX = LABELW + nowCol * COL + ((now.getUTCHours() * 60 + now.getUTCMinutes()) / 1440) * COL;
 
   const [showDestLegend, setShowDestLegend] = useState(false);
+  const [showIssues, setShowIssues] = useState(false);
+  const issues = useMemo(() => computeScheduleIssues(flights, resources), [flights, resources]);
+  const errorCount = issues.filter(i => i.severity === "error").length;
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [filterText, setFilterText] = useState("");
   const [contextMenu, setContextMenu] = useState(null); // { type: 'flight'|'create', ... }
@@ -1410,6 +1455,10 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
             style={{ ...inputStyle, width: 150, fontSize: 12 }} />
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
             {showLocal ? "Local time" : "UTC"}
+          </button>
+          <button onClick={() => setShowIssues(v => !v)} title="Turnaround, routing, capacity and double-booking checks"
+            style={{ ...navBtn, background: showIssues ? C.redSoft : (errorCount > 0 ? C.redSoft : issues.length > 0 ? C.amberSoft : "transparent"), borderColor: issues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.border, color: issues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.text, fontWeight: issues.length > 0 ? 600 : 500 }}>
+            Issues{issues.length > 0 ? ` (${issues.length})` : ""}
           </button>
           <div title="Box size / zoom (in Period view)" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
             <span style={{ fontSize: 10 }}>A</span>
@@ -1727,6 +1776,38 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
             }} style={{ ...miniBtn, background: C.red, color: "#fff", borderColor: C.red, padding: "5px 12px" }}>Delete</button>
           )}
           <button onClick={() => setMultiSelectIds(new Set())} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>Clear</button>
+        </div>
+      )}
+      {showIssues && (
+        <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 360, maxWidth: "92vw", background: C.panel, borderLeft: `1px solid ${C.border}`, boxShadow: "-12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Issues</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Turnaround, routing, capacity, double-booking — advisory only, nothing here is blocked.</div>
+            </div>
+            <button onClick={() => setShowIssues(false)} style={{ background: "none", border: "none", fontSize: 18, color: C.faint, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+            {issues.length === 0 && (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No issues found across the currently loaded flights.</div>
+            )}
+            {issues.map(issue => (
+              <button key={issue.id} onClick={() => {
+                setSelectedFlightId(issue.flightId);
+                setMultiSelectIds(new Set());
+                const f = flights.find(x => x.id === issue.flightId);
+                if (f && boardRef.current) {
+                  const dayIdx = colFor(f.start);
+                  if (dayIdx >= 0 && dayIdx < days.length) boardRef.current.scrollLeft = Math.max(0, dayIdx * COL - 200);
+                }
+              }} style={{ display: "block", width: "100%", textAlign: "left", background: issue.flightId === selectedFlightId ? C.amberSoft : C.panel2, border: `1px solid ${issue.severity === "error" ? C.red : C.amber}33`, borderLeft: `3px solid ${issue.severity === "error" ? C.red : C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, cursor: "pointer", fontFamily: SANS }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: issue.severity === "error" ? C.red : C.amber }}>{issue.kind}</span>
+                </div>
+                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
+              </button>
+            ))}
+          </div>
         </div>
       )}
       <style>{`.flight-bar:hover { box-shadow: 0 3px 10px rgba(30,42,61,0.16); transform: translateY(-1px); }`}</style>
