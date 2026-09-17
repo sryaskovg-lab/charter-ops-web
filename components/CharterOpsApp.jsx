@@ -58,6 +58,11 @@ function guessAcType(variant) {
   const m = (variant || "").match(/^[A-Z]?(\w{3})/);
   return m ? m[1].toUpperCase() : "___";
 }
+// Real IATA equipment codes for this fleet — confirmed against an actual SCR ("B39M" -> "7M9").
+// B38M and B752 follow the same convention (737 MAX 8 -> 7M8, 757-200 -> 752) but are inferred,
+// not independently confirmed the way 7M9 is — worth double-checking these two specifically.
+const AC_TYPE_MAP = { B38M: "7M8", B39M: "7M9", B752: "752" };
+function acTypeCodeFor(variant) { return AC_TYPE_MAP[variant] || guessAcType(variant); }
 function padFlightNo(ref) { return (ref || "").replace(/^[A-Z]+/, ""); }
 function airlineCodeFromRef(ref) { const m = (ref || "").match(/^[A-Z]+/); return m ? m[0] : ""; }
 
@@ -165,7 +170,7 @@ function mapOperator(o, contract) {
 function rateFor(op, destination) { return op?.ratesByDestination?.[destination] ?? op?.defaultRate ?? 0; }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }] = await Promise.all([
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     supabase.from("flights").select("*").order("scheduled_departure"),
     supabase.from("tour_operators").select("*").order("name"),
@@ -176,6 +181,7 @@ async function fetchAll() {
     supabase.from("tasks").select("*").order("created_at"),
     supabase.from("notifications").select("*").order("created_at", { ascending: false }).limit(30),
     supabase.from("maintenance_blocks").select("*").order("start_at"),
+    supabase.from("acknowledged_issues").select("*"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
@@ -188,6 +194,7 @@ async function fetchAll() {
     tasks: tasks || [],
     notifications: notifications || [],
     maintenanceBlocks: (maintenanceBlocks || []).map(mapMaintenanceBlock),
+    acknowledgedIssueIds: (ackIssues || []).map(a => a.issue_id),
   };
 }
 
@@ -311,6 +318,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   const [loaded, setLoaded] = useState(false);
   const [resources, setResources] = useState([]);
   const [maintenanceBlocks, setMaintenanceBlocks] = useState([]);
+  const [acknowledgedIssueIds, setAcknowledgedIssueIds] = useState(() => new Set());
   const [flights, setFlightsRaw] = useState([]);
   const [operators, setOperatorsRaw] = useState([]);
   const [allotments, setAllotmentsRaw] = useState([]);
@@ -457,6 +465,17 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     setMaintenanceBlocks(mb => mb.filter(m => m.id !== id));
   }
 
+  async function acknowledgeIssue(issueId) {
+    const { error } = await supabase.from("acknowledged_issues").insert({ issue_id: issueId, acknowledged_by: profile.id });
+    if (error) { pushToast(`Could not acknowledge: ${error.message}`, "warn"); return; }
+    setAcknowledgedIssueIds(prev => new Set(prev).add(issueId));
+  }
+  async function unacknowledgeIssue(issueId) {
+    const { error } = await supabase.from("acknowledged_issues").delete().eq("issue_id", issueId);
+    if (error) { pushToast(`Could not clear: ${error.message}`, "warn"); return; }
+    setAcknowledgedIssueIds(prev => { const next = new Set(prev); next.delete(issueId); return next; });
+  }
+
   // A date/resource pair is grounded if any maintenance block for that aircraft covers that
   // calendar day. Used both by the Aircraft tab display and by the scheduling engine, so the
   // engine never proposes a flight on a tail that's actually down.
@@ -470,10 +489,10 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds } = await fetchAll();
       if (cancelled) return;
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
-      setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks);
+      setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks); setAcknowledgedIssueIds(new Set(acknowledgedIssueIds));
       setLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -1080,7 +1099,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
-              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} />
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks}
+              acknowledgedIssueIds={acknowledgedIssueIds} onAcknowledgeIssue={acknowledgeIssue} onUnacknowledgeIssue={unacknowledgeIssue} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1126,7 +1146,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks }) {
+function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue }) {
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
   // population race, the timezone disguise, the move/resize conflation, three attempts at
@@ -1156,8 +1176,11 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
 
   const [showDestLegend, setShowDestLegend] = useState(false);
   const [showIssues, setShowIssues] = useState(false);
-  const issues = useMemo(() => computeScheduleIssues(flights, resources), [flights, resources]);
-  const errorCount = issues.filter(i => i.severity === "error").length;
+  const allIssues = useMemo(() => computeScheduleIssues(flights, resources), [flights, resources]);
+  const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
+  const acknowledgedIssuesList = allIssues.filter(i => acknowledgedIssueIds.has(i.id));
+  const errorCount = activeIssues.filter(i => i.severity === "error").length;
+  const [issuesTab, setIssuesTab] = useState("active"); // "active" | "acknowledged"
   const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [filterText, setFilterText] = useState("");
   const [contextMenu, setContextMenu] = useState(null); // { type: 'flight'|'create', ... }
@@ -1360,8 +1383,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
             {showLocal ? "Local time" : "UTC"}
           </button>
           <button onClick={() => setShowIssues(v => !v)} title="Turnaround, routing, capacity and double-booking checks"
-            style={{ ...navBtn, background: showIssues ? C.redSoft : (errorCount > 0 ? C.redSoft : issues.length > 0 ? C.amberSoft : "transparent"), borderColor: issues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.border, color: issues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.text, fontWeight: issues.length > 0 ? 600 : 500 }}>
-            Issues{issues.length > 0 ? ` (${issues.length})` : ""}
+            style={{ ...navBtn, background: showIssues ? C.redSoft : (errorCount > 0 ? C.redSoft : activeIssues.length > 0 ? C.amberSoft : "transparent"), borderColor: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.border, color: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.text, fontWeight: activeIssues.length > 0 ? 600 : 500 }}>
+            Issues{activeIssues.length > 0 ? ` (${activeIssues.length})` : ""}
           </button>
           <div title="Box size / zoom (in Period view)" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
             <span style={{ fontSize: 10 }}>A</span>
@@ -1682,7 +1705,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         </div>
       )}
       {showIssues && (
-        <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 360, maxWidth: "92vw", background: C.panel, borderLeft: `1px solid ${C.border}`, boxShadow: "-12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
+        <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 380, maxWidth: "92vw", background: C.panel, borderLeft: `1px solid ${C.border}`, boxShadow: "-12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
           <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>Issues</div>
@@ -1690,25 +1713,46 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
             </div>
             <button onClick={() => setShowIssues(false)} style={{ background: "none", border: "none", fontSize: 18, color: C.faint, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
           </div>
+          <div style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, padding: "8px 12px 0" }}>
+            {[["active", `Active (${activeIssues.length})`], ["acknowledged", `Acknowledged (${acknowledgedIssuesList.length})`]].map(([k, l]) => (
+              <button key={k} onClick={() => setIssuesTab(k)} style={{ background: "none", border: "none", borderBottom: issuesTab === k ? `2px solid ${C.amber}` : "2px solid transparent", color: issuesTab === k ? C.text : C.muted, fontWeight: issuesTab === k ? 600 : 500, fontSize: 12.5, padding: "6px 10px", cursor: "pointer", fontFamily: SANS }}>{l}</button>
+            ))}
+          </div>
           <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
-            {issues.length === 0 && (
-              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No issues found across the currently loaded flights.</div>
+            {issuesTab === "active" && activeIssues.length === 0 && (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>Nothing outstanding — every issue is either resolved or acknowledged.</div>
             )}
-            {issues.map(issue => (
-              <button key={issue.id} onClick={() => {
-                setSelectedFlightId(issue.flightId);
-                setMultiSelectIds(new Set());
-                const f = flights.find(x => x.id === issue.flightId);
-                if (f && boardRef.current) {
-                  const dayIdx = colFor(f.start);
-                  if (dayIdx >= 0 && dayIdx < days.length) boardRef.current.scrollLeft = Math.max(0, dayIdx * COL - 200);
-                }
-              }} style={{ display: "block", width: "100%", textAlign: "left", background: issue.flightId === selectedFlightId ? C.amberSoft : C.panel2, border: `1px solid ${issue.severity === "error" ? C.red : C.amber}33`, borderLeft: `3px solid ${issue.severity === "error" ? C.red : C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, cursor: "pointer", fontFamily: SANS }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
-                  <span style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: issue.severity === "error" ? C.red : C.amber }}>{issue.kind}</span>
-                </div>
+            {issuesTab === "active" && activeIssues.map(issue => (
+              <div key={issue.id} style={{ background: issue.flightId === selectedFlightId ? C.amberSoft : C.panel2, border: `1px solid ${issue.severity === "error" ? C.red : C.amber}33`, borderLeft: `3px solid ${issue.severity === "error" ? C.red : C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS }}>
+                <button onClick={() => {
+                  setSelectedFlightId(issue.flightId);
+                  setMultiSelectIds(new Set());
+                  // Using the flight bar's own DOM element (already rendered if its day is in
+                  // the currently loaded range) covers both axes at once — no manual day/lane
+                  // math that could drift out of sync with the actual layout.
+                  requestAnimationFrame(() => {
+                    document.querySelector(`[data-flight-id="${issue.flightId}"]`)?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+                  });
+                }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: issue.severity === "error" ? C.red : C.amber, marginBottom: 3 }}>{issue.kind}</div>
+                  <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
+                </button>
+                {perms.editFlight && (
+                  <button onClick={() => onAcknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11 }}>Acknowledge</button>
+                )}
+              </div>
+            ))}
+            {issuesTab === "acknowledged" && acknowledgedIssuesList.length === 0 && (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No acknowledged issues.</div>
+            )}
+            {issuesTab === "acknowledged" && acknowledgedIssuesList.map(issue => (
+              <div key={issue.id} style={{ background: C.panel2, border: `1px solid ${C.borderSoft}`, borderLeft: `3px solid ${C.faint}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS, opacity: 0.75 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.faint, marginBottom: 3 }}>{issue.kind}</div>
                 <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
-              </button>
+                {perms.editFlight && (
+                  <button onClick={() => onUnacknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11, color: C.red, borderColor: C.red }}>Delete</button>
+                )}
+              </div>
             ))}
           </div>
         </div>
@@ -1930,7 +1974,7 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }
       depFlightId: scrLeg === "origin" ? draftFlight.id : "",
       periodFrom: form.date, periodTo: form.date,
       days: [String(jsToIataDay(draftFlight.start.getUTCDay()))],
-      seats: form.capacity, acType: guessAcType(resources.find(r => r.id === form.resourceId)?.variant),
+      seats: form.capacity, acType: acTypeCodeFor(resources.find(r => r.id === form.resourceId)?.variant),
       ...(code ? { [scrLeg === "destination" ? "arrDesignator" : "depDesignator"]: code } : {}),
     });
     const header = { creatorRef, season: iataSeasonFor(draftFlight.start), messageDate: iso(today), clearanceAirport, si: "", gi: "BRGDS" };
@@ -2362,18 +2406,33 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
 // it processes requirements in date order and never goes back to reshuffle an earlier
 // assignment to make a later one fit better.
 function emptyRequirement() {
-  return { id: Math.random().toString(36).slice(2), origin: "", destination: "", aircraftType: "any", daysOfWeek: [1, 3, 5], depTime: "08:00", arrTime: "11:00", startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)), ref: "" };
+  return {
+    id: Math.random().toString(36).slice(2), origin: "", destination: "", aircraftType: "any",
+    dateMode: "weekly", // "weekly" | "everyN" | "specific"
+    daysOfWeek: [1, 3, 5], intervalDays: 2, specificDates: [],
+    depTime: "08:00", arrTime: "11:00", startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)), ref: "",
+  };
 }
 function runSchedulingEngine(requirements, resources, flights, isGrounded) {
   const entries = [];
   requirements.forEach((req, ri) => {
     if (!req.origin || !req.destination) return;
-    const start = new Date(req.startDate), end = new Date(req.endDate);
-    for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
-      if (req.daysOfWeek.includes(d.getUTCDay())) {
-        entries.push({ reqIndex: ri, date: new Date(d), origin: req.origin.toUpperCase(), destination: req.destination.toUpperCase(), aircraftType: req.aircraftType, depTime: req.depTime, arrTime: req.arrTime, ref: req.ref.trim() });
+    let reqDates = [];
+    if (req.dateMode === "specific") {
+      reqDates = [...(req.specificDates || [])].sort().map(s => new Date(s));
+    } else if (req.dateMode === "everyN") {
+      const start = new Date(req.startDate), end = new Date(req.endDate);
+      const step = Math.max(1, req.intervalDays || 1);
+      for (let d = new Date(start); d <= end; d = addDays(d, step)) reqDates.push(new Date(d));
+    } else {
+      const start = new Date(req.startDate), end = new Date(req.endDate);
+      for (let d = new Date(start); d <= end; d = addDays(d, 1)) {
+        if (req.daysOfWeek.includes(d.getUTCDay())) reqDates.push(new Date(d));
       }
     }
+    reqDates.forEach(d => {
+      entries.push({ reqIndex: ri, date: d, origin: req.origin.toUpperCase(), destination: req.destination.toUpperCase(), aircraftType: req.aircraftType, depTime: req.depTime, arrTime: req.arrTime, ref: req.ref.trim() });
+    });
   });
   entries.sort((a, b) => a.date - b.date);
 
@@ -2404,6 +2463,55 @@ function runSchedulingEngine(requirements, resources, flights, isGrounded) {
   });
 }
 
+// A small self-contained month-grid calendar for hand-picking exact, non-recurring dates —
+// click a day to toggle it, navigate months with the arrows. Selected dates are the actual
+// output; there's no pattern to describe, which is the point for a "one flight every 10 days
+// for three months, but only on the days I actually pick" kind of schedule.
+function MultiDatePicker({ selected, onChange }) {
+  const [viewMonth, setViewMonth] = useState(() => { const d = new Date(today); d.setUTCDate(1); return d; });
+  const selectedSet = new Set(selected);
+  const year = viewMonth.getUTCFullYear(), month = viewMonth.getUTCMonth();
+  const firstDow = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  function toggle(d) {
+    const dateStr = iso(new Date(Date.UTC(year, month, d)));
+    const next = selectedSet.has(dateStr) ? selected.filter(x => x !== dateStr) : [...selected, dateStr];
+    onChange(next);
+  }
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, width: 260 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <button onClick={() => setViewMonth(d => { const n = new Date(d); n.setUTCMonth(n.getUTCMonth() - 1); return n; })} style={miniBtn}>◀</button>
+        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{viewMonth.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}</div>
+        <button onClick={() => setViewMonth(d => { const n = new Date(d); n.setUTCMonth(n.getUTCMonth() + 1); return n; })} style={miniBtn}>▶</button>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3, fontSize: 10, color: C.faint, textAlign: "center", marginBottom: 3 }}>
+        {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i}>{d}</div>)}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 3 }}>
+        {cells.map((d, i) => {
+          if (d == null) return <div key={i} />;
+          const dateStr = iso(new Date(Date.UTC(year, month, d)));
+          const isSel = selectedSet.has(dateStr);
+          return (
+            <button key={i} onClick={() => toggle(d)}
+              style={{ width: 30, height: 30, borderRadius: 6, border: isSel ? `1px solid ${C.amber}` : `1px solid ${C.borderSoft}`, background: isSel ? C.amber : "transparent", color: isSel ? ON_ACCENT : C.text, fontSize: 11.5, cursor: "pointer", fontFamily: MONO }}>
+              {d}
+            </button>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+        <span style={{ fontSize: 11, color: C.muted }}>{selected.length} date{selected.length === 1 ? "" : "s"} picked</span>
+        {selected.length > 0 && <button onClick={() => onChange([])} style={{ ...miniBtn, fontSize: 11, padding: "3px 8px" }}>Clear</button>}
+      </div>
+    </div>
+  );
+}
+
 function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
   const variants = [...new Set(resources.map(r => r.variant).filter(Boolean))];
   return (
@@ -2422,16 +2530,46 @@ function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
         <FieldSm label="Departure (UTC)"><input type="time" value={req.depTime} onChange={e => onChange({ depTime: e.target.value })} style={inputStyle} /></FieldSm>
         <FieldSm label="Arrival (UTC)"><input type="time" value={req.arrTime} onChange={e => onChange({ arrTime: e.target.value })} style={inputStyle} /></FieldSm>
-        <FieldSm label="Start date"><input type="date" value={req.startDate} onChange={e => onChange({ startDate: e.target.value })} style={inputStyle} /></FieldSm>
-        <FieldSm label="End date"><input type="date" value={req.endDate} onChange={e => onChange({ endDate: e.target.value })} style={inputStyle} /></FieldSm>
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+
+      <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 10, width: "fit-content" }}>
+        {[["weekly", "Days of week"], ["everyN", "Every N days"], ["specific", "Pick dates"]].map(([k, l]) => (
+          <button key={k} onClick={() => onChange({ dateMode: k })} style={{ background: req.dateMode === k ? C.panel : "transparent", color: req.dateMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "5px 11px", fontSize: 11.5, fontWeight: req.dateMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: req.dateMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
+        ))}
+      </div>
+
+      {(req.dateMode === "weekly" || req.dateMode === "everyN") && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8, alignItems: "flex-end" }}>
+          <FieldSm label="Start date"><input type="date" value={req.startDate} onChange={e => onChange({ startDate: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label="End date"><input type="date" value={req.endDate} onChange={e => onChange({ endDate: e.target.value })} style={inputStyle} /></FieldSm>
+          {req.dateMode === "everyN" && (
+            <FieldSm label="Every N days">
+              <input type="number" min={1} value={req.intervalDays} onChange={e => onChange({ intervalDays: Math.max(1, +e.target.value) })} style={{ ...inputStyle, width: 70 }} />
+            </FieldSm>
+          )}
+        </div>
+      )}
+
+      {req.dateMode === "weekly" && (
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
           {DOW.map((d, i) => (
             <button key={i} onClick={() => onChange({ daysOfWeek: req.daysOfWeek.includes(i) ? req.daysOfWeek.filter(x => x !== i) : [...req.daysOfWeek, i].sort() })}
               style={{ ...miniBtn, padding: "4px 7px", fontSize: 11, background: req.daysOfWeek.includes(i) ? C.amber : "transparent", color: req.daysOfWeek.includes(i) ? ON_ACCENT : C.text, borderColor: req.daysOfWeek.includes(i) ? C.amber : C.border }}>{d}</button>
           ))}
         </div>
+      )}
+      {req.dateMode === "everyN" && (
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>
+          Repeats every {req.intervalDays || 1} day{(req.intervalDays || 1) === 1 ? "" : "s"} starting {req.startDate}, through {req.endDate} — not tied to weekdays.
+        </div>
+      )}
+      {req.dateMode === "specific" && (
+        <div style={{ marginBottom: 8 }}>
+          <MultiDatePicker selected={req.specificDates || []} onChange={dates => onChange({ specificDates: dates })} />
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "flex-end" }}>
         {canRemove && <button onClick={onRemove} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove route</button>}
       </div>
     </div>
@@ -2451,7 +2589,9 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
   const included = results?.filter(r => r.include) ?? [];
   const okCount = included.length;
   const unassignedCount = results?.filter(r => r.status === "unassigned").length ?? 0;
-  const canGenerate = requirements.some(r => r.origin.trim() && r.destination.trim() && r.daysOfWeek.length > 0);
+  const canGenerate = requirements.some(r => r.origin.trim() && r.destination.trim() && (
+    r.dateMode === "specific" ? (r.specificDates || []).length > 0 : (r.dateMode === "everyN" || r.daysOfWeek.length > 0)
+  ));
 
   function generateSCR() {
     const draftFlights = included.map((r, i) => ({ id: "draft" + i, resourceId: r.resourceId, origin: r.origin, destination: r.destination, start: r.date, ref: r.ref, depTime: r.depTime, arrTime: r.arrTime }));
@@ -2958,12 +3098,24 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
 // can carry several data lines — one per flight/period/day-pattern combination — which is
 // exactly how a real multi-flight or multi-period request is meant to be filed, not as
 // separate messages.
+// Both tables below are transcribed directly from Schedule Coordination Austria's official
+// SCR format spec (itself based on IATA SSIM Ch.6) — action codes are the airline-usable
+// subset (the coordinator-side codes K/T/X/H/U/O/W are replies, not something an airline sends).
 const SCR_ACTION_CODES = [
-  ["N", "New request"], ["C", "Schedule to be changed (old data)"], ["R", "Revised schedule (offer acceptable)"],
-  ["L", "Revised schedule (no offer acceptable)"], ["D", "Delete schedule"], ["A", "Accept offer — no further improvement"],
-  ["P", "Accept offer — maintain on waitlist"], ["Z", "Decline offer"],
+  ["N", "New request of slot"], ["D", "Delete confirmed slot"], ["C", "Slot to be changed"],
+  ["R", "Revised slot request"], ["A", "Accept offer"], ["P", "Accept offer with pending request time"],
+  ["Z", "Decline offer"],
 ];
-const SCR_SERVICE_TYPES = [["J", "Scheduled passenger"], ["C", "Charter passenger"], ["G", "Additional passenger"], ["F", "Scheduled cargo/mail"], ["H", "Charter cargo/mail"], ["P", "Positioning/ferry"], ["K", "Training"], ["X", "Technical stop"], ["T", "Technical test"]];
+const SCR_SERVICE_TYPES = [
+  ["J", "Scheduled — passenger, normal service"], ["U", "Scheduled — air ambulance/humanitarian"],
+  ["F", "Scheduled — cargo/mail (loose or preloaded)"], ["M", "Scheduled — mail only"],
+  ["Q", "Scheduled — passenger/cargo (mixed config)"], ["G", "Additional — passenger, normal service"],
+  ["A", "Additional — cargo/mail"], ["R", "Additional — passenger/cargo (mixed config)"],
+  ["C", "Charter — passenger only"], ["O", "Charter — special handling (e.g. migrant/immigrant)"],
+  ["H", "Charter — cargo/mail"], ["L", "Charter — passenger and cargo/mail"],
+  ["P", "Non-revenue (positioning/ferry/delivery/demo)"], ["T", "Technical test"], ["K", "Crew training"],
+  ["E", "Special (government)"], ["W", "Military"], ["X", "Technical stop"], ["I", "State/diplomatic"],
+];
 const IATA_DAYS = [["1", "Mon"], ["2", "Tue"], ["3", "Wed"], ["4", "Thu"], ["5", "Fri"], ["6", "Sat"], ["7", "Sun"]];
 
 function newSCRLine(seed) {
@@ -2976,6 +3128,18 @@ function newSCRLine(seed) {
   };
 }
 
+// Rebuilt against Schedule Coordination Austria's official SCR format spec (itself sourced
+// from IATA SSIM Chapter 6) — verified character-by-character against all three of their
+// worked examples below. This supersedes an earlier version built from two hand-typed PRG
+// examples that turned out to disagree with the authoritative spec in several real ways: no
+// "SKD" qualifier exists in the standard (the field is just the other airport's code + time),
+// the clearance airport itself is never repeated in the line, the arrival leg is listed
+// FIRST (not departure), a single day is still written as a doubled range (not shortened),
+// and there's a real, documented space-vs-no-space rule between the action code and the
+// flight number depending on whether the line opens with an arrival or a departure.
+//   NABC0123 15MAR15MAR 0000060 18973H LNZ0900 C                        (arrival only)
+//   N ABC5678 15MAR15MAR 0000060 18973H 1200LNZ C                       (departure only)
+//   NABC9876 ABC5432 17MAR28MAR 1230000 18973H LNZ1430 1455LNZ CC       (arrival + departure)
 function buildSCRDataLine(line, flights, clearanceAirport) {
   const arrFlight = flights.find(f => f.id === line.arrFlightId) || null;
   const depFlight = flights.find(f => f.id === line.depFlightId) || null;
@@ -2983,23 +3147,31 @@ function buildSCRDataLine(line, flights, clearanceAirport) {
   const acType = (line.acType || "").padEnd(3, "_").slice(0, 3);
   const arrFlt = arrFlight ? `${line.arrDesignator}${padFlightNo(arrFlight.ref)}` : "";
   const depFlt = depFlight ? `${line.depDesignator}${padFlightNo(depFlight.ref)}` : "";
+  // Always a doubled range, even for a single day — the spec has no shortened single-date form.
   const period = ddmmm(new Date(line.periodFrom)) + ddmmm(new Date(line.periodTo));
   const days = daysOfOpString(line.days.map(Number));
-  // SCR times are bare 4-digit UTC (e.g. "1200", not "12:00" and no trailing Z) — times are
-  // always UTC per SSIM Ch.6, so no local conversion or zone marker belongs in the data line.
-  // Per the format (e.g. "MANLHR0745" = previous stn + this stn + ARRIVAL time at this stn),
-  // the inbound leg's time is when it lands at the clearance airport (arrTime), and the
-  // outbound leg's time is when it leaves the clearance airport (depTime) — not the same field.
   const hhmmCompact = t => t ? t.replace(":", "") : "----";
-  const inbound = arrFlight ? `${arrFlight.origin}${clearanceAirport}${hhmmCompact(arrFlight.arrTime)}` : "";
-  const outbound = depFlight ? `${hhmmCompact(depFlight.depTime)}${clearanceAirport}${depFlight.destination}` : "";
-  const svc = line.inboundService + line.outboundService;
-  return [line.actionCode + arrFlt, depFlt, period, days, seats + acType, inbound, outbound, svc].filter(Boolean).join(" ");
+  // Arrival block: the flight's ORIGIN (not the clearance airport) + its arrival time here, no
+  // blank between them. Departure block: departure time from here + the flight's DESTINATION,
+  // no blank. The clearance airport is never itself written into these fields.
+  const arrBlock = arrFlight ? `${arrFlight.origin}${hhmmCompact(arrFlight.arrTime)}` : "";
+  const depBlock = depFlight ? `${hhmmCompact(depFlight.depTime)}${depFlight.destination}` : "";
+  // Arrival leg always comes first when a line covers both directions. No space between the
+  // action code and an arrival flight number; a mandatory space before a departure-only one.
+  const firstToken = arrFlight ? line.actionCode + arrFlt : `${line.actionCode} ${depFlt}`;
+  const secondToken = arrFlight && depFlight ? depFlt : "";
+  const svcLetters = [arrFlight ? line.inboundService : "", depFlight ? line.outboundService : ""].filter(Boolean).join("");
+  return [firstToken, secondToken, period, days, seats + acType, arrBlock, depBlock, svcLetters].filter(Boolean).join(" ");
 }
 
 function buildSCRMessage(header, lines, flights) {
-  const out = ["SCR", `/${header.creatorRef}`, header.season, ddmmm(new Date(header.messageDate)), header.clearanceAirport];
+  // Neither confirmed real example includes a creator-reference line at all — the earlier
+  // version inserted one unconditionally as line 2, which pushed every following line out of
+  // position. If a reference is actually given, it goes in an SI line instead of inventing a
+  // fixed structural position for it that isn't attested anywhere.
+  const out = ["SCR", header.season, ddmmm(new Date(header.messageDate)), header.clearanceAirport];
   lines.forEach(line => out.push(buildSCRDataLine(line, flights, header.clearanceAirport)));
+  if (header.creatorRef) out.push(`SI REF ${header.creatorRef}`);
   if (header.si) out.push(`SI ${header.si}`);
   out.push(`GI ${header.gi || "BRGDS"}`);
   return out.join("\n");
@@ -3033,7 +3205,7 @@ function deriveSCRSeedFromFlights(flightList, resources, role) {
       arrFlightId: role === "destination" ? rep.id : "",
       depFlightId: role === "origin" ? rep.id : "",
       periodFrom: iso(group[0].start), periodTo: iso(group[group.length - 1].start),
-      days, seats: res?.capacity || rep.capacity, acType: res ? guessAcType(res.variant) : "",
+      days, seats: res?.capacity || rep.capacity, acType: res ? acTypeCodeFor(res.variant) : "",
       ...(code ? { [role === "destination" ? "arrDesignator" : "depDesignator"]: code } : {}),
     }));
   });
@@ -3137,7 +3309,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
     const patch = { [which === "arr" ? "arrFlightId" : "depFlightId"]: flightId };
     if (f) {
       const res = resources.find(r => r.id === f.resourceId);
-      if (res) { patch.seats = res.capacity; patch.acType = guessAcType(res.variant); }
+      if (res) { patch.seats = res.capacity; patch.acType = acTypeCodeFor(res.variant); }
       const code = airlineCodeFromRef(f.ref);
       if (code) patch[which === "arr" ? "arrDesignator" : "depDesignator"] = code;
     }
@@ -3169,7 +3341,7 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
       patch.periodFrom = iso(f.start); patch.periodTo = iso(f.start);
       patch.days = [String(jsToIataDay(f.start.getUTCDay()))];
       const res = resources.find(r => r.id === f.resourceId);
-      if (res) { patch.seats = res.capacity; patch.acType = guessAcType(res.variant); }
+      if (res) { patch.seats = res.capacity; patch.acType = acTypeCodeFor(res.variant); }
       const code = airlineCodeFromRef(f.ref);
       if (code) patch[which === "arr" ? "arrDesignator" : "depDesignator"] = code;
     }
