@@ -171,18 +171,23 @@ or putting the app behind Vercel's password/SSO protection.
   schema but never had a screen: add/remove date-range blocks per aircraft with an optional
   reason. The scheduling engine treats a grounded aircraft as ineligible for the whole span,
   inclusive of both dates.
-- **The Schedule board now runs on vis-timeline** (a free, MIT-licensed library) instead of
-  the earlier hand-rolled absolute-positioned grid. This was a deliberate rewrite, not a
-  patch — it replaces several custom systems that had recurring bugs (drag-and-drop, resize,
-  panning, the "now" line, the sticky aircraft column) with the library's native handling of
-  the same things. What's genuinely different from before: **click-drag on empty space now
-  pans and zooms natively** (mouse wheel/pinch zoom, not the old manual slider-driven zoom),
-  **multi-select works via ctrl/shift-click** (not drag-a-box — vis-timeline doesn't support
-  rubber-band marquee selection, so that's a real capability that didn't carry over), and the
-  size slider now controls row/font density only, since zoom is native. Right-click for
-  "+ New flight here" or a flight's own menu (duplicate/delete/color) still works the same way.
-  Maintenance blocks render as shaded background regions per aircraft. This is a large,
-  actively-tested-for-the-first-time change — expect to find rough edges and report them.
+- **The Schedule board is hand-rolled again, not vis-timeline.** We tried the library for a
+  stretch — it gave native pan/zoom/resize and fixed some real bugs — but every issue we hit
+  while integrating it (an async data-population race, the library silently reinterpreting our
+  UTC timestamps in the browser's local timezone, drag and resize firing the same callback and
+  getting confused for each other, three attempts to get right-click working) came from the
+  same root cause: this environment can't run a real browser to verify a third-party library's
+  undocumented behavior against. Code written in-house doesn't have that problem — when
+  something's wrong, the actual logic is readable directly, not something to guess at from
+  docs and GitHub issues. So we reverted, carrying forward everything learned in the process:
+  the day-boundary-aware lane assignment, the overnight-flight arrival fix, destination
+  coloring, ETD/ETA display, and — new since the vis-timeline detour — **maintenance blocks
+  now render as shaded regions directly on the grid**, and **rubber-band marquee select (drag
+  a box to select several flights) is back**, since that's something only our own code could
+  support in the first place. Panning is mouse-drag on empty space (both axes, only while the
+  button is held), zoom is the size slider in Period view, and right-click still drives both
+  "+ New flight here" and a flight's own menu. This is a big rebuild in one pass — test it
+  properly rather than assuming everything carried over perfectly.
 - **Excel roster importer** — Bulk Import now has an "Upload Excel roster" mode alongside the
   existing CSV paste, parsing the actual per-aircraft weekly grid format (one sheet per tail,
   flight number and route string in adjacent cells under each weekday column) via the `xlsx`
