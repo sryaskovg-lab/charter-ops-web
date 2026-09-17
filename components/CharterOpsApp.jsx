@@ -3180,35 +3180,79 @@ function buildSCRMessage(header, lines, flights) {
 // Turns a flight (or a whole batch just created — single insert, bulk import, rotation
 // generator) straight into an SCR draft, so the request is ready the moment the schedule
 // change exists rather than requiring someone to re-enter the same route/dates by hand.
-// role "destination" treats each flight as the arrival leg (this is the airport the flight
-// lands at); role "origin" treats it as the departure leg. Flights sharing a route+aircraft
-// are grouped into one line spanning their date range, with days-of-operation computed from
-// which weekdays actually appear — not assumed.
+//
+// The real fix here: this used to group by a single route direction and only ever fill in
+// EITHER arrFlightId OR depFlightId per line, controlled by a single "role" for the whole
+// batch — so a rotation's outbound and return legs always ended up as two separate, single-leg
+// lines. That's wrong: the actual format wants a same-aircraft, same-day arrival-into and
+// departure-from the clearance airport combined into ONE line (arrival leg first, departure
+// leg second — see buildSCRDataLine). This version finds those real pairs first, and only
+// falls back to a single-leg line for whatever's left unpaired (e.g. a one-way positioning
+// flight with no matching return).
 function deriveSCRSeedFromFlights(flightList, resources, role) {
-  const groups = new Map();
-  flightList.forEach(f => {
-    const key = `${f.origin}|${f.destination}|${f.resourceId}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(f);
+  if (flightList.length === 0) return { clearanceAirport: "", lines: [newSCRLine()] };
+  const clearanceAirport = role === "destination" ? flightList[0].destination : flightList[0].origin;
+
+  const arrivals = flightList.filter(f => f.destination === clearanceAirport);
+  const departures = flightList.filter(f => f.origin === clearanceAirport);
+
+  // Same aircraft, same calendar day: this is a genuine turnaround through the clearance
+  // airport, not two unrelated movements that happen to touch it.
+  const usedArr = new Set(), usedDep = new Set();
+  const pairs = [];
+  arrivals.forEach(a => {
+    const match = departures.find(d => !usedDep.has(d.id) && d.resourceId === a.resourceId && iso(d.start) === iso(a.start));
+    if (match) { pairs.push({ arr: a, dep: match }); usedArr.add(a.id); usedDep.add(match.id); }
   });
+  const soloArrivals = arrivals.filter(a => !usedArr.has(a.id));
+  const soloDepartures = departures.filter(d => !usedDep.has(d.id));
+
+  function daysOf(dateGetter, items) { return [...new Set(items.map(dateGetter))].map(String); }
   const lines = [];
-  let clearanceAirport = "";
-  groups.forEach(group => {
-    group.sort((a, b) => a.start - b.start);
+
+  // Paired rotations — same flight-number pair on the same aircraft, across however many
+  // dates, becomes one line with a period + frequency, not one line per occurrence.
+  const pairGroups = new Map();
+  pairs.forEach(p => {
+    const key = `${p.arr.ref}|${p.dep.ref}|${p.arr.resourceId}`;
+    if (!pairGroups.has(key)) pairGroups.set(key, []);
+    pairGroups.get(key).push(p);
+  });
+  pairGroups.forEach(group => {
+    group.sort((a, b) => a.arr.start - b.arr.start);
     const rep = group[0];
-    const res = resources.find(r => r.id === rep.resourceId);
-    const station = role === "destination" ? rep.destination : rep.origin;
-    if (!clearanceAirport) clearanceAirport = station;
-    const days = [...new Set(group.map(f => jsToIataDay(f.start.getUTCDay())))].map(String);
-    const code = airlineCodeFromRef(rep.ref);
+    const res = resources.find(r => r.id === rep.arr.resourceId);
     lines.push(newSCRLine({
-      arrFlightId: role === "destination" ? rep.id : "",
-      depFlightId: role === "origin" ? rep.id : "",
-      periodFrom: iso(group[0].start), periodTo: iso(group[group.length - 1].start),
-      days, seats: res?.capacity || rep.capacity, acType: res ? acTypeCodeFor(res.variant) : "",
-      ...(code ? { [role === "destination" ? "arrDesignator" : "depDesignator"]: code } : {}),
+      arrFlightId: rep.arr.id, depFlightId: rep.dep.id,
+      periodFrom: iso(group[0].arr.start), periodTo: iso(group[group.length - 1].arr.start),
+      days: daysOf(p => jsToIataDay(p.arr.start.getUTCDay()), group),
+      seats: res?.capacity || rep.arr.capacity, acType: res ? acTypeCodeFor(res.variant) : "",
+      arrDesignator: airlineCodeFromRef(rep.arr.ref) || "DV", depDesignator: airlineCodeFromRef(rep.dep.ref) || "DV",
     }));
   });
+
+  // Whatever's left over — an arrival with no same-day return, or a departure with no same-day
+  // inbound — still becomes a real, correctly single-leg line, exactly as before.
+  function soloLines(items, legKey) {
+    const groups = new Map();
+    items.forEach(f => { const key = `${f.ref}|${f.resourceId}`; if (!groups.has(key)) groups.set(key, []); groups.get(key).push(f); });
+    groups.forEach(group => {
+      group.sort((a, b) => a.start - b.start);
+      const rep = group[0];
+      const res = resources.find(r => r.id === rep.resourceId);
+      const code = airlineCodeFromRef(rep.ref);
+      lines.push(newSCRLine({
+        [legKey === "arr" ? "arrFlightId" : "depFlightId"]: rep.id,
+        periodFrom: iso(group[0].start), periodTo: iso(group[group.length - 1].start),
+        days: daysOf(f => jsToIataDay(f.start.getUTCDay()), group),
+        seats: res?.capacity || rep.capacity, acType: res ? acTypeCodeFor(res.variant) : "",
+        ...(code ? { [legKey === "arr" ? "arrDesignator" : "depDesignator"]: code } : {}),
+      }));
+    });
+  }
+  soloLines(soloArrivals, "arr");
+  soloLines(soloDepartures, "dep");
+
   return { clearanceAirport, lines: lines.length ? lines : [newSCRLine()] };
 }
 
