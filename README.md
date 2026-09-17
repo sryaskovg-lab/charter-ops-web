@@ -52,6 +52,25 @@ not an oversight — if this deployment is reachable by anyone outside your comp
 adding an email-domain check in `route.js` (e.g. reject anything not ending `@yourcompany.com`)
 or putting the app behind Vercel's password/SSO protection.
 
+## Running the automated tests
+
+```bash
+npm install
+npm test
+```
+
+This runs the unit tests in `lib/scheduling-utils.test.js` against the pure scheduling logic
+(overnight-flight arrival math, day-boundary lane assignment, the validation engine, and the
+smaller date/time helpers). These specifically target real bugs found and fixed during
+development — the overnight-arrival test in particular exists because that exact bug once
+corrupted 906 real flights in production before being caught. If a future change breaks one of
+these, it's very likely reintroducing something that was already found and fixed once, not a
+false alarm.
+
+This covers the pure logic only — nothing that touches the database, the Gantt board's
+rendering, or drag/resize/click interactions. Those still need manual testing; automating them
+(with something like Playwright) would be the natural next step, not something covered here.
+
 ## 3. Deploy to Vercel
 
 1. Push to GitHub (step 1), then in Vercel: **Add New → Project → Import** your repo.
