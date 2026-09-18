@@ -3869,23 +3869,11 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
   const [showBulkOperators, setShowBulkOperators] = useState(false);
-  const [newDest, setNewDest] = useState({});
   const [flightRateSearch, setFlightRateSearch] = useState("");
   const [flightRateSelected, setFlightRateSelected] = useState(() => new Set());
   const [flightRateSeats, setFlightRateSeats] = useState(10);
   const [flightRatePrice, setFlightRatePrice] = useState("");
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
-  function setDestRate(id, dest, rate) {
-    setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [dest]: rate } } : o));
-  }
-  function removeDestRate(id, dest) {
-    setOperators(ops => ops.map(o => {
-      if (o.id !== id) return o;
-      const next = { ...o.ratesByDestination };
-      delete next[dest];
-      return { ...o, ratesByDestination: next };
-    }));
-  }
   function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
@@ -3920,7 +3908,6 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
             const totalValue = opAllotments.reduce((s, a) => s + a.seatsAllocated * a.pricePerSeat, 0);
             const byDest = {};
             opAllotments.forEach(a => { const f = flights.find(fl => fl.id === a.flightId); if (f) byDest[f.destination] = (byDest[f.destination] || 0) + a.seatsAllocated; });
-            const destRates = Object.entries(o.ratesByDestination || {});
             const isSeats = expanded?.id === o.id && expanded.panel === "seats";
             const isRates = expanded?.id === o.id && expanded.panel === "rates";
             return (
@@ -3941,7 +3928,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
                   <td style={td}>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? "Hide" : `Rates (${destRates.length})`}</button>
+                      <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? "Hide" : "Allocate seats"}</button>
                       <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? "Hide" : "View seats"}</button>
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
@@ -3955,38 +3942,12 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                 </tr>
                 {isRates && (
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Per-destination rates for {o.name} — anything not listed here falls back to {o.defaultRate != null ? `the $${o.defaultRate} default` : "no default (an explicit price is required)"}.</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
-                      {destRates.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No destination-specific rates yet — every flight uses the default.</div>}
-                      {destRates.map(([dest, rate]) => (
-                        <div key={dest} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                          <span style={{ fontFamily: MONO, width: 50 }}>{dest}</span>
-                          {perms.editContracts
-                            ? <input type="number" value={rate} onChange={e => setDestRate(o.id, dest, +e.target.value)} style={{ ...inputStyle, width: 70 }} />
-                            : <span style={{ fontFamily: MONO }}>${rate}</span>}
-                          {perms.editContracts && <button onClick={() => removeDestRate(o.id, dest)} style={{ ...miniBtn, fontSize: 10, color: C.red, borderColor: C.red }}>Remove</button>}
-                        </div>
-                      ))}
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+                      Allocate seats directly against specific flights for {o.name} — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, set seats and price, then Add. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both.
                     </div>
                     {perms.editContracts && (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                        <input placeholder="Dest (e.g. SSH)" value={newDest[o.id]?.code || ""} onChange={e => setNewDest({ ...newDest, [o.id]: { ...newDest[o.id], code: e.target.value.toUpperCase() } })} style={{ ...inputStyle, width: 90 }} maxLength={4} />
-                        <span style={{ fontSize: 11, color: C.faint }}>$</span>
-                        <input type="number" placeholder="Rate" value={newDest[o.id]?.rate ?? ""} onChange={e => setNewDest({ ...newDest, [o.id]: { ...newDest[o.id], rate: +e.target.value } })} style={{ ...inputStyle, width: 70 }} />
-                        <button onClick={() => {
-                          const d = newDest[o.id];
-                          if (!d?.code || !d?.rate) return;
-                          setDestRate(o.id, d.code, d.rate);
-                          setNewDest({ ...newDest, [o.id]: { code: "", rate: "" } });
-                        }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Add rate</button>
-                      </div>
-                    )}
-                    {perms.editContracts && (
-                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.borderSoft}` }}>
-                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
-                          Or allocate seats directly against specific flights — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, then set seats and price. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both.
-                        </div>
-                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder="Flight number or route…" style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
+                      <div>
+                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder="Flight number or route (e.g. AD-AA)…" style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
                         {flightRateSearch.trim().length >= 2 && (
                           <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
                             {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>No flights match "{flightRateSearch}".</div>}
@@ -4008,7 +3969,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                           <FieldSm label="Price / seat ($)"><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
                           <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
                             style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
-                            Allocate to {flightRateSelected.size || 0} flight{flightRateSelected.size === 1 ? "" : "s"}
+                            Add{flightRateSelected.size ? ` (${flightRateSelected.size})` : ""}
                           </button>
                         </div>
                       </div>
