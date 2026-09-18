@@ -1247,7 +1247,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         </div>
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} />}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
@@ -3864,12 +3864,16 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator }) {
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator, onAddAllotment }) {
   const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
   const [showBulkOperators, setShowBulkOperators] = useState(false);
   const [newDest, setNewDest] = useState({});
+  const [flightRateSearch, setFlightRateSearch] = useState("");
+  const [flightRateSelected, setFlightRateSelected] = useState(() => new Set());
+  const [flightRateSeats, setFlightRateSeats] = useState(10);
+  const [flightRatePrice, setFlightRatePrice] = useState("");
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
   function setDestRate(id, dest, rate) {
     setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [dest]: rate } } : o));
@@ -3883,6 +3887,17 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
     }));
   }
   function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); }
+  const flightMatches = flightRateSearch.trim().length >= 2
+    ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
+    : [];
+  function createAllotmentsFromSearch(operatorId) {
+    const price = +flightRatePrice;
+    if (!price || flightRateSelected.size === 0) return;
+    flightRateSelected.forEach(flightId => onAddAllotment(flightId, operatorId, flightRateSeats, price));
+    setFlightRateSelected(new Set());
+    setFlightRateSearch("");
+    setFlightRatePrice("");
+  }
 
   return (
     <div style={{ padding: 16 }}>
@@ -3964,6 +3979,38 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                           setDestRate(o.id, d.code, d.rate);
                           setNewDest({ ...newDest, [o.id]: { code: "", rate: "" } });
                         }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Add rate</button>
+                      </div>
+                    )}
+                    {perms.editContracts && (
+                      <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.borderSoft}` }}>
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>
+                          Or allocate seats directly against specific flights — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, then set seats and price. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both.
+                        </div>
+                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder="Flight number or route…" style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
+                        {flightRateSearch.trim().length >= 2 && (
+                          <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
+                            {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>No flights match "{flightRateSearch}".</div>}
+                            {flightMatches.map(f => (
+                              <label key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
+                                <input type="checkbox" checked={flightRateSelected.has(f.id)} onChange={() => setFlightRateSelected(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; })} />
+                                <span style={{ fontWeight: 700 }}>{f.ref}</span>
+                                <span style={{ color: C.muted }}>{iso(f.start)}</span>
+                                <span style={{ color: C.muted }}>{f.origin}→{f.destination}</span>
+                              </label>
+                            ))}
+                            {flightMatches.length > 0 && (
+                              <button onClick={() => setFlightRateSelected(new Set(flightMatches.map(f => f.id)))} style={{ ...miniBtn, margin: 6, fontSize: 10.5, padding: "3px 8px" }}>Select all {flightMatches.length}</button>
+                            )}
+                          </div>
+                        )}
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                          <FieldSm label="Seats"><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
+                          <FieldSm label="Price / seat ($)"><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                          <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
+                            style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
+                            Allocate to {flightRateSelected.size || 0} flight{flightRateSelected.size === 1 ? "" : "s"}
+                          </button>
+                        </div>
                       </div>
                     )}
                   </td></tr>
