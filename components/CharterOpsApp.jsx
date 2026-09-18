@@ -658,18 +658,35 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     }
     const before = flightInventory(flightId);
     const dbPatch = {};
-    if (patch.start) dbPatch.scheduled_departure = patch.start.toISOString();
     if (patch.resourceId) dbPatch.resource_id = patch.resourceId;
     if (patch.capacity) dbPatch.capacity = patch.capacity;
     if ("color" in patch) dbPatch.color = patch.color;
-    // depTime/arrTime are HH:mm strings from the drawer's time inputs — combine them with the
-    // flight's existing date rather than overwriting it, since only the time-of-day changed.
-    const newDep = patch.depTime !== undefined ? combineDateAndTime(patch.start || current.start, patch.depTime) : null;
-    if (patch.depTime !== undefined) dbPatch.scheduled_departure = newDep?.toISOString() ?? dbPatch.scheduled_departure;
-    if (patch.arrTime !== undefined) dbPatch.scheduled_arrival = combineArrivalDateTime(newDep || patch.start || current.start, patch.arrTime)?.toISOString() ?? null;
+    // A drag passes just a new date at midnight via patch.start, with no explicit depTime — a
+    // real bug (departure silently zeroing to 00:00 on every drag) came from writing that
+    // straight into scheduled_departure. patch.start alone means "move to a different day,
+    // keep the same time" — it must be combined with the flight's EXISTING depTime, not
+    // written verbatim. An explicit patch.depTime (e.g. from a resize) still takes precedence.
+    let newDep = null, newArr = null;
+    if (patch.start || patch.depTime !== undefined) {
+      const baseDate = patch.start || current.start;
+      const effectiveDepTime = patch.depTime !== undefined ? patch.depTime : current.depTime;
+      newDep = combineDateAndTime(baseDate, effectiveDepTime) || baseDate;
+      dbPatch.scheduled_departure = newDep.toISOString();
+    }
+    if (patch.start || patch.depTime !== undefined || patch.arrTime !== undefined) {
+      const effectiveArrTime = patch.arrTime !== undefined ? patch.arrTime : current.arrTime;
+      newArr = combineArrivalDateTime(newDep || patch.start || current.start, effectiveArrTime);
+      dbPatch.scheduled_arrival = newArr?.toISOString() ?? null;
+    }
     const { error } = await supabase.from("flights").update(dbPatch).eq("id", flightId);
     if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return; }
-    setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, ...patch } : f));
+    // Mirror the ACTUAL resulting values into local state, not the raw patch — patch.start on
+    // its own is just midnight-of-the-new-day, not the real corrected departure timestamp.
+    const localPatch = { ...patch };
+    if (newDep) { localPatch.start = newDep; localPatch.depTime = hhmm(newDep.toISOString()); }
+    if (newArr !== null || patch.arrTime !== undefined) localPatch.arrivalAt = newArr;
+    if (newArr) localPatch.arrTime = hhmm(newArr.toISOString());
+    setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, ...localPatch } : f));
     if (colorOnly || opts?.silent) return;
     const willBeCapacity = patch.capacity ?? before.capacity;
     if (before.allocated > willBeCapacity) {
@@ -743,16 +760,22 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   // Drag a flight bar from one aircraft's row to another (or to a different day on the same
   // row). Only the date and/or aircraft change — the flight's actual departure/arrival times
   // are left exactly as they were. Opens the drawer afterward so the move can be double-checked.
-  async function dropFlight(flightId, newResourceId, newStart) {
+  // Drag now ONLY reassigns the aircraft — the day is deliberately ignored even if the drop
+  // happened over a different date column, so the flight always stays on its original day
+  // unless someone explicitly changes the date from the flight drawer. That's a real
+  // constraint, not a bug: date changes are meant to go through the drawer's own date field
+  // (which already correctly preserves time-of-day via updateFlight), never through drag.
+  async function dropFlight(flightId, newResourceId) {
     if (!perms.editFlight) return;
     const f = flights.find(x => x.id === flightId);
     if (!f) return;
-    const conflict = checkConflict(newResourceId, newStart, flightId);
-    const result = await updateFlight(flightId, { resourceId: newResourceId, start: newStart });
+    if (newResourceId === f.resourceId) return; // dropped back on the same aircraft — nothing to do
+    const conflict = checkConflict(newResourceId, f.start, flightId);
+    const result = await updateFlight(flightId, { resourceId: newResourceId });
     if (result === "drafted") return; // queueDraftChange already showed its own toast
     setSelectedFlightId(flightId);
-    if (conflict) pushToast(`${f.ref} moved — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
-    else pushToast(`${f.ref} moved to ${iso(newStart)} — time unchanged`, "ok");
+    if (conflict) pushToast(`${f.ref} reassigned — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
+    else pushToast(`${f.ref} reassigned to ${resources.find(r => r.id === newResourceId)?.code} — date and time unchanged`, "ok");
   }
 
   async function addAllotment(flightId, operatorId, seats, priceOverride) {
@@ -1356,9 +1379,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         const rowEl = el?.closest("[data-resource-id]");
         if (rowEl) {
           const resourceId = rowEl.getAttribute("data-resource-id");
-          const rect = rowEl.getBoundingClientRect();
-          const dayIndex = Math.floor((drag.x - rect.left) / COL);
-          onDropFlight(drag.flightId, resourceId, addDays(viewStart, dayIndex));
+          onDropFlight(drag.flightId, resourceId); // drag only ever reassigns the aircraft — date/time are untouched
         }
       }
       touchDragRef.current = null;
@@ -1635,10 +1656,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                   e.preventDefault();
                   const flightId = e.dataTransfer.getData("text/flight-id");
                   if (!flightId) return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const relX = e.clientX - rect.left;
-                  const dayIndex = Math.floor(relX / COL);
-                  onDropFlight(flightId, res.id, addDays(viewStart, dayIndex));
+                  onDropFlight(flightId, res.id); // drag only ever reassigns the aircraft — date/time are untouched, wherever along the row it was dropped
                 }}
                 onMouseDown={e => {
                   if (!perms.editFlight) return;
