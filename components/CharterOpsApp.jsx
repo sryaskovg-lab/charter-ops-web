@@ -168,7 +168,7 @@ function mapOperator(o, contract) {
   return {
     id: o.id, name: o.name, country: o.country, status: o.status,
     contractId: contract?.id ?? null,
-    defaultRate: contract ? Number(contract.rate_per_seat) : 0,
+    defaultRate: contract && contract.rate_per_seat != null ? Number(contract.rate_per_seat) : (contract ? null : 0),
     ratesByDestination: Object.fromEntries(Object.entries(contract?.rates_by_destination || {}).map(([k, v]) => [k, Number(v)])),
     allotmentType: contract?.default_allotment_type ?? "fixed",
     optionReleaseDays: contract?.default_option_release_days ?? null,
@@ -1067,7 +1067,6 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     ["dashboard", "Dashboard", IconChart],
     ["schedule", "Schedule", IconCalendar],
     ["aircraft", "Aircraft", IconPlane],
-    ["quotas", "Quotas", IconGauge],
     ["operators", "Tour operators", IconBuilding],
     ...(perms.manageUsers ? [["team", "Team", IconUsers]] : []),
   ];
@@ -1224,7 +1223,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       {tab === "schedule" && (
         <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
           <div style={{ flex: 1, overflow: "auto" }}>
-            <ScheduleBoard resources={resources} flights={flights} days={days} viewStart={effectiveViewStart} onShiftView={shiftView} onJumpToday={jumpToToday} onJumpToDate={jumpToDate}
+            <ScheduleBoard resources={resources} flights={flights} operators={operators} days={days} viewStart={effectiveViewStart} onShiftView={shiftView} onJumpToday={jumpToToday} onJumpToDate={jumpToDate}
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
@@ -1254,7 +1253,6 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
         maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
-      {tab === "quotas" && <QuotasPanel operators={operators} allotments={allotments} flights={flights} />}
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} />}
@@ -1279,7 +1277,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
   // population race, the timezone disguise, the move/resize conflation, three attempts at
@@ -1310,6 +1308,9 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
 
   const [showDestLegend, setShowDestLegend] = useState(false);
   const [showDraftPanel, setShowDraftPanel] = useState(false);
+  const [hoverFlightId, setHoverFlightId] = useState(null);
+  const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
+  const hoverTimerRef = useRef(null);
   const draftByFlightId = useMemo(() => {
     const m = new Map();
     draftChanges.forEach(d => { if (d.flightId) m.set(d.flightId, d); });
@@ -1379,7 +1380,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
         const rowEl = el?.closest("[data-resource-id]");
         if (rowEl) {
           const resourceId = rowEl.getAttribute("data-resource-id");
-          onDropFlight(drag.flightId, resourceId); // drag only ever reassigns the aircraft — date/time are untouched
+          const idsToMove = (multiSelectIds.has(drag.flightId) && multiSelectIds.size > 1) ? [...multiSelectIds] : [drag.flightId];
+          idsToMove.forEach(id => onDropFlight(id, resourceId)); // drag only ever reassigns the aircraft — date/time are untouched
         }
       }
       touchDragRef.current = null;
@@ -1656,7 +1658,10 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                   e.preventDefault();
                   const flightId = e.dataTransfer.getData("text/flight-id");
                   if (!flightId) return;
-                  onDropFlight(flightId, res.id); // drag only ever reassigns the aircraft — date/time are untouched, wherever along the row it was dropped
+                  // Dragging a flight that's part of the current multi-select moves the whole
+                  // selection to the same aircraft, not just the one bar you happened to grab.
+                  const idsToMove = (multiSelectIds.has(flightId) && multiSelectIds.size > 1) ? [...multiSelectIds] : [flightId];
+                  idsToMove.forEach(id => onDropFlight(id, res.id));
                 }}
                 onMouseDown={e => {
                   if (!perms.editFlight) return;
@@ -1722,6 +1727,12 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                         onTouchMove={handleFlightTouchMoveBeforeDrag}
                         onTouchEnd={handleFlightTouchEndBeforeDrag}
                         onMouseDown={e => e.stopPropagation()}
+                        onMouseEnter={e => {
+                          const x = e.clientX, y = e.clientY;
+                          clearTimeout(hoverTimerRef.current);
+                          hoverTimerRef.current = setTimeout(() => { setHoverFlightId(f.id); setHoverPos({ x, y }); }, 350);
+                        }}
+                        onMouseLeave={() => { clearTimeout(hoverTimerRef.current); setHoverFlightId(null); }}
                         onContextMenu={e => { e.preventDefault(); e.stopPropagation(); setContextMenu({ type: "flight", flightId: f.id, x: e.clientX, y: e.clientY }); }}
                         onClick={e => {
                           if (e.shiftKey) {
@@ -1830,6 +1841,32 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
           Moving {touchDrag.ref} — release over a day to drop
         </div>
       )}
+      {hoverFlightId && (() => {
+        const f = flights.find(x => x.id === hoverFlightId);
+        const inv = f ? flightInventory(f.id) : null;
+        if (!f || !inv) return null;
+        return (
+          <div style={{ position: "fixed", left: Math.min(hoverPos.x + 14, window.innerWidth - 260), top: hoverPos.y + 18, width: 240, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 999, padding: 10, pointerEvents: "none", fontFamily: SANS }}>
+            <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12.5, marginBottom: 2 }}>{f.ref} · {f.origin}→{f.destination}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{inv.allocated}/{inv.capacity} seats sold{inv.oversoldBy > 0 ? ` · oversold by ${inv.oversoldBy}` : ""}</div>
+            {inv.live.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: C.faint }}>No tour operator allotments on this flight yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {inv.live.map(a => {
+                  const op = operators.find(o => o.id === a.operatorId);
+                  return (
+                    <div key={a.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+                      <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 110 }}>{op?.name || "Unknown operator"}</span>
+                      <span style={{ fontFamily: MONO, color: C.muted }}>{a.seatsAllocated} × ${a.pricePerSeat}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {contextMenu && contextMenu.type === "create" && (
         <div onClick={e => e.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 300, minWidth: 200, padding: 6, fontSize: 12.5 }}>
           <div style={{ padding: "4px 8px 6px", fontFamily: MONO, fontSize: 11, color: C.muted, borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 4 }}>{contextMenu.resourceCode} · {contextMenu.date} · {contextMenu.depTime}</div>
@@ -3858,12 +3895,16 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
-            <th style={th}>Tour operator</th><th style={th}>Default rate</th><th style={th}>Allotment type</th><th style={th}>Status</th><th style={th}></th>
+            <th style={th}>Tour operator</th><th style={th}>Default rate</th><th style={th}>Allotment type</th><th style={th}>Status</th><th style={th}>Seats</th><th style={th}>Value</th><th style={th}></th>
           </tr>
         </thead>
         <tbody>
           {operators.map(o => {
             const opAllotments = allotments.filter(a => a.operatorId === o.id && a.status !== "cancelled" && a.status !== "released");
+            const totalSeats = opAllotments.reduce((s, a) => s + a.seatsAllocated, 0);
+            const totalValue = opAllotments.reduce((s, a) => s + a.seatsAllocated * a.pricePerSeat, 0);
+            const byDest = {};
+            opAllotments.forEach(a => { const f = flights.find(fl => fl.id === a.flightId); if (f) byDest[f.destination] = (byDest[f.destination] || 0) + a.seatsAllocated; });
             const destRates = Object.entries(o.ratesByDestination || {});
             const isSeats = expanded?.id === o.id && expanded.panel === "seats";
             const isRates = expanded?.id === o.id && expanded.panel === "rates";
@@ -3873,11 +3914,16 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   <td style={td}>{o.name}<span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{o.country}</span></td>
                   <td style={td}>
                     {perms.editContracts
-                      ? <input type="number" value={o.defaultRate} onChange={e => updateDefaultRate(o.id, +e.target.value)} style={{ ...inputStyle, width: 80 }} />
-                      : <span style={{ fontFamily: MONO }}>${o.defaultRate}</span>}
+                      ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <input type="number" value={o.defaultRate ?? ""} placeholder="none" onChange={e => updateDefaultRate(o.id, e.target.value === "" ? null : +e.target.value)} style={{ ...inputStyle, width: 80 }} />
+                          {o.defaultRate != null && <button onClick={() => updateDefaultRate(o.id, null)} title="Clear default rate — every allotment for this operator will then need its own explicit price" style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red }}>×</button>}
+                        </div>
+                      : <span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>none</span>}</span>}
                   </td>
                   <td style={td}><Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType.toUpperCase()}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge></td>
                   <td style={td}><Badge color={o.status === "active" ? C.green : C.red}>{o.status.replace("_", " ").toUpperCase()}</Badge></td>
+                  <td style={{ ...td, fontFamily: MONO }}>{totalSeats}</td>
+                  <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
                   <td style={td}>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? "Hide" : `Rates (${destRates.length})`}</button>
@@ -3893,8 +3939,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   </td>
                 </tr>
                 {isRates && (
-                  <tr><td colSpan={5} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Per-destination rates for {o.name} — anything not listed here falls back to the ${o.defaultRate} default.</div>
+                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Per-destination rates for {o.name} — anything not listed here falls back to {o.defaultRate != null ? `the $${o.defaultRate} default` : "no default (an explicit price is required)"}.</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
                       {destRates.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No destination-specific rates yet — every flight uses the default.</div>}
                       {destRates.map(([dest, rate]) => (
@@ -3923,7 +3969,11 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   </td></tr>
                 )}
                 {isSeats && (
-                  <tr><td colSpan={5} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+                      {Object.entries(byDest).map(([dest, n]) => <Badge key={dest} color={C.cyan} bg={C.cyanSoft}>{dest}: {n}</Badge>)}
+                      {Object.keys(byDest).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>No active allotments.</span>}
+                    </div>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>All active allotments for {o.name} — one consolidated view instead of a separate tab per flight:</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No active allotments.</div>}
@@ -4490,37 +4540,3 @@ function AddAircraftModal({ onClose, onCreate }) {
     </div>
   );
 }
-
-// ---------- Quotas (aggregate view over existing allotments — this is what "quotas" means here) ----------
-function QuotasPanel({ operators, allotments, flights }) {
-  return (
-    <div style={{ padding: 20 }}>
-      <div style={{ fontSize: 12.5, color: C.muted, marginBottom: 14 }}>Each tour operator's committed seat quota across the board — this is the same allotment data as the Schedule and Tour Operators tabs, aggregated per operator rather than per flight.</div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {operators.map(o => {
-          const active = allotments.filter(a => a.operatorId === o.id && a.status !== "cancelled" && a.status !== "released");
-          const seats = active.reduce((s, a) => s + a.seatsAllocated, 0);
-          const value = active.reduce((s, a) => s + a.seatsAllocated * a.pricePerSeat, 0);
-          const byDest = {};
-          active.forEach(a => { const f = flights.find(fl => fl.id === a.flightId); if (f) byDest[f.destination] = (byDest[f.destination] || 0) + a.seatsAllocated; });
-          return (
-            <div key={o.id} style={card}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{o.name}</div>
-                <div style={{ display: "flex", gap: 16, fontSize: 12.5 }}>
-                  <span><span style={{ fontFamily: MONO, fontWeight: 700 }}>{seats}</span> <span style={{ color: C.muted }}>seats</span></span>
-                  <span style={{ color: C.green, fontFamily: MONO, fontWeight: 700 }}>${value.toLocaleString()}</span>
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                {Object.entries(byDest).map(([dest, n]) => <Badge key={dest} color={C.cyan} bg={C.cyanSoft}>{dest}: {n}</Badge>)}
-                {Object.keys(byDest).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>No active allotments.</span>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
