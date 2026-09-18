@@ -1344,7 +1344,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
 
   // ---- touch drag (mobile move) — long-press distinguishes drag intent from a normal scroll ----
   function handleFlightTouchStart(e, f) {
-    if (!perms.editFlight) return;
+    if (!perms.editFlight || !draftMode) return;
     const t = e.touches[0];
     touchStartPosRef.current = { x: t.clientX, y: t.clientY };
     longPressTimerRef.current = setTimeout(() => {
@@ -1715,7 +1715,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                   const boxFontScale = isNarrow ? 1 : (widthPx < 55 ? 0.74 : widthPx < 80 ? 0.87 : 1);
                   return (
                     <React.Fragment key={f.id}>
-                      <div className="flight-bar" draggable={perms.editFlight}
+                      <div className="flight-bar" draggable={perms.editFlight && draftMode}
                         data-flight-id={f.id}
                         onDragStart={e => e.dataTransfer.setData("text/flight-id", f.id)}
                         onTouchStart={e => handleFlightTouchStart(e, f)}
@@ -1731,11 +1731,11 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                             setSelectedFlightId(selected ? null : f.id);
                           }
                         }}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${pendingDraft ? ` · PENDING: ${pendingDraft.summary}` : ""}${perms.editFlight ? " · drag to move · shift-click to multi-select · right-click for more" : ""}`}
+                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${pendingDraft ? ` · PENDING: ${pendingDraft.summary}` : ""}${perms.editFlight ? (draftMode ? " · drag to reassign aircraft · shift-click to multi-select · right-click for more" : " · turn on Draft mode to drag/reassign this flight · shift-click to multi-select · right-click for more") : ""}`}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
                           background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
                           border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
-                          borderRadius: pillRadius, cursor: perms.editFlight ? "grab" : "pointer", overflow: "hidden", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                          borderRadius: pillRadius, cursor: (perms.editFlight && draftMode) ? "grab" : "pointer", overflow: "hidden", touchAction: (perms.editFlight && draftMode) ? "pan-y" : "auto" }}>
                         {pendingDraft && (
                           <div style={{ position: "absolute", top: -6, right: -4, width: 14, height: 14, borderRadius: 999, background: C.amber, color: ON_ACCENT, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>!</div>
                         )}
