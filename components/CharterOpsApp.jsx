@@ -177,7 +177,7 @@ function mapOperator(o, contract) {
 function rateFor(op, destination) { return op?.ratesByDestination?.[destination] ?? op?.defaultRate ?? 0; }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }] = await Promise.all([
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     supabase.from("flights").select("*").order("scheduled_departure"),
     supabase.from("tour_operators").select("*").order("name"),
@@ -189,6 +189,7 @@ async function fetchAll() {
     supabase.from("notifications").select("*").order("created_at", { ascending: false }).limit(30),
     supabase.from("maintenance_blocks").select("*").order("start_at"),
     supabase.from("acknowledged_issues").select("*"),
+    supabase.from("draft_changes").select("*").order("created_at"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
@@ -202,8 +203,10 @@ async function fetchAll() {
     notifications: notifications || [],
     maintenanceBlocks: (maintenanceBlocks || []).map(mapMaintenanceBlock),
     acknowledgedIssueIds: (ackIssues || []).map(a => a.issue_id),
+    draftChanges: (draftChanges || []).map(mapDraftChange),
   };
 }
+function mapDraftChange(d) { return { id: d.id, flightId: d.flight_id, changeType: d.change_type, patch: d.patch || {}, summary: d.summary, createdBy: d.created_by, createdAt: new Date(d.created_at) }; }
 
 // ---------- atoms ----------
 function Badge({ children, color, bg = "transparent" }) {
@@ -326,6 +329,12 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   const [resources, setResources] = useState([]);
   const [maintenanceBlocks, setMaintenanceBlocks] = useState([]);
   const [acknowledgedIssueIds, setAcknowledgedIssueIds] = useState(() => new Set());
+  // Draft Mode is a personal, per-session choice — off by default, not persisted, not shared.
+  // While it's on, this user's own direct board edits (drag, resize, delete, duplicate, and
+  // flight-drawer edits) are queued for review instead of applied live; other users editing
+  // without draft mode on are unaffected and still commit instantly, same as always.
+  const [draftMode, setDraftMode] = useState(false);
+  const [draftChanges, setDraftChanges] = useState([]);
   const [flights, setFlightsRaw] = useState([]);
   const [operators, setOperatorsRaw] = useState([]);
   const [allotments, setAllotmentsRaw] = useState([]);
@@ -483,6 +492,78 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     setAcknowledgedIssueIds(prev => { const next = new Set(prev); next.delete(issueId); return next; });
   }
 
+  // Plain-language description of a proposed flights-table patch, computed once at draft
+  // creation time so the review panel never has to re-derive "what does this actually mean"
+  // from raw field diffs later, and so it still reads sensibly even if the flight itself is
+  // edited again before this draft is reviewed.
+  function summarizeFlightPatch(current, patch) {
+    const parts = [];
+    if (patch.resourceId && patch.resourceId !== current.resourceId) {
+      const newCode = resources.find(r => r.id === patch.resourceId)?.code || "?";
+      parts.push(`reassigned to ${newCode}`);
+    }
+    if (patch.start) {
+      const newDay = iso(patch.start);
+      if (newDay !== iso(current.start)) parts.push(`moved to ${newDay}`);
+    }
+    if (patch.depTime !== undefined && patch.depTime !== current.depTime) parts.push(`departure → ${patch.depTime}`);
+    if (patch.arrTime !== undefined && patch.arrTime !== current.arrTime) parts.push(`arrival → ${patch.arrTime}`);
+    if (patch.capacity !== undefined && patch.capacity !== current.capacity) parts.push(`capacity → ${patch.capacity}`);
+    if (patch.status !== undefined && patch.status !== current.status) parts.push(`status → ${patch.status}`);
+    return `${current.ref}: ${parts.length ? parts.join(", ") : "updated"}`;
+  }
+
+  async function queueDraftChange(flightId, changeType, patch, summary) {
+    const { data, error } = await supabase.from("draft_changes").insert({
+      flight_id: flightId, change_type: changeType, patch, summary, created_by: profile.id,
+    }).select().single();
+    if (error) { pushToast(`Could not queue draft change: ${error.message}`, "warn"); return false; }
+    setDraftChanges(dc => [...dc, mapDraftChange(data)]);
+    pushToast(`Queued for review: ${summary}`, "ok");
+    return true;
+  }
+
+  async function approveDraftChange(draftId) {
+    const d = draftChanges.find(x => x.id === draftId);
+    if (!d) return;
+    if (d.changeType === "create") {
+      const p = d.patch;
+      const startDate = new Date(p.start);
+      const ref = p.ref || ("DV" + (4520 + flights.length + Math.floor(Math.random() * 50)));
+      const { data, error } = await supabase.from("flights").insert({
+        ref, resource_id: p.resourceId, origin: p.origin, destination: p.destination,
+        scheduled_departure: (combineDateAndTime(startDate, p.depTime) || startDate).toISOString(),
+        scheduled_arrival: combineArrivalDateTime(combineDateAndTime(startDate, p.depTime) || startDate, p.arrTime)?.toISOString() ?? null,
+        capacity: p.capacity, status: "tentative", color: p.color || null,
+      }).select().single();
+      if (error) { pushToast(`Could not apply draft: ${error.message}`, "warn"); return; }
+      setFlightsRaw(fl => [...fl, mapFlight(data)]);
+    } else if (d.changeType === "delete") {
+      await deleteFlight(d.flightId, { bypassDraft: true });
+    } else {
+      const patch = { ...d.patch };
+      if (patch.start) patch.start = new Date(patch.start); // drafts store dates as ISO strings (JSON has no Date type) — convert back before applying
+      await updateFlight(d.flightId, patch, { bypassDraft: true, silent: true });
+    }
+    const { error: delError } = await supabase.from("draft_changes").delete().eq("id", draftId);
+    if (!delError) setDraftChanges(dc => dc.filter(x => x.id !== draftId));
+    pushToast(`Applied: ${d.summary}`, "ok");
+  }
+  async function discardDraftChange(draftId) {
+    const d = draftChanges.find(x => x.id === draftId);
+    const { error } = await supabase.from("draft_changes").delete().eq("id", draftId);
+    if (error) { pushToast(`Could not discard: ${error.message}`, "warn"); return; }
+    setDraftChanges(dc => dc.filter(x => x.id !== draftId));
+    pushToast(`Discarded: ${d?.summary || "change"}`, "ok");
+  }
+  async function approveAllDrafts() { for (const d of draftChanges) await approveDraftChange(d.id); }
+  async function discardAllDrafts() {
+    const { error } = await supabase.from("draft_changes").delete().in("id", draftChanges.map(d => d.id));
+    if (error) { pushToast(`Could not discard all: ${error.message}`, "warn"); return; }
+    setDraftChanges([]);
+    pushToast("All pending draft changes discarded", "ok");
+  }
+
   // A date/resource pair is grounded if any maintenance block for that aircraft covers that
   // calendar day. Used both by the Aircraft tab display and by the scheduling engine, so the
   // engine never proposes a flight on a tail that's actually down.
@@ -496,10 +577,11 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges } = await fetchAll();
       if (cancelled) return;
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
       setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks); setAcknowledgedIssueIds(new Set(acknowledgedIssueIds));
+      setDraftChanges(draftChanges);
       setLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -565,8 +647,16 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   async function updateFlight(flightId, patch, opts) {
     const colorOnly = Object.keys(patch).length === 1 && "color" in patch;
     if (!perms.editFlight && !colorOnly) return;
-    const before = flightInventory(flightId);
     const current = flights.find(f => f.id === flightId);
+    // Color is cosmetic, not an operational schedule change, so it always applies immediately
+    // regardless of draft mode — only real schedule/capacity/status edits get queued.
+    if (draftMode && !colorOnly && !opts?.bypassDraft) {
+      const patchForStorage = { ...patch };
+      if (patchForStorage.start instanceof Date) patchForStorage.start = patchForStorage.start.toISOString();
+      await queueDraftChange(flightId, "update", patchForStorage, summarizeFlightPatch(current, patch));
+      return "drafted";
+    }
+    const before = flightInventory(flightId);
     const dbPatch = {};
     if (patch.start) dbPatch.scheduled_departure = patch.start.toISOString();
     if (patch.resourceId) dbPatch.resource_id = patch.resourceId;
@@ -593,9 +683,13 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   // allotments in the database automatically — these functions just report how many active
   // ones were affected, and mirror that cleanup in local state so the UI updates immediately
   // rather than waiting on the next Realtime event.
-  async function deleteFlight(flightId) {
+  async function deleteFlight(flightId, opts) {
     if (!perms.editFlight) return;
     const flight = flights.find(f => f.id === flightId);
+    if (draftMode && !opts?.bypassDraft) {
+      await queueDraftChange(flightId, "delete", {}, `Delete ${flight?.ref || "flight"} (${flight ? iso(flight.start) : "?"})`);
+      return;
+    }
     const affected = allotments.filter(a => a.flightId === flightId && a.status !== "cancelled" && a.status !== "released").length;
     const { error } = await supabase.from("flights").delete().eq("id", flightId);
     if (error) { pushToast(`Could not delete flight: ${error.message}`, "warn"); return; }
@@ -610,6 +704,13 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const f = flights.find(x => x.id === flightId);
     if (!f) return;
     const newStart = addDays(f.start, 1);
+    if (draftMode) {
+      await queueDraftChange(null, "create", {
+        resourceId: f.resourceId, origin: f.origin, destination: f.destination, ref: f.ref,
+        start: newStart.toISOString(), depTime: f.depTime, arrTime: f.arrTime, capacity: f.capacity, color: f.color,
+      }, `New flight: ${f.ref} duplicated to ${iso(newStart)}`);
+      return;
+    }
     const { data, error } = await supabase.from("flights").insert({
       ref: f.ref, resource_id: f.resourceId, origin: f.origin, destination: f.destination,
       scheduled_departure: (combineDateAndTime(newStart, f.depTime) || newStart).toISOString(),
@@ -647,7 +748,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     const f = flights.find(x => x.id === flightId);
     if (!f) return;
     const conflict = checkConflict(newResourceId, newStart, flightId);
-    await updateFlight(flightId, { resourceId: newResourceId, start: newStart });
+    const result = await updateFlight(flightId, { resourceId: newResourceId, start: newStart });
+    if (result === "drafted") return; // queueDraftChange already showed its own toast
     setSelectedFlightId(flightId);
     if (conflict) pushToast(`${f.ref} moved — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
     else pushToast(`${f.ref} moved to ${iso(newStart)} — time unchanged`, "ok");
@@ -1107,7 +1209,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks}
-              acknowledgedIssueIds={acknowledgedIssueIds} onAcknowledgeIssue={acknowledgeIssue} onUnacknowledgeIssue={unacknowledgeIssue} />
+              acknowledgedIssueIds={acknowledgedIssueIds} onAcknowledgeIssue={acknowledgeIssue} onUnacknowledgeIssue={unacknowledgeIssue}
+              draftMode={draftMode} setDraftMode={setDraftMode} draftChanges={draftChanges} onApproveDraft={approveDraftChange} onDiscardDraft={discardDraftChange} onApproveAllDrafts={approveAllDrafts} onDiscardAllDrafts={discardAllDrafts} />
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
@@ -1153,7 +1256,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue }) {
+function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
   // population race, the timezone disguise, the move/resize conflation, three attempts at
@@ -1169,6 +1272,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   const isNarrow = viewMode !== "day" && COL < 70;
   const showHourTicks = viewMode === "day" || COL >= 160;
   const TICK = COL / HOUR_TICKS.length;
+  const HOUR_TICK = COL / 24; // fine per-hour gridline spacing — kept separate from the 3-hourly label ticks above so the axis labels don't get crowded while the grid itself still marks every hour
   function colFor(d) { const x = new Date(d); x.setUTCHours(0, 0, 0, 0); return Math.round((x.getTime() - viewStart.getTime()) / 86400000); }
 
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1182,6 +1286,13 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
   const nowX = LABELW + nowCol * COL + ((now.getUTCHours() * 60 + now.getUTCMinutes()) / 1440) * COL;
 
   const [showDestLegend, setShowDestLegend] = useState(false);
+  const [showDraftPanel, setShowDraftPanel] = useState(false);
+  const draftByFlightId = useMemo(() => {
+    const m = new Map();
+    draftChanges.forEach(d => { if (d.flightId) m.set(d.flightId, d); });
+    return m;
+  }, [draftChanges]);
+  const pendingCreates = draftChanges.filter(d => d.changeType === "create");
   const [showIssues, setShowIssues] = useState(false);
   const allIssues = useMemo(() => computeScheduleIssues(flights, resources), [flights, resources]);
   const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
@@ -1393,6 +1504,18 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
             style={{ ...navBtn, background: showIssues ? C.redSoft : (errorCount > 0 ? C.redSoft : activeIssues.length > 0 ? C.amberSoft : "transparent"), borderColor: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.border, color: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.text, fontWeight: activeIssues.length > 0 ? 600 : 500 }}>
             Issues{activeIssues.length > 0 ? ` (${activeIssues.length})` : ""}
           </button>
+          {perms.editFlight && (
+            <button onClick={() => setDraftMode(v => !v)} title="While on, your own drags/resizes/deletes/duplicates and drawer edits are queued for review instead of applied live — other users editing without it on are unaffected"
+              style={{ ...navBtn, background: draftMode ? C.amber : "transparent", color: draftMode ? ON_ACCENT : C.text, borderColor: draftMode ? C.amber : C.border, fontWeight: draftMode ? 600 : 500 }}>
+              {draftMode ? "Draft mode: ON" : "Draft mode: OFF"}
+            </button>
+          )}
+          {draftChanges.length > 0 && (
+            <button onClick={() => setShowDraftPanel(v => !v)}
+              style={{ ...navBtn, background: showDraftPanel ? C.amberSoft : C.amberSoft, borderColor: C.amber, color: C.amber, fontWeight: 600 }}>
+              Draft changes ({draftChanges.length})
+            </button>
+          )}
           <div title="Box size / zoom (in Period view)" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
             <span style={{ fontSize: 10 }}>A</span>
             <input type="range" min={0.7} max={1.4} step={0.05} value={liveScale}
@@ -1546,7 +1669,7 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                     backgroundColor: isToday ? C.amberSoft : (isWeekend ? C.panel2 : "transparent"),
                     backgroundImage: dayGrounded
                       ? `repeating-linear-gradient(45deg, rgba(224,71,59,0.05), rgba(224,71,59,0.05) 6px, rgba(224,71,59,0.12) 6px, rgba(224,71,59,0.12) 12px)`
-                      : `repeating-linear-gradient(to right, transparent, transparent ${TICK - 1}px, ${C.borderSoft} ${TICK - 1}px, ${C.borderSoft} ${TICK}px)`,
+                      : `repeating-linear-gradient(to right, transparent, transparent ${(showHourTicks ? HOUR_TICK : TICK) - 1}px, ${C.borderSoft}99 ${(showHourTicks ? HOUR_TICK : TICK) - 1}px, ${C.borderSoft}99 ${showHourTicks ? HOUR_TICK : TICK}px)`,
                   }} />;
                 })}
                 {resFlights.map(({ f, c }) => {
@@ -1562,6 +1685,8 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                   const stripeW = isNarrow ? 5 : 6;
                   const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
                   const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
+                  const pendingDraft = draftByFlightId.get(f.id);
+                  const finalBorderStyle = pendingDraft ? `2px dashed ${C.amber}` : barBorderStyle;
                   const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
                   const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
@@ -1588,11 +1713,14 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                             setSelectedFlightId(selected ? null : f.id);
                           }
                         }}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${perms.editFlight ? " · drag to move · shift-click to multi-select · right-click for more" : ""}`}
+                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${pendingDraft ? ` · PENDING: ${pendingDraft.summary}` : ""}${perms.editFlight ? " · drag to move · shift-click to multi-select · right-click for more" : ""}`}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
-                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : 1),
-                          border: multiSelected ? `1.5px solid ${C.amber}` : barBorderStyle,
+                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
+                          border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
                           borderRadius: pillRadius, cursor: perms.editFlight ? "grab" : "pointer", overflow: "hidden", touchAction: perms.editFlight ? "pan-y" : "auto" }}>
+                        {pendingDraft && (
+                          <div style={{ position: "absolute", top: -6, right: -4, width: 14, height: 14, borderRadius: 999, background: C.amber, color: ON_ACCENT, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>!</div>
+                        )}
                         <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: stripeW, background: stripeColor, borderRadius: `${pillRadius}px 0 0 ${pillRadius}px` }} />
                         <div style={{ position: "absolute", left: stripeW, right: 0, top: 0, bottom: 0, display: "flex", flexDirection: "column", justifyContent: "center", padding: isNarrow ? "0 6px" : (widthPx < 55 ? "0 5px 0 7px" : "0 10px 0 12px") }}>
                           {isNarrow ? (
@@ -1634,6 +1762,23 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                         </>
                       )}
                     </React.Fragment>
+                  );
+                })}
+                {pendingCreates.filter(d => d.patch.resourceId === res.id).map(d => {
+                  const startDate = new Date(d.patch.start);
+                  const c = colFor(startDate);
+                  if (c < 0 || c >= days.length) return null;
+                  const geom = flightGeometry({ depTime: d.patch.depTime, arrTime: d.patch.arrTime });
+                  const leftPx = c * COL + geom.offsetFrac * COL + 3;
+                  const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
+                  return (
+                    <div key={d.id} title={`Pending: ${d.summary}`} style={{
+                      position: "absolute", left: leftPx, top: TOP_PAD, width: widthPx, height: BAR_H,
+                      border: `2px dashed ${C.amber}`, background: C.amberSoft, borderRadius: isNarrow ? 7 : BAR_H / 2,
+                      display: "flex", alignItems: "center", padding: "0 8px", fontSize: 10.5, fontFamily: MONO, color: C.amber, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap",
+                    }}>
+                      + {d.patch.ref || "new"}
+                    </div>
                   );
                 })}
               </div>
@@ -1758,6 +1903,40 @@ function ScheduleBoard({ resources, flights, days, viewStart, onShiftView, onJum
                 <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
                 {perms.editFlight && (
                   <button onClick={() => onUnacknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11, color: C.red, borderColor: C.red }}>Delete</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {showDraftPanel && (
+        <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 380, maxWidth: "92vw", background: C.panel, borderRight: `1px solid ${C.border}`, boxShadow: "12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
+          <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>Draft changes</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Queued while Draft mode is on — nothing here is live until you approve it.</div>
+            </div>
+            <button onClick={() => setShowDraftPanel(false)} style={{ background: "none", border: "none", fontSize: 18, color: C.faint, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
+          </div>
+          {draftChanges.length > 0 && perms.editFlight && (
+            <div style={{ display: "flex", gap: 8, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}` }}>
+              <button onClick={onApproveAllDrafts} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, flex: 1 }}>Approve all ({draftChanges.length})</button>
+              <button onClick={() => { if (window.confirm(`Discard all ${draftChanges.length} pending draft changes? This can't be undone.`)) onDiscardAllDrafts(); }} style={{ ...miniBtn, color: C.red, borderColor: C.red, flex: 1 }}>Discard all</button>
+            </div>
+          )}
+          <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
+            {draftChanges.length === 0 && (
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No pending draft changes.</div>
+            )}
+            {draftChanges.map(d => (
+              <div key={d.id} style={{ background: C.amberSoft, border: `1px solid ${C.amber}55`, borderLeft: `3px solid ${C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.amber, marginBottom: 3 }}>{d.changeType}</div>
+                <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4, marginBottom: 6 }}>{d.summary}</div>
+                {perms.editFlight && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => onApproveDraft(d.id)} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, padding: "3px 9px", fontSize: 11 }}>Approve</button>
+                    <button onClick={() => onDiscardDraft(d.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red, padding: "3px 9px", fontSize: 11 }}>Discard</button>
+                  </div>
                 )}
               </div>
             ))}
