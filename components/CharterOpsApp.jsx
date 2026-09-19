@@ -4260,15 +4260,45 @@ function NotificationRow({ n }) {
 // requires an API key). The background here is a small static country-outline file fetched
 // once, not re-requested on every pan/zoom, so there's no live service that can suddenly
 // start blocking or gating this.
-const STATION_LATLNG = {
+// FALLBACK_STATION_LATLNG covers only this fleet's known current stations, kept as a last
+// resort if the worldwide airport dataset below can't be reached at all — the map should
+// never go completely blank just because one external file failed to load.
+const FALLBACK_STATION_LATLNG = {
   AYT: [36.9, 30.8], SSH: [27.9, 34.4], ALA: [43.2, 77.0], NQZ: [51.2, 71.4], SKD: [39.7, 66.9],
   HRI: [6.28, 81.12], HKT: [8.11, 98.32], CXR: [11.99, 109.22], PQC: [10.23, 103.97], SYX: [18.31, 109.41], SIN: [1.36, 103.99],
 };
+// Worldwide IATA airport coordinates — tried in order since I couldn't independently confirm
+// which exact path this package serves its data at; the fetch below falls through the list
+// and, if every candidate fails, keeps the fallback table above rather than breaking the map.
+const WORLDWIDE_AIRPORTS_URLS = [
+  "https://cdn.jsdelivr.net/npm/airports-json/airports.json",
+  "https://cdn.jsdelivr.net/npm/airports-json/data/airports.json",
+];
 const COUNTRIES_GEOJSON_URL = "https://cdn.jsdelivr.net/npm/@geo-maps/countries-land-10km@0.6.0/map.geo.json";
+async function fetchWorldwideStationLatLng() {
+  for (const url of WORLDWIDE_AIRPORTS_URLS) {
+    try {
+      const r = await fetch(url);
+      if (!r.ok) continue;
+      const data = await r.json();
+      const list = Array.isArray(data) ? data : data.airports;
+      if (!Array.isArray(list)) continue;
+      const table = {};
+      list.forEach(a => {
+        const code = a.iata_code || a.iata;
+        const lat = a.latitude_deg ?? a.latitude, lng = a.longitude_deg ?? a.longitude;
+        if (code && code.length === 3 && lat != null && lng != null) table[code] = [Number(lat), Number(lng)];
+      });
+      if (Object.keys(table).length > 100) return table; // sanity check — a near-empty result means we parsed the wrong shape
+    } catch (e) { /* try the next candidate */ }
+  }
+  return null;
+}
 function RouteMap({ flights }) {
   const [mounted, setMounted] = useState(false);
   const [deckLib, setDeckLib] = useState(null);
   const [countriesGeoJson, setCountriesGeoJson] = useState(null);
+  const [stationLatLng, setStationLatLng] = useState(FALLBACK_STATION_LATLNG);
   useEffect(() => {
     setMounted(true);
     import("@deck.gl/layers").then(m => setDeckLib({ ArcLayer: m.ArcLayer, ScatterplotLayer: m.ScatterplotLayer, TextLayer: m.TextLayer, GeoJsonLayer: m.GeoJsonLayer }));
@@ -4276,21 +4306,25 @@ function RouteMap({ flights }) {
       .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
       .then(setCountriesGeoJson)
       .catch(err => console.warn("Route map: country outline failed to load, arcs/stations still render:", err.message));
+    fetchWorldwideStationLatLng().then(table => {
+      if (table) setStationLatLng({ ...FALLBACK_STATION_LATLNG, ...table }); // fleet's own table wins on any overlap, since it's hand-verified
+      else console.warn("Route map: worldwide airport coordinates unavailable, staying on the fallback station list");
+    });
   }, []);
 
   const routes = [...new Map(flights.map(f => [`${f.origin}|${f.destination}`, f])).values()];
-  const stations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => STATION_LATLNG[s]);
-  const unknownStations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => !STATION_LATLNG[s]);
-  const center = stations.length ? STATION_LATLNG[stations[0]] : [30, 60];
-  // deck.gl/GeoJSON want [lng, lat] — STATION_LATLNG is stored [lat, lng] to match Leaflet's
+  const stations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => stationLatLng[s]);
+  const unknownStations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => !stationLatLng[s]);
+  const center = stations.length ? stationLatLng[stations[0]] : [30, 60];
+  // deck.gl/GeoJSON want [lng, lat] — stationLatLng is stored [lat, lng] to match Leaflet's
   // old convention, so every point gets flipped on the way in.
   const toLngLat = latlng => [latlng[1], latlng[0]];
 
   const arcData = routes.map(r => {
-    const p1 = STATION_LATLNG[r.origin], p2 = STATION_LATLNG[r.destination];
+    const p1 = stationLatLng[r.origin], p2 = stationLatLng[r.destination];
     return p1 && p2 ? { source: toLngLat(p1), target: toLngLat(p2) } : null;
   }).filter(Boolean);
-  const stationData = stations.map(s => ({ code: s, position: toLngLat(STATION_LATLNG[s]) }));
+  const stationData = stations.map(s => ({ code: s, position: toLngLat(stationLatLng[s]) }));
 
   const layers = deckLib ? [
     countriesGeoJson && new deckLib.GeoJsonLayer({
@@ -4329,7 +4363,7 @@ function RouteMap({ flights }) {
       <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10.5, color: C.muted, flexWrap: "wrap" }}>
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 2, background: C.amber, display: "inline-block" }} /> Scheduled route</span>
         <span>{routes.length} active route{routes.length === 1 ? "" : "s"} · {stations.length} stations</span>
-        {unknownStations.length > 0 && <span style={{ color: C.faint }}>Not yet plotted: {unknownStations.join(", ")} (add coordinates to STATION_LATLNG)</span>}
+        {unknownStations.length > 0 && <span style={{ color: C.faint }}>Not yet plotted: {unknownStations.join(", ")} (no IATA match in the worldwide airport list)</span>}
       </div>
     </div>
   );
