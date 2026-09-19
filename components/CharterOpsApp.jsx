@@ -487,6 +487,18 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     setAcknowledgedIssueIds(prev => { const next = new Set(prev); next.delete(issueId); return next; });
   }
 
+  // Logs an SCR the moment someone copies it — that's the established "this is actually being
+  // used" moment across every SCR flow in the app (Confirm is only ever enabled after Copy).
+  // Best-effort: a logging failure never blocks the actual SCR workflow, just misses one entry
+  // in the archive.
+  async function logScrSent(messageText, clearanceAirport, season, flightIds) {
+    const { error } = await supabase.from("scr_log").insert({
+      message_text: messageText, clearance_airport: clearanceAirport, season,
+      flight_ids: flightIds || [], created_by: profile.id,
+    });
+    if (error) console.warn("Could not log SCR to the archive:", error.message);
+  }
+
   // Plain-language description of a proposed flights-table patch, computed once at draft
   // creation time so the review panel never has to re-derive "what does this actually mean"
   // from raw field diffs later, and so it still reads sensibly even if the flight itself is
@@ -951,6 +963,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showRotationGen, setShowRotationGen] = useState(false);
   const [showSchedulingEngine, setShowSchedulingEngine] = useState(false);
+  const [showReports, setShowReports] = useState(false);
   const [showBulkRetime, setShowBulkRetime] = useState(false);
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showSCR, setShowSCR] = useState(false);
@@ -1245,18 +1258,19 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
-        tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} />}
+        tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
         maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
       </div>
 
-      {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} />}
-      {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} />}
-      {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} />}
-      {showSchedulingEngine && <SchedulingEngineModal resources={resources} flights={flights} isGrounded={isGrounded} onClose={() => setShowSchedulingEngine(false)} onCommit={commitSchedulingEngineRows} />}
+      {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
+      {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
+      {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} onLogScr={logScrSent} />}
+      {showSchedulingEngine && <SchedulingEngineModal resources={resources} flights={flights} isGrounded={isGrounded} onClose={() => setShowSchedulingEngine(false)} onCommit={commitSchedulingEngineRows} onLogScr={logScrSent} />}
       {showBulkRetime && <BulkRetimeModal resources={resources} flights={flights} onClose={() => setShowBulkRetime(false)} onCommit={bulkRetime} />}
       {showBulkDelete && <BulkDeleteModal resources={resources} flights={flights} allotments={allotments} onClose={() => setShowBulkDelete(false)} onCommit={bulkDeleteFlights} />}
-      {showSCR && <SCRModal resources={resources} flights={flights} onClose={() => { setShowSCR(false); setScrSeed(null); }} seedFlights={scrSeed?.flights} seedRole={scrSeed?.role} />}
+      {showSCR && <SCRModal resources={resources} flights={flights} onClose={() => { setShowSCR(false); setScrSeed(null); }} seedFlights={scrSeed?.flights} seedRole={scrSeed?.role} onLogScr={logScrSent} />}
+      {showReports && <ReportsModal onClose={() => setShowReports(false)} pushToast={pushToast} />}
       </div>
       </>
       )}
@@ -2183,7 +2197,7 @@ function MiniStat({ label, value, color = C.text }) {
 }
 
 // ---------- single flight insertion ----------
-function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }) {
+function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, onLogScr }) {
   const [form, setForm] = useState(() => {
     const r = prefill?.resourceId ? resources.find(x => x.id === prefill.resourceId) : resources[0];
     return {
@@ -2278,7 +2292,12 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict }
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setStep("form")} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => {
+                  try { navigator.clipboard.writeText(output); } catch (e) {}
+                  setCopied(true);
+                  const lines = output.split("\n");
+                  onLogScr(output, lines[3], lines[1], []);
+                }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCreate({ ...form, start: new Date(form.date), ref: form.ref.trim() || undefined })} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add to schedule</button>
@@ -2406,7 +2425,7 @@ function groupIntoPatternsAndRemaining(parsed) {
   return { patterns: detectedPatterns, rows: remaining };
 }
 
-function BulkImportModal({ resources, flights, onClose, onCommit }) {
+function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
   const [mode, setMode] = useState("paste"); // "paste" | "excel"
   const [raw, setRaw] = useState(SAMPLE_PASTE);
   const [rows, setRows] = useState(null);
@@ -2616,7 +2635,12 @@ function BulkImportModal({ resources, flights, onClose, onCommit }) {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => {
+                  try { navigator.clipboard.writeText(output); } catch (e) {}
+                  setCopied(true);
+                  const lines = output.split("\n");
+                  onLogScr(output, lines[3], lines[1], []);
+                }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCommit(acceptedRows())} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okRowCount + totalFlightsFromPatterns} flight{(okRowCount + totalFlightsFromPatterns) === 1 ? "" : "s"}</button>
@@ -2857,7 +2881,7 @@ function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
   );
 }
 
-function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onCommit }) {
+function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onCommit, onLogScr }) {
   const [requirements, setRequirements] = useState([emptyRequirement()]);
   const [results, setResults] = useState(null);
   const [scrRole, setScrRole] = useState("destination");
@@ -2958,7 +2982,12 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => {
+                  try { navigator.clipboard.writeText(output); } catch (e) {}
+                  setCopied(true);
+                  const lines = output.split("\n");
+                  onLogScr(output, lines[3], lines[1], []);
+                }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCommit(included)} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okCount} flight{okCount === 1 ? "" : "s"}</button>
@@ -2975,7 +3004,7 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // ---------- rotation-template generator ----------
-function RotationGenModal({ resources, flights, onClose, onCommit }) {
+function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
   const [pattern, setPattern] = useState({
     origin: "LGW", destination: "DBV", resourceId: resources[0].id, capacity: resources[0].capacity,
     daysOfWeek: [5], startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)),
@@ -3152,7 +3181,12 @@ function RotationGenModal({ resources, flights, onClose, onCommit }) {
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+                <button onClick={() => {
+                  try { navigator.clipboard.writeText(output); } catch (e) {}
+                  setCopied(true);
+                  const lines = output.split("\n");
+                  onLogScr(output, lines[3], lines[1], []);
+                }} style={{ ...miniBtn, background: copied ? C.greenSoft : GRADIENT_PRIMARY, boxShadow: copied ? "none" : GLOW_PRIMARY, color: copied ? C.green : ON_ACCENT, borderColor: copied ? C.green : C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
                 <button onClick={() => onCommit(included, pattern)} disabled={!copied}
                   title={!copied ? "Copy the message above first" : undefined}
                   style={{ ...miniBtn, background: copied ? C.green : C.faint, color: ON_ACCENT, borderColor: copied ? C.green : C.faint, fontWeight: 600 }}>Confirm — add {okCount} flight{okCount === 1 ? "" : "s"}</button>
@@ -3613,7 +3647,7 @@ function CalendarMultiPick({ selected, onToggle }) {
   );
 }
 
-function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
+function SCRModal({ resources, flights, onClose, seedFlights, seedRole, onLogScr }) {
   const initialRole = seedRole || "destination";
   const initialSeed = seedFlights?.length ? deriveSCRSeedFromFlights(seedFlights, resources, initialRole) : null;
   const [role, setRole] = useState(initialRole);
@@ -3624,6 +3658,27 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
   const [lines, setLines] = useState(initialSeed?.lines || [newSCRLine()]);
   const [output, setOutput] = useState(null);
   const [copied, setCopied] = useState(false);
+  const [emailTo, setEmailTo] = useState("");
+  const [sendingEmail, setSendingEmail] = useState(false);
+  async function sendScrEmail() {
+    if (!emailTo.trim() || !output) return;
+    setSendingEmail(true);
+    try {
+      const res = await fetch("/api/email/send", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: emailTo.trim(), subject: `SCR — ${header.clearanceAirport || "slot request"}`, text: output }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Send failed (${res.status})`);
+      const lns = output.split("\n");
+      onLogScr(output, lns[3], lns[1], []);
+      window.alert(`Sent to ${emailTo.trim()}`); // SCRModal doesn't have its own toast plumbing — an explicit confirmation still matters for a real slot request
+    } catch (e) {
+      window.alert(`Could not send: ${e.message}`);
+    } finally {
+      setSendingEmail(false);
+    }
+  }
 
   // Re-derives lines for the other leg of the same batch — e.g. switching from "arrival at
   // destination" to "departure at origin" for the flights this modal was opened with.
@@ -3850,10 +3905,142 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole }) {
             <textarea readOnly value={output} rows={6 + lines.length} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12.5, resize: "vertical", whiteSpace: "pre" }} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
               <button onClick={() => setOutput(null)} style={miniBtn}>Back</button>
-              <button onClick={() => { try { navigator.clipboard.writeText(output); } catch (e) {} setCopied(true); }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+              <button onClick={() => {
+                try { navigator.clipboard.writeText(output); } catch (e) {}
+                setCopied(true);
+                const lines = output.split("\n");
+                onLogScr(output, lines[3], lines[1], []);
+              }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{copied ? "Copied ✓" : "Copy"}</button>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.borderSoft}` }}>
+              <input value={emailTo} onChange={e => setEmailTo(e.target.value)} placeholder="coordinator@example.com" style={{ ...inputStyle, flex: 1 }} />
+              <button onClick={sendScrEmail} disabled={sendingEmail || !emailTo.trim()} style={{ ...miniBtn, background: sendingEmail ? C.faint : C.green, color: "#fff", borderColor: sendingEmail ? C.faint : C.green, fontWeight: 600, whiteSpace: "nowrap" }}>
+                {sendingEmail ? "Sending…" : "Send direct to email"}
+              </button>
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- reports: schedule / revenue / allotments / utilization / issues / SCR archive, as a PDF ----------
+const REPORT_SECTIONS = [
+  ["schedule", "Schedule (flights)"], ["revenue", "Revenue"], ["allotments", "Tour operator allotments"],
+  ["utilization", "Fleet utilization"], ["issues", "Schedule issues"], ["scr", "SCR message archive"],
+];
+function ReportsModal({ onClose, pushToast }) {
+  const [startDate, setStartDate] = useState(iso(today));
+  const [endDate, setEndDate] = useState(iso(addDays(today, 30)));
+  const [sections, setSections] = useState(() => new Set(REPORT_SECTIONS.map(([k]) => k)));
+  const [generating, setGenerating] = useState(false);
+  const [lastPdf, setLastPdf] = useState(null); // { base64, filename } — kept so Email can reuse it without regenerating
+  const [emailTo, setEmailTo] = useState("");
+  const [sending, setSending] = useState(false);
+
+  function toggleSection(key) {
+    setSections(prev => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; });
+  }
+
+  async function callGenerate() {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch("/api/reports/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
+      body: JSON.stringify({ startDate, endDate, sections: [...sections] }),
+    });
+    if (!res.ok) { const body = await res.json().catch(() => ({})); throw new Error(body.error || `Report generation failed (${res.status})`); }
+    const blob = await res.blob();
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+    return { blob, base64, filename: `charter-ops-report-${startDate}-to-${endDate}.pdf` };
+  }
+
+  async function handleDownload() {
+    if (sections.size === 0) { pushToast("Pick at least one section first", "warn"); return; }
+    setGenerating(true);
+    try {
+      const { blob, base64, filename } = await callGenerate();
+      setLastPdf({ base64, filename });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      pushToast(e.message, "warn");
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleEmail() {
+    if (!emailTo.trim()) { pushToast("Enter a recipient email first", "warn"); return; }
+    if (sections.size === 0) { pushToast("Pick at least one section first", "warn"); return; }
+    setSending(true);
+    try {
+      const pdf = lastPdf || await callGenerate().then(r => { setLastPdf({ base64: r.base64, filename: r.filename }); return r; });
+      const res = await fetch("/api/email/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: emailTo.trim(), subject: `Charter Ops report — ${startDate} to ${endDate}`,
+          text: `Attached: the Charter Ops report for ${startDate} to ${endDate}.`,
+          attachmentBase64: pdf.base64, attachmentFilename: pdf.filename,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `Send failed (${res.status})`);
+      pushToast(`Report emailed to ${emailTo.trim()}`, "ok");
+    } catch (e) {
+      pushToast(e.message, "warn");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 22, width: 440, maxWidth: "92vw" }}>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Reports</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 16 }}>Pick a date range and whichever sections you need — one combined PDF, download or email it directly.</div>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <FieldSm label="From"><input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={inputStyle} /></FieldSm>
+          <FieldSm label="To"><input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} style={inputStyle} /></FieldSm>
+        </div>
+
+        <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Sections</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
+          {REPORT_SECTIONS.map(([key, label]) => (
+            <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+              <input type="checkbox" checked={sections.has(key)} onChange={() => toggleSection(key)} />
+              {label}
+            </label>
+          ))}
+        </div>
+
+        <button onClick={handleDownload} disabled={generating} style={{ ...miniBtn, width: "100%", background: generating ? C.faint : GRADIENT_PRIMARY, boxShadow: generating ? "none" : GLOW_PRIMARY, color: ON_ACCENT, borderColor: generating ? C.faint : C.amber, fontWeight: 600, marginBottom: 14 }}>
+          {generating ? "Generating…" : "Download PDF"}
+        </button>
+
+        <div style={{ borderTop: `1px solid ${C.borderSoft}`, paddingTop: 14 }}>
+          <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Or email it directly</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input value={emailTo} onChange={e => setEmailTo(e.target.value)} placeholder="coordinator@example.com" style={{ ...inputStyle, flex: 1 }} />
+            <button onClick={handleEmail} disabled={sending} style={{ ...miniBtn, background: sending ? C.faint : C.green, color: "#fff", borderColor: sending ? C.faint : C.green, fontWeight: 600, whiteSpace: "nowrap" }}>
+              {sending ? "Sending…" : "Send"}
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+          <button onClick={onClose} style={miniBtn}>Close</button>
+        </div>
       </div>
     </div>
   );
@@ -4397,7 +4584,7 @@ function TasksWidget({ tasks, onAddTask, onToggleTask }) {
 }
 
 // ---------- dashboard ----------
-function Dashboard({ flights, allotments, resources, operators, flightInventory, perms, tasks, onAddTask, onToggleTask, notifications, setTab, setSelectedFlightId }) {
+function Dashboard({ flights, allotments, resources, operators, flightInventory, perms, tasks, onAddTask, onToggleTask, notifications, setTab, setSelectedFlightId, onOpenReports }) {
   const invs = flights.map(f => ({ f, inv: flightInventory(f.id) }));
   const totalRevenue = invs.reduce((s, x) => s + x.inv.revenue, 0);
   const totalSeatsSold = invs.reduce((s, x) => s + x.inv.allocated, 0);
@@ -4411,9 +4598,12 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
 
   return (
     <div style={{ padding: 20 }}>
-      <div style={{ background: `linear-gradient(120deg, ${SIDEBAR.bg}, #1B2C4D)`, borderRadius: 16, padding: "26px 30px", color: SIDEBAR.text, marginBottom: 18, position: "relative", overflow: "hidden" }}>
-        <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Charter Operations</div>
-        <div style={{ fontSize: 13, color: SIDEBAR.muted }}>Plan · Coordinate · Deliver</div>
+      <div style={{ background: `linear-gradient(120deg, ${SIDEBAR.bg}, #1B2C4D)`, borderRadius: 16, padding: "26px 30px", color: SIDEBAR.text, marginBottom: 18, position: "relative", overflow: "hidden", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div>
+          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Charter Operations</div>
+          <div style={{ fontSize: 13, color: SIDEBAR.muted }}>Plan · Coordinate · Deliver</div>
+        </div>
+        <button onClick={onOpenReports} style={{ background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Reports</button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 18 }}>

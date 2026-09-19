@@ -17,6 +17,8 @@
     "@deck.gl/core": "^9.0.0",
     "@deck.gl/react": "^9.0.0",
     "@deck.gl/layers": "^9.0.0",
+    "@react-pdf/renderer": "^4.0.0",
+    "resend": "^4.0.0",
     "@anthropic-ai/sdk": "^0.32.1",
     "xlsx": "^0.18.5"
   },
