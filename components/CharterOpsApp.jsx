@@ -1751,7 +1751,6 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                             setSelectedFlightId(selected ? null : f.id);
                           }
                         }}
-                        title={`${f.ref} · ${f.origin}→${f.destination}${f.depTime ? ` · ${f.depTime}–${f.arrTime || "?"}` : ""}${isFerry ? " · ferry/positioning" : ""}${pendingDraft ? ` · PENDING: ${pendingDraft.summary}` : ""}${perms.editFlight ? (draftMode ? " · drag to reassign aircraft · shift-click to multi-select · right-click for more" : " · turn on Draft mode to drag/reassign this flight · shift-click to multi-select · right-click for more") : ""}`}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
                           background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
                           border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
