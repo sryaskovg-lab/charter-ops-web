@@ -2,20 +2,15 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
-import "leaflet/dist/leaflet.css";
 import * as XLSX from "xlsx";
 import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
   flightGeometry, assignLanes, colorForDestination, mapFlight, computeScheduleIssues, FLIGHT_COLORS,
 } from "../lib/scheduling-utils";
 
-// Leaflet touches `window`/`document` at import time, so it can only load client-side —
-// dynamic() with ssr:false is the standard fix for react-leaflet under Next.js.
-const MapContainer = dynamic(() => import("react-leaflet").then(m => m.MapContainer), { ssr: false });
-const TileLayer = dynamic(() => import("react-leaflet").then(m => m.TileLayer), { ssr: false });
-const CircleMarker = dynamic(() => import("react-leaflet").then(m => m.CircleMarker), { ssr: false });
-const Popup = dynamic(() => import("react-leaflet").then(m => m.Popup), { ssr: false });
-const Polyline = dynamic(() => import("react-leaflet").then(m => m.Polyline), { ssr: false });
+// deck.gl's React component renders WebGL, so like any browser-only library under Next.js it
+// needs to be kept out of server-side rendering — dynamic() with ssr:false is the standard fix.
+const DeckGL = dynamic(() => import("@deck.gl/react").then(m => m.default), { ssr: false });
 
 // ---------- design tokens: "boarding-pass daylight" ----------
 const C = {
@@ -4259,18 +4254,63 @@ function NotificationRow({ n }) {
   );
 }
 
-// ---------- route map — real Leaflet + OpenStreetMap, built from actual current routes ----------
+// ---------- route map — deck.gl ArcLayer, built from actual current routes ----------
+// Deliberately not a live raster tile service (Leaflet + OSM/CARTO) — both of those turned out
+// to have real availability problems (OSM blocks embedded-app tile requests; CARTO now
+// requires an API key). The background here is a small static country-outline file fetched
+// once, not re-requested on every pan/zoom, so there's no live service that can suddenly
+// start blocking or gating this.
 const STATION_LATLNG = {
   AYT: [36.9, 30.8], SSH: [27.9, 34.4], ALA: [43.2, 77.0], NQZ: [51.2, 71.4], SKD: [39.7, 66.9],
   HRI: [6.28, 81.12], HKT: [8.11, 98.32], CXR: [11.99, 109.22], PQC: [10.23, 103.97], SYX: [18.31, 109.41], SIN: [1.36, 103.99],
 };
+const COUNTRIES_GEOJSON_URL = "https://cdn.jsdelivr.net/npm/@geo-maps/countries-land-10km@0.6.0/map.geo.json";
 function RouteMap({ flights }) {
   const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
+  const [deckLib, setDeckLib] = useState(null);
+  const [countriesGeoJson, setCountriesGeoJson] = useState(null);
+  useEffect(() => {
+    setMounted(true);
+    import("@deck.gl/layers").then(m => setDeckLib({ ArcLayer: m.ArcLayer, ScatterplotLayer: m.ScatterplotLayer, TextLayer: m.TextLayer, GeoJsonLayer: m.GeoJsonLayer }));
+    fetch(COUNTRIES_GEOJSON_URL)
+      .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(setCountriesGeoJson)
+      .catch(err => console.warn("Route map: country outline failed to load, arcs/stations still render:", err.message));
+  }, []);
+
   const routes = [...new Map(flights.map(f => [`${f.origin}|${f.destination}`, f])).values()];
   const stations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => STATION_LATLNG[s]);
   const unknownStations = [...new Set(flights.flatMap(f => [f.origin, f.destination]))].filter(s => !STATION_LATLNG[s]);
   const center = stations.length ? STATION_LATLNG[stations[0]] : [30, 60];
+  // deck.gl/GeoJSON want [lng, lat] — STATION_LATLNG is stored [lat, lng] to match Leaflet's
+  // old convention, so every point gets flipped on the way in.
+  const toLngLat = latlng => [latlng[1], latlng[0]];
+
+  const arcData = routes.map(r => {
+    const p1 = STATION_LATLNG[r.origin], p2 = STATION_LATLNG[r.destination];
+    return p1 && p2 ? { source: toLngLat(p1), target: toLngLat(p2) } : null;
+  }).filter(Boolean);
+  const stationData = stations.map(s => ({ code: s, position: toLngLat(STATION_LATLNG[s]) }));
+
+  const layers = deckLib ? [
+    countriesGeoJson && new deckLib.GeoJsonLayer({
+      id: "countries", data: countriesGeoJson, stroked: true, filled: true,
+      getFillColor: [239, 242, 248, 255], getLineColor: [220, 226, 236, 255], lineWidthMinPixels: 0.6,
+    }),
+    new deckLib.ArcLayer({
+      id: "routes", data: arcData, getSourcePosition: d => d.source, getTargetPosition: d => d.target,
+      getSourceColor: [59, 111, 224], getTargetColor: [59, 111, 224], getWidth: 2.5, greatCircle: true,
+    }),
+    new deckLib.ScatterplotLayer({
+      id: "stations", data: stationData, getPosition: d => d.position, pickable: true,
+      getFillColor: [224, 71, 59], getRadius: 40000, radiusMinPixels: 5, radiusMaxPixels: 9,
+      stroked: true, getLineColor: [255, 255, 255], lineWidthMinPixels: 1.5,
+    }),
+    new deckLib.TextLayer({
+      id: "labels", data: stationData, getPosition: d => d.position, getText: d => d.code,
+      getSize: 11, getColor: [30, 42, 61, 255], getPixelOffset: [0, -13], fontFamily: MONO, fontWeight: 700,
+    }),
+  ].filter(Boolean) : [];
 
   return (
     <div style={card}>
@@ -4280,20 +4320,11 @@ function RouteMap({ flights }) {
           <span style={{ width: 6, height: 6, borderRadius: 99, background: C.green, display: "inline-block", animation: "pulseDot 1.6s infinite" }} /> LIVE
         </div>
       </div>
-      {mounted ? (
-        <MapContainer center={center} zoom={4} style={{ width: "100%", height: 380, borderRadius: 10 }} scrollWheelZoom={true}>
-          <TileLayer attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-          {routes.map((r, i) => {
-            const p1 = STATION_LATLNG[r.origin], p2 = STATION_LATLNG[r.destination];
-            if (!p1 || !p2) return null;
-            return <Polyline key={i} positions={[p1, p2]} pathOptions={{ color: C.amber, weight: 2.5, opacity: 0.85 }} />;
-          })}
-          {stations.map((s, i) => (
-            <CircleMarker key={s} center={STATION_LATLNG[s]} radius={7} pathOptions={{ color: "#FFFFFF", weight: 2, fillColor: i === 0 ? C.green : C.amber, fillOpacity: 1 }}>
-              <Popup>{s}</Popup>
-            </CircleMarker>
-          ))}
-        </MapContainer>
+      {mounted && deckLib ? (
+        <div style={{ width: "100%", height: 380, borderRadius: 10, overflow: "hidden", position: "relative", background: C.panel2 }}>
+          <DeckGL initialViewState={{ longitude: center[1], latitude: center[0], zoom: 3 }} controller={true} layers={layers}
+            getTooltip={({ object }) => object?.code && { text: object.code }} />
+        </div>
       ) : <div style={{ width: "100%", height: 380, borderRadius: 10, background: C.panel2 }} />}
       <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10.5, color: C.muted, flexWrap: "wrap" }}>
         <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 2, background: C.amber, display: "inline-block" }} /> Scheduled route</span>
