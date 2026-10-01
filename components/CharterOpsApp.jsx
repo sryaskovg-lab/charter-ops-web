@@ -158,6 +158,25 @@ function mapMaintenanceBlock(m) { return { id: m.id, resourceId: m.resource_id, 
 function effectiveGeometry(f, isNarrow) {
   return isNarrow ? { offsetFrac: 0, widthFrac: 1 } : flightGeometry(f);
 }
+// Builds the "as-if-approved" shape of a flight for ghost-bar rendering on the Gantt while
+// Draft Mode has pending changes — merges a flight with a pending draft_changes patch the same
+// way updateFlight itself combines them, so the ghost always lands exactly where approving it
+// would actually put it (a day-only patch.start keeps the existing depTime, same rule the live
+// apply path uses — see updateFlight's own comment on this).
+function ghostFlightFromPatch(current, patch) {
+  const baseDate = patch.start ? new Date(patch.start) : current.start;
+  const depTime = patch.depTime !== undefined ? patch.depTime : current.depTime;
+  const arrTime = patch.arrTime !== undefined ? patch.arrTime : current.arrTime;
+  const start = combineDateAndTime(baseDate, depTime) || baseDate;
+  return {
+    ...current,
+    resourceId: patch.resourceId || current.resourceId,
+    capacity: patch.capacity !== undefined ? patch.capacity : current.capacity,
+    status: patch.status !== undefined ? patch.status : current.status,
+    depTime, arrTime, start,
+    arrivalAt: combineArrivalDateTime(start, arrTime),
+  };
+}
 function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
 function mapOperator(o, contract) {
   return {
@@ -1507,6 +1526,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
     return m;
   }, [draftChanges]);
   const pendingCreates = draftChanges.filter(d => d.changeType === "create");
+  const pendingUpdates = draftChanges.filter(d => d.changeType === "update");
   const [showIssues, setShowIssues] = useState(false);
   const allIssues = useMemo(() => computeScheduleIssues(flights, resources, slotRequests), [flights, resources, slotRequests]);
   const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
@@ -1990,13 +2010,78 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   const leftPx = c * COL + geom.offsetFrac * COL + 3;
                   const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
                   return (
-                    <div key={d.id} title={`Pending: ${d.summary}`} style={{
+                    <div key={d.id} title={`Pending: ${d.summary}`} onClick={() => setShowDraftPanel(true)} style={{
                       position: "absolute", left: leftPx, top: TOP_PAD, width: widthPx, height: BAR_H,
                       border: `2px dashed ${C.amber}`, background: C.amberSoft, borderRadius: isNarrow ? 7 : BAR_H / 2,
-                      display: "flex", alignItems: "center", padding: "0 8px", fontSize: 10.5, fontFamily: MONO, color: C.amber, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap",
+                      display: "flex", alignItems: "center", padding: "0 8px", fontSize: 10.5, fontFamily: MONO, color: C.amber, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap", cursor: "pointer", zIndex: 7,
                     }}>
                       + {d.patch.ref || "new"}
                     </div>
+                  );
+                })}
+                {/* Published-vs-draft overlay: a translucent dashed "ghost" bar at the position a
+                    pending update would land at if approved, so draft changes read as a visual
+                    diff on the Gantt itself rather than only as text in the Draft changes panel.
+                    Same-aircraft time/date moves also get a connector arrow from the real bar to
+                    the ghost; a reassignment to a different aircraft shows the ghost on the target
+                    row with a "from <code>" label instead, since a cross-row connector would cut
+                    through unrelated aircraft rows and read as noise rather than a move. */}
+                {pendingUpdates.map(d => {
+                  const f = flights.find(x => x.id === d.flightId);
+                  if (!f) return null;
+                  const targetResourceId = d.patch.resourceId || f.resourceId;
+                  if (targetResourceId !== res.id) return null;
+                  const crossAircraft = !!(d.patch.resourceId && d.patch.resourceId !== f.resourceId);
+                  const ghost = ghostFlightFromPatch(f, d.patch);
+                  const c = colFor(ghost.start);
+                  if (c < 0 || c >= days.length) return null;
+                  const geom = effectiveGeometry(ghost, isNarrow);
+                  const leftPx = c * COL + geom.offsetFrac * COL + 3;
+                  const widthPx = Math.max(geom.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
+                  const lane0 = crossAircraft ? 0 : (laneOf.get(f.id) ?? 0);
+                  const barTop = crossAircraft ? TOP_PAD : TOP_PAD + lane0 * (BAR_H + BAR_GAP);
+                  const origResCode = crossAircraft ? resources.find(r => r.id === f.resourceId)?.code : null;
+
+                  let connector = null;
+                  if (!crossAircraft) {
+                    const c0 = colFor(f.start);
+                    if (c0 >= 0 && c0 < days.length) {
+                      const geom0 = effectiveGeometry(f, isNarrow);
+                      const leftPx0 = c0 * COL + geom0.offsetFrac * COL + 3;
+                      const widthPx0 = Math.max(geom0.widthFrac * COL - 6, isNarrow ? COL - 6 : 34);
+                      const origRight = leftPx0 + widthPx0, origLeft = leftPx0;
+                      const ghostRight = leftPx + widthPx, ghostLeft = leftPx;
+                      let x1 = null, x2 = null, arrowRight = true;
+                      if (ghostLeft >= origRight) { x1 = origRight; x2 = ghostLeft; arrowRight = true; }
+                      else if (ghostRight <= origLeft) { x1 = ghostRight; x2 = origLeft; arrowRight = false; }
+                      if (x1 != null) {
+                        const midY = barTop + BAR_H / 2;
+                        connector = (
+                          <React.Fragment key={"conn-" + d.id}>
+                            <div style={{ position: "absolute", left: x1, top: midY - 1, width: x2 - x1, height: 0, borderTop: `2px dashed ${C.amber}`, zIndex: 6, pointerEvents: "none" }} />
+                            <div style={{
+                              position: "absolute", top: midY - 4, left: arrowRight ? x2 - 6 : x2, width: 0, height: 0,
+                              borderTop: "4px solid transparent", borderBottom: "4px solid transparent",
+                              ...(arrowRight ? { borderLeft: `6px solid ${C.amber}` } : { borderRight: `6px solid ${C.amber}` }),
+                              zIndex: 6, pointerEvents: "none",
+                            }} />
+                          </React.Fragment>
+                        );
+                      }
+                    }
+                  }
+
+                  return (
+                    <React.Fragment key={"ghost-" + d.id}>
+                      {connector}
+                      <div title={`Pending: ${d.summary}`} onClick={() => setShowDraftPanel(true)} style={{
+                        position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
+                        border: `2px dashed ${C.amber}`, background: C.amberSoft, opacity: 0.82, borderRadius: isNarrow ? 7 : BAR_H / 2,
+                        display: "flex", alignItems: "center", gap: 4, padding: "0 8px", fontSize: 10.5, fontFamily: MONO, color: C.amber, fontWeight: 600, overflow: "hidden", whiteSpace: "nowrap", cursor: "pointer", zIndex: 7,
+                      }}>
+                        → {f.ref}{crossAircraft ? ` · from ${origResCode || "?"}` : ""}
+                      </div>
+                    </React.Fragment>
                   );
                 })}
               </div>
@@ -2014,6 +2099,12 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
         <LegendSwatch color={C.green} label="Healthy fill" />
         <LegendSwatch color={C.amber} label="Near full (≥92%)" />
         <LegendSwatch color={C.red} label="Oversold" />
+        {draftChanges.length > 0 && (
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 16, height: 10, border: `2px dashed ${C.amber}`, borderRadius: 3, background: C.amberSoft }} />
+            Dashed → pending draft (click to review)
+          </span>
+        )}
         <button onClick={() => setShowDestLegend(v => !v)} style={{ ...miniBtn, padding: "3px 10px", fontSize: 11 }}>{showDestLegend ? "Hide" : "Show"} destination colors</button>
       </div>
       {showDestLegend && (
