@@ -788,6 +788,20 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   async function addAllotment(flightId, operatorId, seats, priceOverride) {
     const op = operators.find(o => o.id === operatorId);
     const flight = flights.find(f => f.id === flightId);
+    // Business rule: once an operator has seats allocated on a flight (or across a series),
+    // that allocation can never be reduced — the only permitted change is adding more seats,
+    // at the price already on record. So a repeat "add" for the same flight+operator tops up
+    // the existing row instead of creating a second one, and any newly-typed price is ignored.
+    const existing = allotments.find(a => a.flightId === flightId && a.operatorId === operatorId && a.status !== "cancelled" && a.status !== "released");
+    if (existing) {
+      const newTotal = existing.seatsAllocated + seats;
+      const { error } = await supabase.from("allotments").update({ seats_allocated: newTotal }).eq("id", existing.id);
+      if (error) { pushToast(`Could not add seats: ${error.message}`, "warn"); return; }
+      setAllotmentsRaw(as => as.map(a => a.id === existing.id ? { ...a, seatsAllocated: newTotal } : a));
+      pushToast(`Added ${seats} seats to ${op.name}'s existing allocation on ${flight?.ref} — now ${newTotal} @ $${existing.pricePerSeat}/seat (already-allocated seats can't be reduced or repriced)`, "ok");
+      pushNotification("Seats added", `+${seats} seats · ${op.name} · ${flight?.ref || ""}`, "allotment");
+      return;
+    }
     const price = priceOverride ?? rateFor(op, flight?.destination);
     const optionReleaseAt = op.allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
     const { data, error } = await supabase.from("allotments").insert({
@@ -804,6 +818,19 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   }
 
   async function patchAllotment(id, patch) {
+    // Guard rail for the same rule as addAllotment: never let an edit reduce seats already
+    // allocated, or reprice seats that are already on the books.
+    const current = allotments.find(a => a.id === id);
+    if (current) {
+      if (patch.seatsAllocated !== undefined && patch.seatsAllocated < current.seatsAllocated) {
+        pushToast(`Can't reduce seats already allocated (${current.seatsAllocated}) — seats can only be added, never taken back.`, "warn");
+        return;
+      }
+      if (patch.pricePerSeat !== undefined && patch.pricePerSeat !== current.pricePerSeat) {
+        pushToast(`Can't change the price on seats already allocated — additional seats go on at the existing $${current.pricePerSeat}/seat rate.`, "warn");
+        return;
+      }
+    }
     const dbPatch = {};
     if (patch.seatsAllocated !== undefined) dbPatch.seats_allocated = patch.seatsAllocated;
     if (patch.pricePerSeat !== undefined) dbPatch.price_per_seat = patch.pricePerSeat;
@@ -814,6 +841,13 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   }
 
   async function removeAllotment(id) {
+    // Same rule again: removing an allotment with seats on it is a reduction to zero, which
+    // isn't allowed once seats are allocated. Only a genuinely empty row could ever be removed.
+    const current = allotments.find(a => a.id === id);
+    if (current && current.seatsAllocated > 0) {
+      pushToast(`Can't remove this allotment — ${current.seatsAllocated} seats already allocated to this operator can't be taken back. Seats can only be added.`, "warn");
+      return;
+    }
     const { error } = await supabase.from("allotments").update({ status: "cancelled" }).eq("id", id);
     if (error) { pushToast(`Could not remove allotment: ${error.message}`, "warn"); return; }
     setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, status: "cancelled" } : a));
@@ -2139,21 +2173,13 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
                 <Badge color={released ? C.faint : a.allotmentType === "option" ? C.amber : C.cyan}>{released ? "RELEASED" : a.allotmentType.toUpperCase()}</Badge>
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 5, fontSize: 11.5, color: C.muted, alignItems: "center" }}>
-                {perms.editAllotments && !released ? (
-                  <>
-                    <input type="number" value={a.seatsAllocated} onChange={e => onPatchAllotment(a.id, { seatsAllocated: +e.target.value })} style={{ ...inputStyle, width: 56, padding: "3px 6px" }} />
-                    seats @ $
-                    <input type="number" value={a.pricePerSeat} onChange={e => onPatchAllotment(a.id, { pricePerSeat: +e.target.value })} style={{ ...inputStyle, width: 56, padding: "3px 6px" }} />
-                  </>
-                ) : <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>}
+                <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
               </div>
               {a.allotmentType === "option" && a.optionReleaseAt && !released && (
                 <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>Auto-releases {iso(a.optionReleaseAt)} if not confirmed</div>
               )}
               {perms.editAllotments && !released && (
-                <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                  <button onClick={() => onRemoveAllotment(a.id)} style={{ ...miniBtn, borderColor: C.red, color: C.red, fontSize: 10.5, padding: "3px 8px" }}>Remove</button>
-                </div>
+                <AddSeatsRow onAdd={n => onAddAllotment(a.operatorId, n)} />
               )}
             </div>
           );
@@ -2187,6 +2213,18 @@ function FieldRow({ label, children }) {
     <span style={{ fontSize: 11, color: C.muted }}>{label}</span>
     <div style={{ width: 170 }}>{children}</div>
   </div>;
+}
+// Already-allocated seats can only grow, never shrink — this is the only control offered
+// on an existing allotment: how many MORE seats to add, always at the allotment's own price.
+function AddSeatsRow({ onAdd }) {
+  const [qty, setQty] = useState(10);
+  return (
+    <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center" }}>
+      <input type="number" min={1} value={qty} onChange={e => setQty(Math.max(1, +e.target.value || 1))} style={{ ...inputStyle, width: 56, padding: "3px 6px" }} />
+      <button onClick={() => onAdd(qty)} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>+ Add seats</button>
+      <span style={{ fontSize: 10, color: C.faint }}>same price · can't reduce</span>
+    </div>
+  );
 }
 function MiniStat({ label, value, color = C.text }) {
   return <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "6px 8px", textAlign: "center" }}>
@@ -4124,7 +4162,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                 {isRates && (
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-                      Allocate seats directly against specific flights for {o.name} — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, set seats and price, then Add. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both.
+                      Allocate seats directly against specific flights for {o.name} — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, set seats and price, then Add. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both. If {o.name} already has seats on a picked flight, this tops up that allocation at its existing price instead of the price typed below — allocated seats can never be reduced or repriced, only added to.
                     </div>
                     {perms.editContracts && (
                       <div>
