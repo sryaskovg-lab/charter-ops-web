@@ -853,6 +853,21 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, status: "cancelled" } : a));
   }
 
+  async function releaseAllotments(ids) {
+    // The sanctioned way to give seats back, distinct from the seats-can-only-grow rule
+    // above: this is an operator-initiated, bulk, auditable release of unsold seats back to
+    // inventory — not a quiet in-place edit of one allotment's seat count. Marks "released"
+    // (the same status the option auto-expiry cron uses) rather than "cancelled", since these
+    // are genuine allotments being handed back, not erroneous rows being undone.
+    if (!ids.length) return;
+    const totalSeats = allotments.filter(a => ids.includes(a.id)).reduce((s, a) => s + a.seatsAllocated, 0);
+    const { error } = await supabase.from("allotments").update({ status: "released" }).in("id", ids);
+    if (error) { pushToast(`Could not release seats: ${error.message}`, "warn"); return; }
+    setAllotmentsRaw(as => as.map(a => ids.includes(a.id) ? { ...a, status: "released" } : a));
+    pushToast(`Released ${totalSeats} seats across ${ids.length} allotment(s) back to inventory`, "ok");
+    pushNotification("Seats released", `${totalSeats} seats across ${ids.length} flight(s)`, "allotment");
+  }
+
   // OperatorsPanel edits rates by calling setOperators(prev => ...) exactly like a useState
   // setter; we diff the result against the current array and push only what changed —
   // defaultRate -> contracts.rate_per_seat, ratesByDestination -> contracts.rates_by_destination.
@@ -1289,7 +1304,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         </div>
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} />}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -4083,8 +4098,8 @@ function ReportsModal({ onClose, pushToast }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator, onAddAllotment }) {
-  const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" }
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator, onAddAllotment, onReleaseAllotments }) {
+  const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" | "release" }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
   const [showBulkOperators, setShowBulkOperators] = useState(false);
@@ -4092,8 +4107,10 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [flightRateSelected, setFlightRateSelected] = useState(() => new Set());
   const [flightRateSeats, setFlightRateSeats] = useState(10);
   const [flightRatePrice, setFlightRatePrice] = useState("");
+  const [releaseSelected, setReleaseSelected] = useState(() => new Set());
+  const [confirmRelease, setConfirmRelease] = useState(false);
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
-  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); }
+  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Set()); setConfirmRelease(false); }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
     : [];
@@ -4129,6 +4146,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
             opAllotments.forEach(a => { const f = flights.find(fl => fl.id === a.flightId); if (f) byDest[f.destination] = (byDest[f.destination] || 0) + a.seatsAllocated; });
             const isSeats = expanded?.id === o.id && expanded.panel === "seats";
             const isRates = expanded?.id === o.id && expanded.panel === "rates";
+            const isRelease = expanded?.id === o.id && expanded.panel === "release";
             return (
               <React.Fragment key={o.id}>
                 <tr style={{ borderTop: `1px solid ${C.borderSoft}` }}>
@@ -4149,6 +4167,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? "Hide" : "Allocate seats"}</button>
                       <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? "Hide" : "View seats"}</button>
+                      {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? "Hide" : "Release seats"}</button>}
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
@@ -4216,6 +4235,49 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                     </div>
                   </td></tr>
                 )}
+                {isRelease && (() => {
+                  const releaseSeatTotal = opAllotments.filter(a => releaseSelected.has(a.id)).reduce((s, a) => s + a.seatsAllocated, 0);
+                  return (
+                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+                      Release unsold seats for {o.name} back to inventory — pick the flight(s), confirm, and those seats become available to allocate to anyone again. This is separate from the no-reduction rule above: it's a deliberate hand-back of a whole allotment, not an edit to one.
+                    </div>
+                    <div style={{ maxHeight: 180, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
+                      {opAllotments.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>No active allotments to release.</div>}
+                      {opAllotments.map(a => {
+                        const fl = flights.find(f => f.id === a.flightId);
+                        return (
+                          <label key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
+                            <input type="checkbox" checked={releaseSelected.has(a.id)} onChange={() => setReleaseSelected(prev => { const next = new Set(prev); next.has(a.id) ? next.delete(a.id) : next.add(a.id); return next; })} />
+                            <span style={{ fontWeight: 700 }}>{fl?.ref}</span>
+                            <span style={{ color: C.muted }}>{iso(fl?.start)}</span>
+                            <span style={{ color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
+                            <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    {opAllotments.length > 0 && (
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <button onClick={() => setReleaseSelected(new Set(opAllotments.map(a => a.id)))} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>Select all {opAllotments.length}</button>
+                        {releaseSelected.size > 0 && <button onClick={() => { setReleaseSelected(new Set()); setConfirmRelease(false); }} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>Clear</button>}
+                        <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{releaseSelected.size > 0 ? `${releaseSeatTotal} seats across ${releaseSelected.size} flight(s)` : ""}</span>
+                        {!confirmRelease ? (
+                          <button disabled={releaseSelected.size === 0} onClick={() => setConfirmRelease(true)}
+                            style={{ ...miniBtn, color: releaseSelected.size ? C.red : C.faint, borderColor: releaseSelected.size ? C.red : C.faint }}>Release…</button>
+                        ) : (
+                          <>
+                            <span style={{ fontSize: 11, color: C.red }}>Give back {releaseSeatTotal} seats for good?</span>
+                            <button onClick={() => { onReleaseAllotments([...releaseSelected]); setReleaseSelected(new Set()); setConfirmRelease(false); }}
+                              style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>Confirm release</button>
+                            <button onClick={() => setConfirmRelease(false)} style={miniBtn}>Cancel</button>
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </td></tr>
+                  );
+                })()}
               </React.Fragment>
             );
           })}
