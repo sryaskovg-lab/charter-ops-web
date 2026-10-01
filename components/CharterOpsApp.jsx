@@ -172,7 +172,7 @@ function mapOperator(o, contract) {
 function rateFor(op, destination) { return op?.ratesByDestination?.[destination] ?? op?.defaultRate ?? 0; }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }] = await Promise.all([
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     supabase.from("flights").select("*").order("scheduled_departure"),
     supabase.from("tour_operators").select("*").order("name"),
@@ -185,6 +185,9 @@ async function fetchAll() {
     supabase.from("maintenance_blocks").select("*").order("start_at"),
     supabase.from("acknowledged_issues").select("*"),
     supabase.from("draft_changes").select("*").order("created_at"),
+    supabase.from("slot_requests").select("*"),
+    supabase.from("slot_correspondence").select("*").order("created_at"),
+    supabase.from("atfm_records").select("*"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
@@ -199,9 +202,32 @@ async function fetchAll() {
     maintenanceBlocks: (maintenanceBlocks || []).map(mapMaintenanceBlock),
     acknowledgedIssueIds: (ackIssues || []).map(a => a.issue_id),
     draftChanges: (draftChanges || []).map(mapDraftChange),
+    slotRequests: (slotRequests || []).map(mapSlotRequest),
+    slotCorrespondence: (slotCorrespondence || []).map(mapSlotCorrespondence),
+    atfmRecords: (atfmRecords || []).map(mapAtfmRecord),
   };
 }
 function mapDraftChange(d) { return { id: d.id, flightId: d.flight_id, changeType: d.change_type, patch: d.patch || {}, summary: d.summary, createdBy: d.created_by, createdAt: new Date(d.created_at) }; }
+// Airport slot coordination — one row per movement (departure/arrival), kept structurally
+// separate from ATFM/CTOT below so the two are never conflated into one status field.
+function mapSlotRequest(s) {
+  return {
+    id: s.id, flightId: s.flight_id, movementType: s.movement_type, airport: s.airport, status: s.status,
+    requestedTime: s.requested_time ? new Date(s.requested_time) : null,
+    offeredTime: s.offered_time ? new Date(s.offered_time) : null,
+    confirmedTime: s.confirmed_time ? new Date(s.confirmed_time) : null,
+    coordinatorReference: s.coordinator_reference || "", responsibleUserId: s.responsible_user_id || null,
+    actionDeadline: s.action_deadline || null, lastScrLogId: s.last_scr_log_id || null,
+    createdBy: s.created_by, createdAt: new Date(s.created_at), updatedAt: new Date(s.updated_at),
+  };
+}
+function mapSlotCorrespondence(c) { return { id: c.id, slotRequestId: c.slot_request_id, note: c.note, createdBy: c.created_by, createdAt: new Date(c.created_at) }; }
+function mapAtfmRecord(a) {
+  return {
+    id: a.id, flightId: a.flight_id, ctot: a.ctot ? new Date(a.ctot) : null, regulationReference: a.regulation_reference || "",
+    status: a.status, notes: a.notes || "", createdAt: new Date(a.created_at), updatedAt: new Date(a.updated_at),
+  };
+}
 
 // ---------- atoms ----------
 function Badge({ children, color, bg = "transparent" }) {
@@ -292,6 +318,7 @@ function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fil
 function IconChat({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>; }
 function IconX({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>; }
 function IconMenu() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>; }
+function IconSlot() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l4 2" /></svg>; }
 
 export default function CharterOpsApp({ profile, onSignOut }) {
   const role = profile.role;
@@ -330,6 +357,9 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   // without draft mode on are unaffected and still commit instantly, same as always.
   const [draftMode, setDraftMode] = useState(false);
   const [draftChanges, setDraftChanges] = useState([]);
+  const [slotRequests, setSlotRequests] = useState([]);
+  const [slotCorrespondence, setSlotCorrespondence] = useState([]);
+  const [atfmRecords, setAtfmRecords] = useState([]);
   const [flights, setFlightsRaw] = useState([]);
   const [operators, setOperatorsRaw] = useState([]);
   const [allotments, setAllotmentsRaw] = useState([]);
@@ -492,11 +522,77 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   // Best-effort: a logging failure never blocks the actual SCR workflow, just misses one entry
   // in the archive.
   async function logScrSent(messageText, clearanceAirport, season, flightIds) {
-    const { error } = await supabase.from("scr_log").insert({
+    const { data, error } = await supabase.from("scr_log").insert({
       message_text: messageText, clearance_airport: clearanceAirport, season,
       flight_ids: flightIds || [], created_by: profile.id,
-    });
-    if (error) console.warn("Could not log SCR to the archive:", error.message);
+    }).select().single();
+    if (error) { console.warn("Could not log SCR to the archive:", error.message); return null; }
+    return data?.id ?? null;
+  }
+
+  // ---------- airport slot coordination (separate lifecycle from SCR drafting above, and from
+  // ATFM/CTOT below — see the 00020 migration's header comment for why they're kept apart) ----
+  async function saveSlotRequest(flightId, movementType, airport, patch, scrLogId) {
+    if (!perms.editFlight) return;
+    const existing = slotRequests.find(s => s.flightId === flightId && s.movementType === movementType);
+    const dbPatch = { updated_at: new Date().toISOString() };
+    if (patch.status !== undefined) dbPatch.status = patch.status;
+    if (patch.requestedTime !== undefined) dbPatch.requested_time = patch.requestedTime ? patch.requestedTime.toISOString() : null;
+    if (patch.offeredTime !== undefined) dbPatch.offered_time = patch.offeredTime ? patch.offeredTime.toISOString() : null;
+    if (patch.confirmedTime !== undefined) dbPatch.confirmed_time = patch.confirmedTime ? patch.confirmedTime.toISOString() : null;
+    if (patch.coordinatorReference !== undefined) dbPatch.coordinator_reference = patch.coordinatorReference;
+    if (patch.responsibleUserId !== undefined) dbPatch.responsible_user_id = patch.responsibleUserId;
+    if (patch.actionDeadline !== undefined) dbPatch.action_deadline = patch.actionDeadline;
+    if (scrLogId) dbPatch.last_scr_log_id = scrLogId;
+    if (existing) {
+      const { error } = await supabase.from("slot_requests").update(dbPatch).eq("id", existing.id);
+      if (error) { pushToast(`Slot update failed: ${error.message}`, "warn"); return; }
+      setSlotRequests(sr => sr.map(s => s.id === existing.id ? { ...s, ...patch, lastScrLogId: scrLogId || s.lastScrLogId } : s));
+    } else {
+      const { data, error } = await supabase.from("slot_requests").insert({
+        flight_id: flightId, movement_type: movementType, airport, created_by: profile.id, ...dbPatch,
+      }).select().single();
+      if (error) { pushToast(`Could not create slot record: ${error.message}`, "warn"); return; }
+      setSlotRequests(sr => [...sr, mapSlotRequest(data)]);
+    }
+  }
+  async function addSlotCorrespondence(slotRequestId, note) {
+    if (!perms.editFlight || !note.trim()) return;
+    const { data, error } = await supabase.from("slot_correspondence").insert({
+      slot_request_id: slotRequestId, note: note.trim(), created_by: profile.id,
+    }).select().single();
+    if (error) { pushToast(`Could not add note: ${error.message}`, "warn"); return; }
+    setSlotCorrespondence(sc => [...sc, mapSlotCorrespondence(data)]);
+  }
+  async function saveAtfmRecord(flightId, patch) {
+    if (!perms.editFlight) return;
+    const existing = atfmRecords.find(a => a.flightId === flightId);
+    const dbPatch = { updated_at: new Date().toISOString() };
+    if (patch.ctot !== undefined) dbPatch.ctot = patch.ctot ? patch.ctot.toISOString() : null;
+    if (patch.regulationReference !== undefined) dbPatch.regulation_reference = patch.regulationReference;
+    if (patch.status !== undefined) dbPatch.status = patch.status;
+    if (patch.notes !== undefined) dbPatch.notes = patch.notes;
+    if (existing) {
+      const { error } = await supabase.from("atfm_records").update(dbPatch).eq("id", existing.id);
+      if (error) { pushToast(`ATFM update failed: ${error.message}`, "warn"); return; }
+      setAtfmRecords(ar => ar.map(a => a.id === existing.id ? { ...a, ...patch } : a));
+    } else {
+      const { data, error } = await supabase.from("atfm_records").insert({ flight_id: flightId, created_by: profile.id, ...dbPatch }).select().single();
+      if (error) { pushToast(`Could not create ATFM record: ${error.message}`, "warn"); return; }
+      setAtfmRecords(ar => [...ar, mapAtfmRecord(data)]);
+    }
+  }
+  // A flight move must never silently rewrite a CONFIRMED slot — preserve what's on record,
+  // flag the mismatch, and drop the slot into "change_required" for a human to re-coordinate.
+  async function checkSlotMismatch(flightId, movementType, newTime) {
+    if (!newTime) return;
+    const slot = slotRequests.find(s => s.flightId === flightId && s.movementType === movementType);
+    if (!slot || slot.status !== "confirmed" || !slot.confirmedTime) return;
+    if (slot.confirmedTime.getTime() === newTime.getTime()) return;
+    const { error } = await supabase.from("slot_requests").update({ status: "change_required", requested_time: newTime.toISOString() }).eq("id", slot.id);
+    if (error) { pushToast(`Could not flag slot mismatch: ${error.message}`, "warn"); return; }
+    setSlotRequests(sr => sr.map(s => s.id === slot.id ? { ...s, status: "change_required", requestedTime: newTime } : s));
+    pushToast(`${movementType === "departure" ? "Departure" : "Arrival"} slot was confirmed for a different time — flagged "Change required", confirmed time left untouched`, "warn");
   }
 
   // Plain-language description of a proposed flights-table patch, computed once at draft
@@ -584,11 +680,12 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges, slotRequests, slotCorrespondence, atfmRecords } = await fetchAll();
       if (cancelled) return;
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
       setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks); setAcknowledgedIssueIds(new Set(acknowledgedIssueIds));
       setDraftChanges(draftChanges);
+      setSlotRequests(slotRequests); setSlotCorrespondence(slotCorrespondence); setAtfmRecords(atfmRecords);
       setLoaded(true);
     })();
     return () => { cancelled = true; };
@@ -616,6 +713,18 @@ export default function CharterOpsApp({ profile, onSignOut }) {
       .on("postgres_changes", { event: "*", schema: "public", table: "allotments" }, async () => {
         const { data } = await supabase.from("allotments").select("*");
         setAllotmentsRaw((data || []).map(mapAllotment));
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "slot_requests" }, async () => {
+        const { data } = await supabase.from("slot_requests").select("*");
+        setSlotRequests((data || []).map(mapSlotRequest));
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "slot_correspondence" }, async () => {
+        const { data } = await supabase.from("slot_correspondence").select("*").order("created_at");
+        setSlotCorrespondence((data || []).map(mapSlotCorrespondence));
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "atfm_records" }, async () => {
+        const { data } = await supabase.from("atfm_records").select("*");
+        setAtfmRecords((data || []).map(mapAtfmRecord));
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
@@ -687,6 +796,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     }
     const { error } = await supabase.from("flights").update(dbPatch).eq("id", flightId);
     if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return; }
+    if (newDep) await checkSlotMismatch(flightId, "departure", newDep);
+    if (newArr !== null) await checkSlotMismatch(flightId, "arrival", newArr);
     // Mirror the ACTUAL resulting values into local state, not the raw patch — patch.start on
     // its own is just midnight-of-the-new-day, not the real corrected departure timestamp.
     const localPatch = { ...patch };
@@ -1139,6 +1250,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
     ["schedule", "Schedule", IconCalendar],
     ["aircraft", "Aircraft", IconPlane],
     ["operators", "Tour operators", IconBuilding],
+    ["slots", "Slots", IconSlot],
     ...(perms.manageUsers ? [["team", "Team", IconUsers]] : []),
   ];
 
@@ -1296,7 +1408,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
           <div style={{ flex: 1, overflow: "auto" }}>
             <ScheduleBoard resources={resources} flights={flights} operators={operators} days={days} viewStart={effectiveViewStart} onShiftView={shiftView} onJumpToday={jumpToToday} onJumpToDate={jumpToDate}
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
-              showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight}
+              showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
@@ -1307,7 +1419,12 @@ export default function CharterOpsApp({ profile, onSignOut }) {
           </div>
           {selectedFlight && (
             <FlightDrawer key={selectedFlight.id} flight={selectedFlight} resources={resources} operators={operators} allotments={allotments.filter(a => a.flightId === selectedFlight.id)}
-              inventory={flightInventory(selectedFlight.id)} perms={perms}
+              inventory={flightInventory(selectedFlight.id)} perms={perms} profiles={profiles}
+              slotRequests={slotRequests.filter(s => s.flightId === selectedFlight.id)}
+              slotCorrespondence={slotCorrespondence} atfmRecord={atfmRecords.find(a => a.flightId === selectedFlight.id) || null}
+              onSaveSlotRequest={(movementType, airport, patch, scrLogId) => saveSlotRequest(selectedFlight.id, movementType, airport, patch, scrLogId)}
+              onAddSlotCorrespondence={addSlotCorrespondence}
+              onSaveAtfmRecord={patch => saveAtfmRecord(selectedFlight.id, patch)}
               onUpdateFlight={patch => updateFlight(selectedFlight.id, patch)}
               onAddAllotment={(opId, seats, price) => addAllotment(selectedFlight.id, opId, seats, price)}
               onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment}
@@ -1324,6 +1441,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
         maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
+      {tab === "slots" && <SlotsPanel flights={flights} slotRequests={slotRequests} onJumpToFlight={id => { setSelectedFlightId(id); setTab("schedule"); }} />}
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
@@ -1349,7 +1467,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
   // population race, the timezone disguise, the move/resize conflation, three attempts at
@@ -1390,7 +1508,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
   }, [draftChanges]);
   const pendingCreates = draftChanges.filter(d => d.changeType === "create");
   const [showIssues, setShowIssues] = useState(false);
-  const allIssues = useMemo(() => computeScheduleIssues(flights, resources), [flights, resources]);
+  const allIssues = useMemo(() => computeScheduleIssues(flights, resources, slotRequests), [flights, resources, slotRequests]);
   const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
   const acknowledgedIssuesList = allIssues.filter(i => acknowledgedIssueIds.has(i.id));
   const errorCount = activeIssues.filter(i => i.severity === "error").length;
@@ -2079,7 +2197,22 @@ function LegendSwatch({ color, label }) {
 }
 
 // ---------- flight drawer ----------
-function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onDeleteFlight, onClose }) {
+// datetime-local inputs round-trip through UTC directly (no browser-local-timezone
+// conversion), matching the rest of the app's UTC-first convention.
+function dtLocal(d) { return d ? d.toISOString().slice(0, 16) : ""; }
+function parseDtUtc(str) { return str ? new Date(str + ":00.000Z") : null; }
+const SLOT_STATUSES = [
+  ["draft", "Draft"], ["ready_to_send", "Ready to send"], ["sent", "Sent"], ["offered", "Offered"],
+  ["waitlisted", "Waitlisted"], ["confirmed", "Confirmed"], ["rejected", "Rejected"], ["cancelled", "Cancelled"],
+  ["change_required", "Change required"], ["not_required", "Not required"], ["unknown", "Requirement unknown"],
+];
+function slotStatusColor(status) {
+  if (status === "confirmed") return C.green;
+  if (status === "rejected" || status === "cancelled" || status === "change_required") return C.red;
+  if (status === "sent" || status === "offered" || status === "waitlisted" || status === "ready_to_send") return C.amber;
+  return C.faint;
+}
+function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, profiles, slotRequests, slotCorrespondence, atfmRecord, onSaveSlotRequest, onAddSlotCorrespondence, onSaveAtfmRecord, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onDeleteFlight, onClose }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addingOp, setAddingOp] = useState(operators[0].id);
   const [addingSeats, setAddingSeats] = useState(20);
@@ -2149,12 +2282,21 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       </div>
 
       <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Slot requests</div>
-        <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 8 }}>Pre-filled SCR drafts for this flight — review and generate, nothing is sent from here.</div>
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => onOpenSCR("origin")} style={{ ...miniBtn, flex: 1, fontSize: 11 }}>Departure @ {flight.origin}</button>
-          <button onClick={() => onOpenSCR("destination")} style={{ ...miniBtn, flex: 1, fontSize: 11 }}>Arrival @ {flight.destination}</button>
-        </div>
+        <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Airport slots</div>
+        <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 8 }}>Separate records per movement — moving this flight never silently changes a confirmed time here; it flags "Change required" instead.</div>
+        <SlotRequestCard movementType="departure" airport={flight.origin} role="origin"
+          slot={slotRequests.find(s => s.movementType === "departure")} correspondence={slotCorrespondence} perms={perms} profiles={profiles}
+          onSave={(patch, scrLogId) => onSaveSlotRequest("departure", flight.origin, patch, scrLogId)} onAddNote={onAddSlotCorrespondence} onOpenSCR={onOpenSCR} />
+        <div style={{ height: 8 }} />
+        <SlotRequestCard movementType="arrival" airport={flight.destination} role="destination"
+          slot={slotRequests.find(s => s.movementType === "arrival")} correspondence={slotCorrespondence} perms={perms} profiles={profiles}
+          onSave={(patch, scrLogId) => onSaveSlotRequest("arrival", flight.destination, patch, scrLogId)} onAddNote={onAddSlotCorrespondence} onOpenSCR={onOpenSCR} />
+      </div>
+
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>ATFM / CTOT</div>
+        <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 8 }}>A received traffic-flow-management time, not a coordinated slot — tracked separately on purpose, never sharing the status above.</div>
+        <AtfmCard record={atfmRecord} perms={perms} onSave={onSaveAtfmRecord} />
       </div>
 
       {perms.editFlight && (
@@ -2237,6 +2379,106 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
     </div>
   );
 }
+
+// One per movement (departure/arrival) — status workflow, requested vs. offered vs. confirmed
+// times side by side, coordinator reference, responsible user, deadline, and an append-only
+// correspondence log. A flight move that conflicts with a CONFIRMED time here is flagged by
+// checkSlotMismatch (in the parent) rather than silently overwritten — that's why confirmedTime
+// and requestedTime can legitimately disagree while status reads "change_required".
+function SlotRequestCard({ movementType, airport, role, slot, correspondence, perms, profiles, onSave, onAddNote, onOpenSCR }) {
+  const [expanded, setExpanded] = useState(false);
+  const [note, setNote] = useState("");
+  const status = slot?.status || "draft";
+  const notes = slot ? correspondence.filter(c => c.slotRequestId === slot.id) : [];
+  const mismatch = status === "change_required";
+  return (
+    <div style={{ border: `1px solid ${mismatch ? C.red : C.border}`, borderRadius: 10, padding: 8, marginBottom: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setExpanded(e => !e)}>
+        <span style={{ fontSize: 12.5, fontWeight: 600 }}>{movementType === "departure" ? "Departure" : "Arrival"} @ {airport}</span>
+        <Badge color={slotStatusColor(status)}>{(SLOT_STATUSES.find(([k]) => k === status)?.[1] || status).toUpperCase()}</Badge>
+      </div>
+      {mismatch && <div style={{ fontSize: 10.5, color: C.red, marginTop: 4 }}>Flight time no longer matches the confirmed slot — re-coordinate and update below.</div>}
+      {expanded && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+          {perms.editFlight ? (
+            <select value={status} onChange={e => onSave({ status: e.target.value })} style={inputStyle}>
+              {SLOT_STATUSES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          ) : <span style={{ fontSize: 12 }}>{SLOT_STATUSES.find(([k]) => k === status)?.[1]}</span>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <FieldXs label="Requested (UTC)">
+              {perms.editFlight ? <input type="datetime-local" value={dtLocal(slot?.requestedTime)} onChange={e => onSave({ requestedTime: parseDtUtc(e.target.value) })} style={{ ...inputStyle, fontSize: 11, padding: "4px 5px", width: "100%" }} />
+                : <span style={{ fontSize: 11 }}>{slot?.requestedTime ? dtLocal(slot.requestedTime).replace("T", " ") : "—"}</span>}
+            </FieldXs>
+            <FieldXs label="Offered (UTC)">
+              {perms.editFlight ? <input type="datetime-local" value={dtLocal(slot?.offeredTime)} onChange={e => onSave({ offeredTime: parseDtUtc(e.target.value) })} style={{ ...inputStyle, fontSize: 11, padding: "4px 5px", width: "100%" }} />
+                : <span style={{ fontSize: 11 }}>{slot?.offeredTime ? dtLocal(slot.offeredTime).replace("T", " ") : "—"}</span>}
+            </FieldXs>
+            <FieldXs label="Confirmed (UTC)">
+              {perms.editFlight ? <input type="datetime-local" value={dtLocal(slot?.confirmedTime)} onChange={e => onSave({ confirmedTime: parseDtUtc(e.target.value) })} style={{ ...inputStyle, fontSize: 11, padding: "4px 5px", width: "100%" }} />
+                : <span style={{ fontSize: 11 }}>{slot?.confirmedTime ? dtLocal(slot.confirmedTime).replace("T", " ") : "—"}</span>}
+            </FieldXs>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <FieldSm label="Coordinator ref."><input value={slot?.coordinatorReference || ""} disabled={!perms.editFlight} onChange={e => onSave({ coordinatorReference: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label="Deadline"><input type="date" value={slot?.actionDeadline || ""} disabled={!perms.editFlight} onChange={e => onSave({ actionDeadline: e.target.value || null })} style={inputStyle} /></FieldSm>
+          </div>
+          {perms.editFlight && (
+            <FieldSm label="Responsible">
+              <select value={slot?.responsibleUserId || ""} onChange={e => onSave({ responsibleUserId: e.target.value || null })} style={inputStyle}>
+                <option value="">Unassigned</option>
+                {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </FieldSm>
+          )}
+          <div>
+            <div style={{ fontSize: 10.5, color: C.faint, fontWeight: 600, marginBottom: 4 }}>Correspondence</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 110, overflowY: "auto", marginBottom: 6 }}>
+              {notes.length === 0 && <span style={{ fontSize: 11, color: C.faint }}>No notes yet.</span>}
+              {notes.map(n => <div key={n.id} style={{ fontSize: 11, color: C.text, borderLeft: `2px solid ${C.border}`, paddingLeft: 6 }}>
+                <span style={{ color: C.faint, fontFamily: MONO, fontSize: 10 }}>{iso(n.createdAt)}</span> — {n.note}
+              </div>)}
+            </div>
+            {perms.editFlight && slot && (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={note} onChange={e => setNote(e.target.value)} placeholder="Add a note (call, email received…)" style={{ ...inputStyle, flex: 1, fontSize: 11 }} onKeyDown={e => { if (e.key === "Enter" && note.trim()) { onAddNote(slot.id, note); setNote(""); } }} />
+                <button onClick={() => { if (note.trim()) { onAddNote(slot.id, note); setNote(""); } }} style={{ ...miniBtn, fontSize: 10.5, padding: "4px 8px" }}>Add</button>
+              </div>
+            )}
+            {perms.editFlight && !slot && <span style={{ fontSize: 10.5, color: C.faint }}>Set a status above first to start this record.</span>}
+          </div>
+          <button onClick={() => onOpenSCR(role)} style={{ ...miniBtn, fontSize: 11 }}>Generate SCR for this movement</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Deliberately its own tiny panel, not folded into the slot cards above — one CTOT per flight,
+// not per movement, and its status vocabulary never mixes with SLOT_STATUSES.
+const ATFM_STATUSES = [["pending", "Pending"], ["received", "Received"], ["revised", "Revised"], ["cancelled", "Cancelled"]];
+function AtfmCard({ record, perms, onSave }) {
+  return (
+    <div style={{ border: `1px dashed ${C.border}`, borderRadius: 10, padding: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        <FieldSm label="CTOT (UTC)">
+          {perms.editFlight ? <input type="datetime-local" value={dtLocal(record?.ctot)} onChange={e => onSave({ ctot: parseDtUtc(e.target.value) })} style={{ ...inputStyle, fontSize: 10.5, padding: "4px 5px" }} />
+            : <span style={{ fontSize: 11 }}>{record?.ctot ? dtLocal(record.ctot).replace("T", " ") : "—"}</span>}
+        </FieldSm>
+        <FieldSm label="Status">
+          {perms.editFlight ? (
+            <select value={record?.status || "pending"} onChange={e => onSave({ status: e.target.value })} style={inputStyle}>
+              {ATFM_STATUSES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+            </select>
+          ) : <span style={{ fontSize: 11 }}>{ATFM_STATUSES.find(([k]) => k === (record?.status || "pending"))?.[1]}</span>}
+        </FieldSm>
+      </div>
+      <FieldSm label="Regulation reference"><input value={record?.regulationReference || ""} disabled={!perms.editFlight} onChange={e => onSave({ regulationReference: e.target.value })} style={inputStyle} /></FieldSm>
+      {!record?.ctot && !perms.editFlight && <span style={{ fontSize: 10.5, color: C.faint }}>No CTOT on record.</span>}
+    </div>
+  );
+}
+
 function FieldRow({ label, children }) {
   return <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
     <span style={{ fontSize: 11, color: C.muted }}>{label}</span>
@@ -2377,6 +2619,14 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, 
 }
 function FieldSm({ label, children }) {
   return <div style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
+    <label style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</label>
+    {children}
+  </div>;
+}
+// Like FieldSm but no minWidth — for narrow contexts (the 380px flight drawer) where three of
+// FieldSm's 140px-minimum fields side by side would overflow.
+function FieldXs({ label, children }) {
+  return <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
     <label style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</label>
     {children}
   </div>;
@@ -4874,6 +5124,61 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
 
       {showAdd && <AddAircraftModal onClose={() => setShowAdd(false)} onCreate={r => { onAddResource(r); setShowAdd(false); }} />}
       {showAddMaint && <AddMaintenanceModal resources={resources} onClose={() => setShowAddMaint(false)} onCreate={(resourceId, start, end, reason) => { onAddMaintenanceBlock(resourceId, start, end, reason); setShowAddMaint(false); }} />}
+    </div>
+  );
+}
+
+// Cross-schedule triage view — every slot record in one filterable table, which is the thing
+// a coordinator actually lives in day to day rather than clicking into one flight at a time.
+function SlotsPanel({ flights, slotRequests, onJumpToFlight }) {
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [airportFilter, setAirportFilter] = useState("");
+  const todayStr = iso(new Date());
+  const rows = useMemo(() => {
+    return slotRequests.map(s => ({ ...s, flight: flights.find(f => f.id === s.flightId) }))
+      .filter(r => r.flight)
+      .filter(r => statusFilter === "all" || r.status === statusFilter)
+      .filter(r => !airportFilter.trim() || r.airport.toLowerCase().includes(airportFilter.trim().toLowerCase()))
+      .sort((a, b) => (a.actionDeadline || "9999").localeCompare(b.actionDeadline || "9999"));
+  }, [slotRequests, flights, statusFilter, airportFilter]);
+  const airports = useMemo(() => [...new Set(slotRequests.map(s => s.airport))].sort(), [slotRequests]);
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "center" }}>
+        <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={inputStyle}>
+          <option value="all">All statuses</option>
+          {SLOT_STATUSES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+        </select>
+        <input value={airportFilter} onChange={e => setAirportFilter(e.target.value)} placeholder="Filter by airport…" style={{ ...inputStyle, width: 160 }} />
+        <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{rows.length} of {slotRequests.length} slot record(s)</span>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <thead>
+          <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
+            <th style={th}>Flight</th><th style={th}>Movement</th><th style={th}>Airport</th><th style={th}>Status</th>
+            <th style={th}>Requested</th><th style={th}>Offered</th><th style={th}>Confirmed</th><th style={th}>Coordinator ref.</th><th style={th}>Deadline</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={9} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No slot records match these filters.</td></tr>}
+          {rows.map(r => {
+            const overdue = r.actionDeadline && r.actionDeadline < todayStr && !["confirmed", "rejected", "cancelled", "not_required"].includes(r.status);
+            return (
+              <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }} onClick={() => onJumpToFlight(r.flightId)}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{r.flight.ref}</td>
+                <td style={td}>{r.movementType === "departure" ? "Dep" : "Arr"}</td>
+                <td style={{ ...td, fontFamily: MONO }}>{r.airport}</td>
+                <td style={td}><Badge color={slotStatusColor(r.status)}>{(SLOT_STATUSES.find(([k]) => k === r.status)?.[1] || r.status).toUpperCase()}</Badge></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{r.requestedTime ? dtLocal(r.requestedTime).replace("T", " ") : "—"}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{r.offeredTime ? dtLocal(r.offeredTime).replace("T", " ") : "—"}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{r.confirmedTime ? dtLocal(r.confirmedTime).replace("T", " ") : "—"}</td>
+                <td style={td}>{r.coordinatorReference || <span style={{ color: C.faint }}>—</span>}</td>
+                <td style={{ ...td, color: overdue ? C.red : C.text, fontWeight: overdue ? 700 : 400 }}>{r.actionDeadline || "—"}{overdue ? " ⚠" : ""}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -25,12 +25,13 @@ export async function POST(request) {
     const startISO = new Date(startDate + "T00:00:00Z").toISOString();
     const endISO = new Date(endDate + "T23:59:59Z").toISOString();
 
-    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }] = await Promise.all([
+    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }] = await Promise.all([
       supabase.from("flights").select("*").gte("scheduled_departure", startISO).lte("scheduled_departure", endISO).order("scheduled_departure"),
       supabase.from("resources").select("*"),
       supabase.from("tour_operators").select("*"),
       supabase.from("allotments").select("*"),
       supabase.from("scr_log").select("*").gte("created_at", startISO).lte("created_at", endISO).order("created_at"),
+      supabase.from("slot_requests").select("*"),
     ]);
 
     const flightList = flights || [];
@@ -66,7 +67,8 @@ export async function POST(request) {
       capacity: f.capacity, status: f.status, legType: f.leg_type,
     }));
     const mappedResources = (resources || []).map(r => ({ id: r.id, code: r.code, capacity: r.capacity }));
-    const issues = computeScheduleIssues(mappedFlights, mappedResources);
+    const mappedSlotRequests = (slotRequests || []).filter(s => flightIds.has(s.flight_id)).map(s => ({ id: s.id, flightId: s.flight_id, movementType: s.movement_type, airport: s.airport, status: s.status }));
+    const issues = computeScheduleIssues(mappedFlights, mappedResources, mappedSlotRequests);
 
     const pdfBuffer = await renderToBuffer(
       React.createElement(ReportDocument, {
