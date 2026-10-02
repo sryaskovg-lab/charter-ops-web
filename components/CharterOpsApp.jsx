@@ -4650,12 +4650,28 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [flightRateType, setFlightRateType] = useState("fixed");
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
+  const [newDestCode, setNewDestCode] = useState("");
+  const [newDestPrice, setNewDestPrice] = useState("");
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
   function updateAllotmentType(id, allotmentType) {
     setOperators(ops => ops.map(o => o.id === id ? { ...o, allotmentType, optionReleaseDays: allotmentType === "option" ? (o.optionReleaseDays || 14) : null } : o));
   }
   function updateOptionReleaseDays(id, days) { setOperators(ops => ops.map(o => o.id === id ? { ...o, optionReleaseDays: days } : o)); }
-  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); }
+  // Standing, always-available per-destination rate card for an operator — the general
+  // mechanism the bulk importer's one-off "fill the gap" price feeds into and reads from, not
+  // something tied to any particular import. Lets staff set/change/remove the $/seat this
+  // operator is charged to a given destination at any time, independent of any specific flight
+  // or allocation; rateFor() then uses it for every future "Allocate seats" and bulk import.
+  function updateDestRate(id, dest, price) { setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [dest]: price } } : o)); }
+  function removeDestRate(id, dest) {
+    setOperators(ops => ops.map(o => {
+      if (o.id !== id) return o;
+      const rest = { ...o.ratesByDestination };
+      delete rest[dest];
+      return { ...o, ratesByDestination: rest };
+    }));
+  }
+  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); setNewDestCode(""); setNewDestPrice(""); }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
     : [];
@@ -4693,6 +4709,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
             const isSeats = expanded?.id === o.id && expanded.panel === "seats";
             const isRates = expanded?.id === o.id && expanded.panel === "rates";
             const isRelease = expanded?.id === o.id && expanded.panel === "release";
+            const isDestRates = expanded?.id === o.id && expanded.panel === "destRates";
+            const destsWithFlights = [...new Set(flights.map(f => f.destination))].filter(d => !(o.ratesByDestination || {})[d]).sort();
             return (
               <React.Fragment key={o.id}>
                 <tr style={{ borderTop: `1px solid ${C.borderSoft}` }}>
@@ -4726,6 +4744,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                       <button onClick={() => { setFlightRateType(o.allotmentType === "option" ? "option" : "fixed"); toggle(o.id, "rates"); }} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
                       <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? t("hide") : t("viewSeatsBtn")}</button>
                       {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? t("hide") : t("releaseSeatsRowBtn")}</button>}
+                      {perms.editContracts && <button onClick={() => toggle(o.id, "destRates")} style={miniBtn}>{isDestRates ? t("hide") : t("destRatesBtn")}</button>}
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
@@ -4796,6 +4815,30 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                           <span style={{ color: C.green }}>${(a.seatsAllocated * a.pricePerSeat).toLocaleString()}</span>
                         </div>;
                       })}
+                    </div>
+                  </td></tr>
+                )}
+                {isDestRates && (
+                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("destRatesExplain", o.name)}</div>
+                    <div style={{ border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8, overflow: "hidden" }}>
+                      {Object.keys(o.ratesByDestination || {}).length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noDestRatesYet")}</div>}
+                      {Object.entries(o.ratesByDestination || {}).sort(([a], [b]) => a.localeCompare(b)).map(([dest, price]) => (
+                        <div key={dest} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
+                          <span style={{ width: 60, fontWeight: 700 }}>{dest}</span>
+                          <input type="number" min={0} value={price} onChange={e => updateDestRate(o.id, dest, e.target.value === "" ? 0 : +e.target.value)} style={{ ...inputStyle, width: 90 }} />
+                          <button onClick={() => removeDestRate(o.id, dest)} title={t("removeDestRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      <FieldSm label={t("fieldDestination")}>
+                        <input value={newDestCode} onChange={e => setNewDestCode(e.target.value.toUpperCase().slice(0, 4))} placeholder={t("destCodePlaceholder")} list={`dest-options-${o.id}`} style={{ ...inputStyle, width: 90 }} />
+                        <datalist id={`dest-options-${o.id}`}>{destsWithFlights.map(d => <option key={d} value={d} />)}</datalist>
+                      </FieldSm>
+                      <FieldSm label={t("fieldPricePerSeat")}><input type="number" min={0} value={newDestPrice} onChange={e => setNewDestPrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                      <button disabled={!newDestCode.trim() || !newDestPrice} onClick={() => { updateDestRate(o.id, newDestCode.trim(), +newDestPrice); setNewDestCode(""); setNewDestPrice(""); }}
+                        style={{ ...miniBtn, background: (newDestCode.trim() && newDestPrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (newDestCode.trim() && newDestPrice) ? C.amber : C.faint, fontWeight: 600 }}>{t("add")}</button>
                     </div>
                   </td></tr>
                 )}
