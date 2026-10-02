@@ -133,11 +133,15 @@ const STATUS_STYLE = {
   cancelled: { bg: C.red + "60", border: C.red, text: "#4A2116", dash: false },
 };
 
+// approveContracts: only management can apply a contract/rate change immediately. Everyone else
+// with editContracts (the liaison role) can still propose one, but it's queued as a
+// contract_change_request for management to approve or discard -- the system's own sign-off
+// step, mirroring how Draft Mode queues schedule edits for review.
 const ROLES = {
-  ops_coordinator: { label: "Schedule coordinator (ops)", editFlight: true, editAllotments: false, editContracts: false, manageUsers: false, reports: "utilization" },
-  commercial: { label: "Commercial staff", editFlight: false, editAllotments: true, editContracts: false, manageUsers: false, reports: "pipeline" },
-  tour_operator_liaison: { label: "Tour operator liaison", editFlight: false, editAllotments: true, editContracts: true, manageUsers: false, reports: "portfolio" },
-  management: { label: "Charter dept management", editFlight: true, editAllotments: true, editContracts: true, manageUsers: true, reports: "all" },
+  ops_coordinator: { label: "Schedule coordinator (ops)", editFlight: true, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, reports: "utilization" },
+  commercial: { label: "Commercial staff", editFlight: false, editAllotments: true, editContracts: false, approveContracts: false, manageUsers: false, reports: "pipeline" },
+  tour_operator_liaison: { label: "Tour operator liaison", editFlight: false, editAllotments: true, editContracts: true, approveContracts: false, manageUsers: false, reports: "portfolio" },
+  management: { label: "Charter dept management", editFlight: true, editAllotments: true, editContracts: true, approveContracts: true, manageUsers: true, reports: "all" },
 };
 
 // ---------- Supabase data layer ----------
@@ -215,7 +219,7 @@ function rateFor(op, origin, destination) {
 }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }] = await Promise.all([
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }, { data: contractChangeRequests }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     supabase.from("flights").select("*").order("scheduled_departure"),
     supabase.from("tour_operators").select("*").order("name"),
@@ -231,6 +235,7 @@ async function fetchAll() {
     supabase.from("slot_requests").select("*"),
     supabase.from("slot_correspondence").select("*").order("created_at"),
     supabase.from("atfm_records").select("*"),
+    supabase.from("contract_change_requests").select("*").order("requested_at"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
@@ -248,9 +253,15 @@ async function fetchAll() {
     slotRequests: (slotRequests || []).map(mapSlotRequest),
     slotCorrespondence: (slotCorrespondence || []).map(mapSlotCorrespondence),
     atfmRecords: (atfmRecords || []).map(mapAtfmRecord),
+    contractChangeRequests: (contractChangeRequests || []).map(mapContractChangeRequest),
   };
 }
 function mapDraftChange(d) { return { id: d.id, flightId: d.flight_id, changeType: d.change_type, patch: d.patch || {}, summary: d.summary, createdBy: d.created_by, createdAt: new Date(d.created_at) }; }
+// Pending "management sign-off" requests on a tour operator's contract/rate terms — mirrors
+// draft_changes above. A request's patch holds whichever operator-level fields were proposed
+// (defaultRate, allotmentType, optionReleaseDays, ratesByDestination merge), same shape
+// setOperators already knows how to apply.
+function mapContractChangeRequest(r) { return { id: r.id, operatorId: r.tour_operator_id, patch: r.patch || {}, summary: r.summary, requestedBy: r.requested_by, requestedAt: new Date(r.requested_at) }; }
 // Airport slot coordination — one row per movement (departure/arrival), kept structurally
 // separate from ATFM/CTOT below so the two are never conflated into one status field.
 function mapSlotRequest(s) {
@@ -404,6 +415,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // without draft mode on are unaffected and still commit instantly, same as always.
   const [draftMode, setDraftMode] = useState(false);
   const [draftChanges, setDraftChanges] = useState([]);
+  const [contractChangeRequests, setContractChangeRequests] = useState([]);
   const [slotRequests, setSlotRequests] = useState([]);
   const [slotCorrespondence, setSlotCorrespondence] = useState([]);
   const [atfmRecords, setAtfmRecords] = useState([]);
@@ -727,11 +739,12 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges, slotRequests, slotCorrespondence, atfmRecords } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges, slotRequests, slotCorrespondence, atfmRecords, contractChangeRequests } = await fetchAll();
       if (cancelled) return;
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
       setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks); setAcknowledgedIssueIds(new Set(acknowledgedIssueIds));
       setDraftChanges(draftChanges);
+      setContractChangeRequests(contractChangeRequests);
       setSlotRequests(slotRequests); setSlotCorrespondence(slotCorrespondence); setAtfmRecords(atfmRecords);
       setLoaded(true);
     })();
@@ -1121,6 +1134,34 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       });
       return next;
     });
+  }
+
+  // Management sign-off on contract/rate terms (mirrors queueDraftChange/approveDraftChange
+  // above). A liaison's edit to default rate/type/option window or the route rate card calls
+  // this instead of setOperators directly; patch is whichever operator fields were proposed.
+  async function queueContractChange(operatorId, patch, summary) {
+    const { data, error } = await supabase.from("contract_change_requests").insert({
+      tour_operator_id: operatorId, patch, summary, requested_by: profile.id,
+    }).select().single();
+    if (error) { pushToast(`Could not queue contract change: ${error.message}`, "warn"); return false; }
+    setContractChangeRequests(cc => [...cc, mapContractChangeRequest(data)]);
+    pushToast(`Sent for management approval: ${summary}`, "ok");
+    return true;
+  }
+  async function approveContractChange(requestId) {
+    const r = contractChangeRequests.find(x => x.id === requestId);
+    if (!r) return;
+    setOperators(ops => ops.map(o => o.id === r.operatorId ? { ...o, ...r.patch } : o));
+    const { error } = await supabase.from("contract_change_requests").delete().eq("id", requestId);
+    if (!error) setContractChangeRequests(cc => cc.filter(x => x.id !== requestId));
+    pushToast(`Approved: ${r.summary}`, "ok");
+  }
+  async function discardContractChange(requestId) {
+    const r = contractChangeRequests.find(x => x.id === requestId);
+    const { error } = await supabase.from("contract_change_requests").delete().eq("id", requestId);
+    if (error) { pushToast(`Could not discard: ${error.message}`, "warn"); return; }
+    setContractChangeRequests(cc => cc.filter(x => x.id !== requestId));
+    pushToast(`Discarded: ${r?.summary || "change request"}`, "ok");
   }
 
   async function addOperator(draft) {
@@ -1644,8 +1685,9 @@ function CharterOpsAppInner({ profile, onSignOut }) {
           )}
         </div>
       )}
-      {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} />}
+      {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms} contractChangeRequests={contractChangeRequests}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} onPatchAllotment={patchAllotment}
+        onQueueContractChange={queueContractChange} onApproveContractChange={approveContractChange} onDiscardContractChange={discardContractChange} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -4692,9 +4734,50 @@ function ReportsModal({ onClose, pushToast }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment }) {
+// One operator's current exposure: how many seats it holds right now, across which flights/
+// routes, what that's worth, and the soonest Option that still needs to be firmed up or released.
+// Used both by the company-wide dashboard row and by each operator's own Overview tab, so the
+// two views can never disagree about what "exposure" means.
+function computeOperatorExposure(operatorId, allotments, flights) {
+  const opAllotments = allotments.filter(a => a.operatorId === operatorId && a.status !== "cancelled" && a.status !== "released");
+  const totalSeats = opAllotments.reduce((s, a) => s + a.seatsAllocated, 0);
+  const totalValue = opAllotments.reduce((s, a) => s + a.seatsAllocated * a.pricePerSeat, 0);
+  const byRoute = {};
+  opAllotments.forEach(a => {
+    const f = flights.find(fl => fl.id === a.flightId);
+    if (!f) return;
+    const key = `${f.origin}-${f.destination}`;
+    byRoute[key] = (byRoute[key] || 0) + a.seatsAllocated;
+  });
+  const optionAllotments = opAllotments.filter(a => a.allotmentType === "option");
+  const soonestOptionExpiry = optionAllotments.reduce((min, a) => (a.optionReleaseAt && (!min || a.optionReleaseAt < min)) ? a.optionReleaseAt : min, null);
+  return { opAllotments, totalSeats, totalValue, byRoute, flightCount: new Set(opAllotments.map(a => a.flightId)).size, optionAllotments, soonestOptionExpiry };
+}
+
+// A small inline "propose a change" control — used wherever a tour_operator_liaison (who can
+// edit contracts but can't apply changes directly) needs to suggest a new value instead of
+// writing it live. Collapsed to a button until clicked, then becomes an input + confirm, same
+// interaction shape as the "Change price" override so the two sign-off patterns feel consistent.
+function InlinePropose({ label, initial, confirmLabel, onPropose }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  if (!editing) {
+    return <button onClick={() => { setValue(initial ?? ""); setEditing(true); }} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5 }}>{label}</button>;
+  }
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <input type="number" autoFocus value={value} onChange={e => setValue(e.target.value)} style={{ ...inputStyle, width: 70, padding: "2px 5px" }} />
+      <button onClick={() => { onPropose(value === "" ? null : +value); setEditing(false); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{confirmLabel}</button>
+      <button onClick={() => setEditing(false)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>×</button>
+    </span>
+  );
+}
+
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, contractChangeRequests, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment, onPatchAllotment, onQueueContractChange, onApproveContractChange, onDiscardContractChange }) {
   const { t } = useLanguage();
-  const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" | "release" }
+  // expanded.tab: "overview" | "contract" | "allocations" — one operator, one tab, at a time.
+  const [expanded, setExpanded] = useState(null); // { id, tab }
+  const [allocView, setAllocView] = useState("seats"); // "allocate" | "seats" | "release" | "firmup"
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
   const [showBulkOperators, setShowBulkOperators] = useState(false);
@@ -4710,28 +4793,40 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [repricingValue, setRepricingValue] = useState("");
   const [newRouteCode, setNewRouteCode] = useState("");
   const [newRoutePrice, setNewRoutePrice] = useState("");
-  function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
-  function updateAllotmentType(id, allotmentType) {
-    setOperators(ops => ops.map(o => o.id === id ? { ...o, allotmentType, optionReleaseDays: allotmentType === "option" ? (o.optionReleaseDays || 14) : null } : o));
+  const [editingRoute, setEditingRoute] = useState(null); // route key currently being edited
+  const [editingRouteValue, setEditingRouteValue] = useState("");
+  const [contractDraft, setContractDraft] = useState(null); // { defaultRate, allotmentType, optionReleaseDays }
+
+  // Management applies a contract/rate patch immediately, same as always. Anyone else with
+  // editContracts (the liaison role) can still propose the same patch, but it's queued for
+  // management sign-off instead of written straight to the operator record.
+  function proposeOrApply(o, patch, summary) {
+    if (perms.approveContracts) setOperators(ops => ops.map(o2 => o2.id === o.id ? { ...o2, ...patch } : o2));
+    else if (perms.editContracts) onQueueContractChange(o.id, patch, summary);
   }
-  function updateOptionReleaseDays(id, days) { setOperators(ops => ops.map(o => o.id === id ? { ...o, optionReleaseDays: days } : o)); }
-  // Standing, always-available per-route rate card for an operator — the general mechanism the
-  // bulk importer's one-off "fill the gap" price feeds into and reads from, not something tied
-  // to any particular import. Keyed by route ("ALA-PQC"), not just destination, since the same
-  // operator can be charged differently depending on where the flight originates. Lets staff
-  // set/change/remove the $/seat for a given route at any time, independent of any specific
-  // flight or allocation; rateFor() then uses it for every future "Allocate seats" and bulk
-  // import (falling back to a plain destination-only key for rates set before routes existed).
-  function updateRouteRate(id, route, price) { setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [route]: price } } : o)); }
-  function removeRouteRate(id, route) {
-    setOperators(ops => ops.map(o => {
-      if (o.id !== id) return o;
-      const rest = { ...o.ratesByDestination };
-      delete rest[route];
-      return { ...o, ratesByDestination: rest };
-    }));
+  function saveContractDraft(o) {
+    if (!contractDraft) return;
+    const patch = {};
+    if (contractDraft.defaultRate !== o.defaultRate) patch.defaultRate = contractDraft.defaultRate;
+    if (contractDraft.allotmentType !== o.allotmentType) patch.allotmentType = contractDraft.allotmentType;
+    if (contractDraft.optionReleaseDays !== o.optionReleaseDays) patch.optionReleaseDays = contractDraft.optionReleaseDays;
+    if (Object.keys(patch).length) proposeOrApply(o, patch, t("contractTermsChangeSummary", o.name));
+    setExpanded(null); setContractDraft(null);
   }
-  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); setNewRouteCode(""); setNewRoutePrice(""); }
+  function setRouteRate(o, route, price) {
+    const next = { ...o.ratesByDestination, [route]: price };
+    proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, route, price));
+  }
+  function removeRouteRate(o, route) {
+    const next = { ...o.ratesByDestination };
+    delete next[route];
+    proposeOrApply(o, { ratesByDestination: next }, t("proposeRemoveRouteRateSummary", o.name, route));
+  }
+  function toggle(id, tab) {
+    setExpanded(e => (e && e.id === id && e.tab === tab) ? null : { id, tab });
+    setReleaseSelected(new Map()); setConfirmRelease(false); setNewRouteCode(""); setNewRoutePrice(""); setEditingRoute(null);
+    setAllocView("seats"); setContractDraft(null);
+  }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
     : [];
@@ -4743,6 +4838,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
     setFlightRateSearch("");
     setFlightRatePrice("");
   }
+  const now = new Date();
+  const soonCutoff = addDays(now, 10);
 
   return (
     <div style={{ padding: 16 }}>
@@ -4753,58 +4850,66 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
           <button onClick={() => setShowAddOperator(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("newOperator")}</button>
         </div>
       )}
+      {/* Pending contract/rate changes awaiting management sign-off — visible to everyone so a
+          liaison can see their own proposal is still open, but only management can act on it. */}
+      {contractChangeRequests.length > 0 && (
+        <div style={{ border: `1px solid ${C.amber}`, background: C.amber + "14", borderRadius: 10, padding: "8px 12px", marginBottom: 12 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: C.amber, marginBottom: 6 }}>{t("pendingContractChangesCount", contractChangeRequests.length)}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {contractChangeRequests.map(r => (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <span style={{ flex: 1 }}>{r.summary}</span>
+                {perms.approveContracts && (
+                  <>
+                    <button onClick={() => onApproveContractChange(r.id)} style={{ ...miniBtn, padding: "2px 8px", fontSize: 10.5, background: C.green, color: "#fff", borderColor: C.green }}>{t("approveBtn")}</button>
+                    <button onClick={() => onDiscardContractChange(r.id)} style={{ ...miniBtn, padding: "2px 8px", fontSize: 10.5, color: C.red, borderColor: C.red }}>{t("discardBtn")}</button>
+                  </>
+                )}
+                {!perms.approveContracts && <span style={{ fontSize: 10.5, color: C.faint }}>{t("awaitingApproval")}</span>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
-            <th style={th}>{t("thOperator")}</th><th style={th}>{t("thDefaultRate")}</th><th style={th}>{t("thAllotmentType")}</th><th style={th}>{t("thStatus")}</th><th style={th}>{t("thSeats")}</th><th style={th}>{t("thValue")}</th><th style={th}></th>
+            <th style={th}>{t("thOperator")}</th><th style={th}>{t("thDefaultRate")}</th><th style={th}>{t("thAllotmentType")}</th><th style={th}>{t("thStatus")}</th><th style={th}>{t("thSeats")}</th><th style={th}>{t("thValue")}</th><th style={th}>{t("thRisk")}</th><th style={th}></th>
           </tr>
         </thead>
         <tbody>
           {operators.map(o => {
-            const opAllotments = allotments.filter(a => a.operatorId === o.id && a.status !== "cancelled" && a.status !== "released");
-            const totalSeats = opAllotments.reduce((s, a) => s + a.seatsAllocated, 0);
-            const totalValue = opAllotments.reduce((s, a) => s + a.seatsAllocated * a.pricePerSeat, 0);
-            const byDest = {};
-            opAllotments.forEach(a => { const f = flights.find(fl => fl.id === a.flightId); if (f) byDest[f.destination] = (byDest[f.destination] || 0) + a.seatsAllocated; });
-            const isSeats = expanded?.id === o.id && expanded.panel === "seats";
-            const isRates = expanded?.id === o.id && expanded.panel === "rates";
-            const isRelease = expanded?.id === o.id && expanded.panel === "release";
-            const isRouteRates = expanded?.id === o.id && expanded.panel === "routeRates";
+            const { opAllotments, totalSeats, totalValue, byRoute, flightCount, optionAllotments, soonestOptionExpiry } = computeOperatorExposure(o.id, allotments, flights);
+            const pendingForOp = contractChangeRequests.filter(r => r.operatorId === o.id);
+            const firmUpSoon = optionAllotments.filter(a => {
+              const fl = flights.find(f => f.id === a.flightId);
+              return fl && fl.start >= now && fl.start <= soonCutoff;
+            }).sort((a, b) => flights.find(f => f.id === a.flightId)?.start - flights.find(f => f.id === b.flightId)?.start);
+            const isOverview = expanded?.id === o.id && expanded.tab === "overview";
+            const isContract = expanded?.id === o.id && expanded.tab === "contract";
+            const isAllocations = expanded?.id === o.id && expanded.tab === "allocations";
             const routesWithFlights = [...new Set(flights.map(f => routeKeyFor(f.origin, f.destination)))].filter(r => !(o.ratesByDestination || {})[r]).sort();
+            const draft = isContract ? (contractDraft || { defaultRate: o.defaultRate, allotmentType: o.allotmentType, optionReleaseDays: o.optionReleaseDays }) : null;
             return (
               <React.Fragment key={o.id}>
                 <tr style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-                  <td style={td}>{o.name}<span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{o.country}</span></td>
                   <td style={td}>
-                    {perms.editContracts
-                      ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                          <input type="number" value={o.defaultRate ?? ""} placeholder={t("none")} onChange={e => updateDefaultRate(o.id, e.target.value === "" ? null : +e.target.value)} style={{ ...inputStyle, width: 80 }} />
-                          {o.defaultRate != null && <button onClick={() => updateDefaultRate(o.id, null)} title={t("clearDefaultRateTitle")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red }}>×</button>}
-                        </div>
-                      : <span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>{t("none")}</span>}</span>}
+                    {o.name}<span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{o.country}</span>
+                    {pendingForOp.length > 0 && <span style={{ marginLeft: 6 }}><Badge color={C.amber} bg={C.amber + "20"}>{t("pendingBadge", pendingForOp.length)}</Badge></span>}
                   </td>
-                  <td style={td}>
-                    {perms.editContracts
-                      ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                          <select value={o.allotmentType === "option" ? "option" : "fixed"} onChange={e => updateAllotmentType(o.id, e.target.value)} style={{ ...inputStyle, width: 90 }}>
-                            <option value="fixed">{t("allotmentTypeFirm")}</option>
-                            <option value="option">{t("allotmentTypeOption")}</option>
-                          </select>
-                          {o.allotmentType === "option" && (
-                            <input type="number" min={0} value={o.optionReleaseDays ?? 14} onChange={e => updateOptionReleaseDays(o.id, +e.target.value)} title={t("optionReleaseDays")} style={{ ...inputStyle, width: 50 }} />
-                          )}
-                        </div>
-                      : <Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge>}
-                  </td>
+                  <td style={td}><span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>{t("none")}</span>}</span></td>
+                  <td style={td}><Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge></td>
                   <td style={td}><Badge color={o.status === "active" ? C.green : C.red}>{o.status.replace("_", " ").toUpperCase()}</Badge></td>
                   <td style={{ ...td, fontFamily: MONO }}>{totalSeats}</td>
                   <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
                   <td style={td}>
+                    {soonestOptionExpiry ? <Badge color={soonestOptionExpiry <= soonCutoff ? C.red : C.amber}>{t("optionsExpireFrom", iso(soonestOptionExpiry))}</Badge> : <span style={{ color: C.faint, fontSize: 11 }}>—</span>}
+                  </td>
+                  <td style={td}>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      <button onClick={() => { setFlightRateType(o.allotmentType === "option" ? "option" : "fixed"); toggle(o.id, "rates"); }} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
-                      <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? t("hide") : t("viewSeatsBtn")}</button>
-                      {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? t("hide") : t("releaseSeatsRowBtn")}</button>}
-                      {perms.editContracts && <button onClick={() => toggle(o.id, "routeRates")} style={miniBtn}>{isRouteRates ? t("hide") : t("routeRatesBtn")}</button>}
+                      <button onClick={() => toggle(o.id, "overview")} style={miniBtn}>{isOverview ? t("hide") : t("overviewTabBtn")}</button>
+                      {perms.editContracts && <button onClick={() => toggle(o.id, "contract")} style={miniBtn}>{isContract ? t("hide") : t("contractTabBtn")}</button>}
+                      <button onClick={() => toggle(o.id, "allocations")} style={miniBtn}>{isAllocations ? t("hide") : t("allocationsTabBtn")}</button>
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
@@ -4815,93 +4920,67 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                     </div>
                   </td>
                 </tr>
-                {isRates && (
-                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-                      {t("allocateSeatsExplain", o.name)}
+                {isOverview && (
+                  <tr><td colSpan={8} style={{ padding: "10px 10px 16px", background: C.panel2 }}>
+                    <div style={{ display: "flex", gap: 18, marginBottom: 12, flexWrap: "wrap" }}>
+                      <div><div style={{ fontSize: 10, color: C.faint, textTransform: "uppercase" }}>{t("thSeats")}</div><div style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO }}>{totalSeats}</div></div>
+                      <div><div style={{ fontSize: 10, color: C.faint, textTransform: "uppercase" }}>{t("thValue")}</div><div style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO, color: C.green }}>${totalValue.toLocaleString()}</div></div>
+                      <div><div style={{ fontSize: 10, color: C.faint, textTransform: "uppercase" }}>{t("flightsLabel")}</div><div style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO }}>{flightCount}</div></div>
+                      <div><div style={{ fontSize: 10, color: C.faint, textTransform: "uppercase" }}>{t("optionsOpenLabel")}</div><div style={{ fontSize: 18, fontWeight: 700, fontFamily: MONO, color: optionAllotments.length ? C.amber : C.text }}>{optionAllotments.length}</div></div>
                     </div>
-                    {perms.editContracts && (
-                      <div>
-                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder={t("flightRouteSearchPlaceholder")} style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
-                        {flightRateSearch.trim().length >= 2 && (
-                          <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
-                            {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noFlightsMatchQuery", flightRateSearch)}</div>}
-                            {flightMatches.map(f => (
-                              <label key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
-                                <input type="checkbox" checked={flightRateSelected.has(f.id)} onChange={() => setFlightRateSelected(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; })} />
-                                <span style={{ fontWeight: 700 }}>{f.ref}</span>
-                                <span style={{ color: C.muted }}>{iso(f.start)}</span>
-                                <span style={{ color: C.muted }}>{f.origin}→{f.destination}</span>
-                              </label>
-                            ))}
-                            {flightMatches.length > 0 && (
-                              <button onClick={() => setFlightRateSelected(new Set(flightMatches.map(f => f.id)))} style={{ ...miniBtn, margin: 6, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", flightMatches.length)}</button>
-                            )}
-                          </div>
-                        )}
-                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                          <FieldSm label={t("fieldSeats")}><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
-                          <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
-                          <FieldSm label={t("thAllotmentType")}>
-                            <select value={flightRateType} onChange={e => setFlightRateType(e.target.value)} style={{ ...inputStyle, width: 100 }}>
-                              <option value="fixed">{t("allotmentTypeFirm")}</option>
-                              <option value="option">{t("allotmentTypeOption")}</option>
-                            </select>
-                          </FieldSm>
-                          <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
-                            style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
-                            {t("addCount", flightRateSelected.size)}
-                          </button>
-                        </div>
-                      </div>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("exposureByRouteLabel")}</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                      {Object.entries(byRoute).sort(([a], [b]) => a.localeCompare(b)).map(([route, n]) => <Badge key={route} color={C.cyan} bg={C.cyanSoft}>{route}: {n}</Badge>)}
+                      {Object.keys(byRoute).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>{t("noActiveAllotments2")}</span>}
+                    </div>
+                    {pendingForOp.length > 0 && (
+                      <div style={{ fontSize: 11, color: C.amber }}>{t("pendingBadge", pendingForOp.length)} — {pendingForOp.map(r => r.summary).join("; ")}</div>
                     )}
                   </td></tr>
                 )}
-                {isSeats && (
-                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
-                      {Object.entries(byDest).map(([dest, n]) => <Badge key={dest} color={C.cyan} bg={C.cyanSoft}>{dest}: {n}</Badge>)}
-                      {Object.keys(byDest).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>{t("noActiveAllotments2")}</span>}
+                {isContract && draft && (
+                  <tr><td colSpan={8} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+                      {perms.approveContracts ? t("contractTermsExplainManagement", o.name) : t("contractTermsExplainLiaison", o.name)}
                     </div>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("allActiveAllotmentsFor", o.name)}</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noActiveAllotments2")}</div>}
-                      {opAllotments.map(a => {
-                        const fl = flights.find(f => f.id === a.flightId);
-                        return <div key={a.id} style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: MONO, color: C.text, alignItems: "center" }}>
-                          <span style={{ width: 70 }}>{fl?.ref}</span><span style={{ width: 90, color: C.muted }}>{iso(fl?.start)}</span>
-                          <span style={{ width: 90, color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
-                          {repricingId === a.id ? (
-                            <>
-                              <span>{a.seatsAllocated} seats @ $</span>
-                              <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 65, padding: "2px 5px" }} />
-                              <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
-                              <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
-                            </>
-                          ) : (
-                            <>
-                              <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
-                              {perms.editContracts && (
-                                <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5 }}>{t("changePriceBtn")}</button>
-                              )}
-                            </>
-                          )}
-                          <span style={{ color: C.green, marginLeft: "auto" }}>${(a.seatsAllocated * a.pricePerSeat).toLocaleString()}</span>
-                        </div>;
-                      })}
+                    <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 14, flexWrap: "wrap" }}>
+                      <FieldSm label={t("thDefaultRate")}>
+                        <input type="number" value={draft.defaultRate ?? ""} placeholder={t("none")} onChange={e => setContractDraft({ ...draft, defaultRate: e.target.value === "" ? null : +e.target.value })} style={{ ...inputStyle, width: 90 }} />
+                      </FieldSm>
+                      <FieldSm label={t("thAllotmentType")}>
+                        <select value={draft.allotmentType === "option" ? "option" : "fixed"} onChange={e => setContractDraft({ ...draft, allotmentType: e.target.value, optionReleaseDays: e.target.value === "option" ? (draft.optionReleaseDays || 14) : null })} style={{ ...inputStyle, width: 100 }}>
+                          <option value="fixed">{t("allotmentTypeFirm")}</option>
+                          <option value="option">{t("allotmentTypeOption")}</option>
+                        </select>
+                      </FieldSm>
+                      {draft.allotmentType === "option" && (
+                        <FieldSm label={t("optionReleaseDays")}>
+                          <input type="number" min={0} value={draft.optionReleaseDays ?? 14} onChange={e => setContractDraft({ ...draft, optionReleaseDays: +e.target.value })} style={{ ...inputStyle, width: 60 }} />
+                        </FieldSm>
+                      )}
+                      <button onClick={() => saveContractDraft(o)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>
+                        {perms.approveContracts ? t("saveBtn") : t("proposeBtn")}
+                      </button>
                     </div>
-                  </td></tr>
-                )}
-                {isRouteRates && (
-                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("routeRatesExplain", o.name)}</div>
                     <div style={{ border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8, overflow: "hidden" }}>
                       {Object.keys(o.ratesByDestination || {}).length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noRouteRatesYet")}</div>}
                       {Object.entries(o.ratesByDestination || {}).sort(([a], [b]) => a.localeCompare(b)).map(([route, price]) => (
                         <div key={route} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
                           <span style={{ width: 90, fontWeight: 700 }}>{route}</span>
-                          <input type="number" min={0} value={price} onChange={e => updateRouteRate(o.id, route, e.target.value === "" ? 0 : +e.target.value)} style={{ ...inputStyle, width: 90 }} />
-                          <button onClick={() => removeRouteRate(o.id, route)} title={t("removeRouteRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
+                          {editingRoute === route ? (
+                            <>
+                              <input type="number" min={0} autoFocus value={editingRouteValue} onChange={e => setEditingRouteValue(e.target.value)} style={{ ...inputStyle, width: 90 }} />
+                              <button onClick={() => { setRouteRate(o, route, editingRouteValue === "" ? 0 : +editingRouteValue); setEditingRoute(null); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{perms.approveContracts ? t("confirm") : t("proposeBtn")}</button>
+                              <button onClick={() => setEditingRoute(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
+                            </>
+                          ) : (
+                            <>
+                              <span>${price}</span>
+                              <button onClick={() => { setEditingRoute(route); setEditingRouteValue(price); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("changePriceBtn")}</button>
+                              <button onClick={() => removeRouteRate(o, route)} title={t("removeRouteRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
+                            </>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -4913,64 +4992,165 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                       <FieldSm label={t("fieldPricePerSeat")}><input type="number" min={0} value={newRoutePrice} onChange={e => setNewRoutePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
                       <button disabled={expandRouteSegments(newRouteCode).length === 0 || !newRoutePrice} onClick={() => {
                         const keys = expandRouteSegments(newRouteCode);
-                        setOperators(ops => ops.map(o2 => o2.id === o.id ? { ...o2, ratesByDestination: { ...o2.ratesByDestination, ...Object.fromEntries(keys.map(k => [k, +newRoutePrice])) } } : o2));
+                        const next = { ...o.ratesByDestination, ...Object.fromEntries(keys.map(k => [k, +newRoutePrice])) };
+                        proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, newRouteCode, +newRoutePrice));
                         setNewRouteCode(""); setNewRoutePrice("");
-                      }} style={{ ...miniBtn, background: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? C.amber : C.faint, fontWeight: 600 }}>{t("add")}</button>
+                      }} style={{ ...miniBtn, background: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? C.amber : C.faint, fontWeight: 600 }}>{perms.approveContracts ? t("add") : t("proposeBtn")}</button>
                     </div>
                     <div style={{ fontSize: 10, color: C.faint, marginTop: 6 }}>{t("techStopRouteHint")}</div>
                   </td></tr>
                 )}
-                {isRelease && (() => {
-                  const releaseSeatTotal = [...releaseSelected.values()].reduce((s, qty) => s + qty, 0);
-                  return (
-                  <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-                      {t("releaseExplain", o.name)}
+                {isAllocations && (
+                  <tr><td colSpan={8} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
+                    <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+                      <button onClick={() => { setFlightRateType(o.allotmentType === "option" ? "option" : "fixed"); setAllocView("allocate"); }} style={{ ...miniBtn, ...(allocView === "allocate" ? { background: C.amber + "20", borderColor: C.amber } : {}) }}>{t("allocateSeatsBtn")}</button>
+                      <button onClick={() => setAllocView("seats")} style={{ ...miniBtn, ...(allocView === "seats" ? { background: C.amber + "20", borderColor: C.amber } : {}) }}>{t("viewSeatsBtn")}</button>
+                      {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => setAllocView("release")} style={{ ...miniBtn, color: C.red, borderColor: C.red, ...(allocView === "release" ? { background: C.red + "15" } : {}) }}>{t("releaseSeatsRowBtn")}</button>}
+                      {firmUpSoon.length > 0 && <button onClick={() => setAllocView("firmup")} style={{ ...miniBtn, color: C.amber, borderColor: C.amber, ...(allocView === "firmup" ? { background: C.amber + "20" } : {}) }}>{t("firmUpSoonBtn", firmUpSoon.length)}</button>}
                     </div>
-                    <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
-                      {opAllotments.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noActiveAllotmentsToRelease")}</div>}
-                      {opAllotments.map(a => {
-                        const fl = flights.find(f => f.id === a.flightId);
-                        const selected = releaseSelected.has(a.id);
-                        const qty = releaseSelected.get(a.id) ?? a.seatsAllocated;
-                        return (
-                          <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
-                            <input type="checkbox" checked={selected}
-                              onChange={() => setReleaseSelected(prev => { const next = new Map(prev); selected ? next.delete(a.id) : next.set(a.id, a.seatsAllocated); return next; })}
-                              style={{ cursor: "pointer" }} />
-                            <span style={{ fontWeight: 700, cursor: "pointer" }} onClick={() => setReleaseSelected(prev => { const next = new Map(prev); selected ? next.delete(a.id) : next.set(a.id, a.seatsAllocated); return next; })}>{fl?.ref}</span>
-                            <span style={{ color: C.muted }}>{iso(fl?.start)}</span>
-                            <span style={{ color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
-                            <span style={{ color: C.faint }}>{t("ofSeatsAt", a.seatsAllocated, a.pricePerSeat)}</span>
-                            <input type="number" min={1} max={a.seatsAllocated} value={qty} disabled={!selected}
-                              onChange={e => { const n = Math.min(a.seatsAllocated, Math.max(1, +e.target.value || 1)); setReleaseSelected(prev => new Map(prev).set(a.id, n)); }}
-                              style={{ ...inputStyle, width: 52, padding: "2px 5px", marginLeft: "auto", opacity: selected ? 1 : 0.4 }} />
-                            <span style={{ color: C.faint }}>{t("releaseWord")}</span>
+                    {allocView === "allocate" && (
+                      <div>
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("allocateSeatsExplain", o.name)}</div>
+                        {perms.editContracts && (
+                          <div>
+                            <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder={t("flightRouteSearchPlaceholder")} style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
+                            {flightRateSearch.trim().length >= 2 && (
+                              <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
+                                {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noFlightsMatchQuery", flightRateSearch)}</div>}
+                                {flightMatches.map(f => (
+                                  <label key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
+                                    <input type="checkbox" checked={flightRateSelected.has(f.id)} onChange={() => setFlightRateSelected(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; })} />
+                                    <span style={{ fontWeight: 700 }}>{f.ref}</span>
+                                    <span style={{ color: C.muted }}>{iso(f.start)}</span>
+                                    <span style={{ color: C.muted }}>{f.origin}→{f.destination}</span>
+                                  </label>
+                                ))}
+                                {flightMatches.length > 0 && (
+                                  <button onClick={() => setFlightRateSelected(new Set(flightMatches.map(f => f.id)))} style={{ ...miniBtn, margin: 6, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", flightMatches.length)}</button>
+                                )}
+                              </div>
+                            )}
+                            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                              <FieldSm label={t("fieldSeats")}><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
+                              <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                              <FieldSm label={t("thAllotmentType")}>
+                                <select value={flightRateType} onChange={e => setFlightRateType(e.target.value)} style={{ ...inputStyle, width: 100 }}>
+                                  <option value="fixed">{t("allotmentTypeFirm")}</option>
+                                  <option value="option">{t("allotmentTypeOption")}</option>
+                                </select>
+                              </FieldSm>
+                              <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
+                                style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
+                                {t("addCount", flightRateSelected.size)}
+                              </button>
+                            </div>
                           </div>
-                        );
-                      })}
-                    </div>
-                    {opAllotments.length > 0 && (
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <button onClick={() => setReleaseSelected(new Map(opAllotments.map(a => [a.id, a.seatsAllocated])))} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", opAllotments.length)}</button>
-                        {releaseSelected.size > 0 && <button onClick={() => { setReleaseSelected(new Map()); setConfirmRelease(false); }} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("clear")}</button>}
-                        <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{releaseSelected.size > 0 ? t("releaseSummary", releaseSeatTotal, releaseSelected.size) : ""}</span>
-                        {!confirmRelease ? (
-                          <button disabled={releaseSelected.size === 0} onClick={() => setConfirmRelease(true)}
-                            style={{ ...miniBtn, color: releaseSelected.size ? C.red : C.faint, borderColor: releaseSelected.size ? C.red : C.faint }}>{t("releaseEllipsis")}</button>
-                        ) : (
-                          <>
-                            <span style={{ fontSize: 11, color: C.red }}>{t("giveBackForGood", releaseSeatTotal)}</span>
-                            <button onClick={() => { onReleaseAllotments([...releaseSelected.entries()].map(([id, qty]) => ({ id, qty }))); setReleaseSelected(new Map()); setConfirmRelease(false); }}
-                              style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>{t("confirmRelease2")}</button>
-                            <button onClick={() => setConfirmRelease(false)} style={miniBtn}>{t("cancel")}</button>
-                          </>
                         )}
                       </div>
                     )}
+                    {allocView === "seats" && (
+                      <div>
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("allActiveAllotmentsFor", o.name)}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noActiveAllotments2")}</div>}
+                          {opAllotments.map(a => {
+                            const fl = flights.find(f => f.id === a.flightId);
+                            return <div key={a.id} style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: MONO, color: C.text, alignItems: "center" }}>
+                              <span style={{ width: 70 }}>{fl?.ref}</span><span style={{ width: 90, color: C.muted }}>{iso(fl?.start)}</span>
+                              <span style={{ width: 90, color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
+                              {repricingId === a.id ? (
+                                <>
+                                  <span>{a.seatsAllocated} seats @ $</span>
+                                  <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 65, padding: "2px 5px" }} />
+                                  <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                                  <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
+                                </>
+                              ) : (
+                                <>
+                                  <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                                  {perms.editContracts && (
+                                    <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5 }}>{t("changePriceBtn")}</button>
+                                  )}
+                                </>
+                              )}
+                              <span style={{ color: C.green, marginLeft: "auto" }}>${(a.seatsAllocated * a.pricePerSeat).toLocaleString()}</span>
+                            </div>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {allocView === "firmup" && (
+                      <div>
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("firmUpSoonExplain", o.name)}</div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          {firmUpSoon.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noOptionsExpiringSoon")}</div>}
+                          {firmUpSoon.map(a => {
+                            const fl = flights.find(f => f.id === a.flightId);
+                            return <div key={a.id} style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: MONO, color: C.text, alignItems: "center" }}>
+                              <span style={{ width: 70 }}>{fl?.ref}</span><span style={{ width: 90, color: C.muted }}>{iso(fl?.start)}</span>
+                              <span style={{ width: 90, color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
+                              <span>{a.seatsAllocated} {t("seatsWord")} @ ${a.pricePerSeat}</span>
+                              {perms.editAllotments && (
+                                <button onClick={() => onPatchAllotment(a.id, { allotmentType: "fixed" })} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5, background: C.cyan, color: ON_ACCENT, borderColor: C.cyan, marginLeft: "auto" }}>{t("convertToFirmBtn")}</button>
+                              )}
+                            </div>;
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {allocView === "release" && (() => {
+                      const releaseSeatTotal = [...releaseSelected.values()].reduce((s, qty) => s + qty, 0);
+                      return (
+                      <div>
+                        <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+                          {t("releaseExplain", o.name)}
+                        </div>
+                        <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
+                          {opAllotments.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noActiveAllotmentsToRelease")}</div>}
+                          {opAllotments.map(a => {
+                            const fl = flights.find(f => f.id === a.flightId);
+                            const selected = releaseSelected.has(a.id);
+                            const qty = releaseSelected.get(a.id) ?? a.seatsAllocated;
+                            return (
+                              <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
+                                <input type="checkbox" checked={selected}
+                                  onChange={() => setReleaseSelected(prev => { const next = new Map(prev); selected ? next.delete(a.id) : next.set(a.id, a.seatsAllocated); return next; })}
+                                  style={{ cursor: "pointer" }} />
+                                <span style={{ fontWeight: 700, cursor: "pointer" }} onClick={() => setReleaseSelected(prev => { const next = new Map(prev); selected ? next.delete(a.id) : next.set(a.id, a.seatsAllocated); return next; })}>{fl?.ref}</span>
+                                <span style={{ color: C.muted }}>{iso(fl?.start)}</span>
+                                <span style={{ color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
+                                <span style={{ color: C.faint }}>{t("ofSeatsAt", a.seatsAllocated, a.pricePerSeat)}</span>
+                                <input type="number" min={1} max={a.seatsAllocated} value={qty} disabled={!selected}
+                                  onChange={e => { const n = Math.min(a.seatsAllocated, Math.max(1, +e.target.value || 1)); setReleaseSelected(prev => new Map(prev).set(a.id, n)); }}
+                                  style={{ ...inputStyle, width: 52, padding: "2px 5px", marginLeft: "auto", opacity: selected ? 1 : 0.4 }} />
+                                <span style={{ color: C.faint }}>{t("releaseWord")}</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {opAllotments.length > 0 && (
+                          <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                            <button onClick={() => setReleaseSelected(new Map(opAllotments.map(a => [a.id, a.seatsAllocated])))} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", opAllotments.length)}</button>
+                            {releaseSelected.size > 0 && <button onClick={() => { setReleaseSelected(new Map()); setConfirmRelease(false); }} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("clear")}</button>}
+                            <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{releaseSelected.size > 0 ? t("releaseSummary", releaseSeatTotal, releaseSelected.size) : ""}</span>
+                            {!confirmRelease ? (
+                              <button disabled={releaseSelected.size === 0} onClick={() => setConfirmRelease(true)}
+                                style={{ ...miniBtn, color: releaseSelected.size ? C.red : C.faint, borderColor: releaseSelected.size ? C.red : C.faint }}>{t("releaseEllipsis")}</button>
+                            ) : (
+                              <>
+                                <span style={{ fontSize: 11, color: C.red }}>{t("giveBackForGood", releaseSeatTotal)}</span>
+                                <button onClick={() => { onReleaseAllotments([...releaseSelected.entries()].map(([id, qty]) => ({ id, qty }))); setReleaseSelected(new Map()); setConfirmRelease(false); }}
+                                  style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>{t("confirmRelease2")}</button>
+                                <button onClick={() => setConfirmRelease(false)} style={miniBtn}>{t("cancel")}</button>
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      );
+                    })()}
                   </td></tr>
-                  );
-                })()}
+                )}
               </React.Fragment>
             );
           })}
