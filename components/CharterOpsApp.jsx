@@ -1112,6 +1112,77 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     pushToast(`Imported ${count} tour operator${count === 1 ? "" : "s"}`, "ok");
   }
 
+  // Tour-operator side of the Excel bulk importer: rows is the already-matched, already-grouped
+  // preview from BulkImportAllotmentsModal (one row per flight+operator, seats already summed
+  // across every date the sheet's pattern expanded to). Unlike addAllotment, this never fires a
+  // toast per row — a single sheet can expand into hundreds of allocations, so new rows are
+  // batched into chunked multi-row inserts and top-ups are applied in a loop, with one summary
+  // toast at the end. New operator names get created first (mirroring addOperator's insert
+  // shape) so every row below always resolves to a real operator id.
+  async function bulkImportAllotments(rows, allotmentType) {
+    const newNames = [...new Set(rows.filter(r => r.isNewOperator).map(r => r.operatorName))];
+    const createdOperators = [];
+    for (const name of newNames) {
+      const { data: opRow, error: opErr } = await supabase.from("tour_operators").insert({ name, country: "", status: "active" }).select().single();
+      if (opErr) { pushToast(`Could not create operator "${name}": ${opErr.message}`, "warn"); continue; }
+      const { data: contractRow, error: cErr } = await supabase.from("contracts").insert({
+        tour_operator_id: opRow.id, season: "S27", currency: "USD", rate_per_seat: 100,
+        rates_by_destination: {}, default_allotment_type: allotmentType, default_option_release_days: allotmentType === "option" ? 14 : null,
+      }).select().single();
+      if (cErr) { pushToast(`${name}: contract failed — ${cErr.message}`, "warn"); continue; }
+      createdOperators.push(mapOperator(opRow, contractRow));
+    }
+    if (createdOperators.length) setOperatorsRaw(ops => [...ops, ...createdOperators]);
+    const opByName = new Map([...operators, ...createdOperators].map(o => [o.name.trim().toLowerCase(), o]));
+
+    const toInsert = [];
+    const toTopUp = [];
+    let skipped = 0;
+    for (const row of rows) {
+      const op = opByName.get(row.operatorName.trim().toLowerCase());
+      const flight = flights.find(f => f.id === row.flightId);
+      if (!op || !flight) { skipped++; continue; }
+      const existing = allotments.find(a => a.flightId === flight.id && a.operatorId === op.id && a.status !== "cancelled" && a.status !== "released");
+      if (existing) {
+        toTopUp.push({ id: existing.id, newTotal: existing.seatsAllocated + row.seats });
+      } else {
+        const price = rateFor(op, flight.destination);
+        const optionReleaseAt = allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
+        toInsert.push({
+          flight_id: flight.id, tour_operator_id: op.id, contract_id: op.contractId,
+          seats_allocated: row.seats, price_per_seat: price, allotment_type: allotmentType,
+          option_release_at: optionReleaseAt ? optionReleaseAt.toISOString() : null,
+        });
+      }
+    }
+
+    const inserted = [];
+    const CHUNK = 300;
+    for (let i = 0; i < toInsert.length; i += CHUNK) {
+      const chunk = toInsert.slice(i, i + CHUNK);
+      const { data, error } = await supabase.from("allotments").insert(chunk).select();
+      if (error) { pushToast(`Some allocations failed to import: ${error.message}`, "warn"); continue; }
+      inserted.push(...(data || []).map(mapAllotment));
+    }
+    if (inserted.length) setAllotmentsRaw(as => [...as, ...inserted]);
+
+    let toppedUp = 0;
+    for (const { id, newTotal } of toTopUp) {
+      const { error } = await supabase.from("allotments").update({ seats_allocated: newTotal }).eq("id", id);
+      if (error) { pushToast(`Could not top up an existing allocation: ${error.message}`, "warn"); continue; }
+      setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, seatsAllocated: newTotal } : a));
+      toppedUp++;
+    }
+
+    const parts = [];
+    if (createdOperators.length) parts.push(`${createdOperators.length} new operator${createdOperators.length === 1 ? "" : "s"}`);
+    if (inserted.length) parts.push(`${inserted.length} new allocation${inserted.length === 1 ? "" : "s"}`);
+    if (toppedUp) parts.push(`${toppedUp} topped up`);
+    if (skipped) parts.push(`${skipped} skipped`);
+    pushToast(parts.length ? `Import complete: ${parts.join(", ")}` : "Nothing to import", parts.length ? "ok" : "warn");
+    pushNotification("Tour-operator allotments imported", parts.join(", ") || "Nothing imported", "allotment");
+  }
+
   async function deleteOperator(id) {
     const active = allotments.some(a => a.operatorId === id && a.status !== "cancelled" && a.status !== "released");
     if (active) {
@@ -1512,7 +1583,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         </div>
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} />}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -4543,12 +4614,13 @@ function ReportsModal({ onClose, pushToast }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator, onAddAllotment, onReleaseAllotments }) {
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments }) {
   const { t } = useLanguage();
   const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" | "release" }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
   const [showBulkOperators, setShowBulkOperators] = useState(false);
+  const [showBulkAllotments, setShowBulkAllotments] = useState(false);
   const [flightRateSearch, setFlightRateSearch] = useState("");
   const [flightRateSelected, setFlightRateSelected] = useState(() => new Set());
   const [flightRateSeats, setFlightRateSeats] = useState(10);
@@ -4579,6 +4651,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       {perms.editContracts && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginBottom: 10 }}>
           <button onClick={() => setShowBulkOperators(true)} style={miniBtn}>{t("bulkImportOperators")}</button>
+          <button onClick={() => setShowBulkAllotments(true)} style={miniBtn}>{t("bulkImportAllotments")}</button>
           <button onClick={() => setShowAddOperator(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("newOperator")}</button>
         </div>
       )}
@@ -4762,6 +4835,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       </table>
       {showAddOperator && <AddOperatorModal onClose={() => setShowAddOperator(false)} onCreate={op => { onAddOperator(op); setShowAddOperator(false); }} />}
       {showBulkOperators && <BulkImportOperatorsModal existingNames={operators.map(o => o.name.toLowerCase())} onClose={() => setShowBulkOperators(false)} onCommit={rows => { onBulkImportOperators(rows); setShowBulkOperators(false); }} />}
+      {showBulkAllotments && <BulkImportAllotmentsModal operators={operators} flights={flights} allotments={allotments} onClose={() => setShowBulkAllotments(false)} onCommit={(rows, allotmentType) => { onBulkImportAllotments(rows, allotmentType); setShowBulkAllotments(false); }} />}
     </div>
   );
 }
@@ -4900,6 +4974,248 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setRows(null)} style={miniBtn}>{t("back")}</button>
                 <button onClick={() => onCommit(rows.filter(r => r.include))} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>{t("importN", okCount)}</button>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- tour operator bulk allotment import (route/allotment matrix workbook) ----------
+// The sheet's own layout, confirmed against a real file: each block starts with a header row
+// whose "№ рейса" column marks it, operator names run across a span of columns up to the
+// "Период выполнения" column (located by name, not a fixed index, since a second header block
+// in the same sheet can drop the "Транзит" label while keeping the same column positions),
+// followed immediately by 7 weekday columns (ISO 1=Monday..7=Sunday) and a frequency column.
+// The "Транзит" column and the un-headed running-total column next to it are intentionally
+// never read — only named operator columns contribute seat allocations.
+function parseAllotmentImportDateRange(cell) {
+  if (cell == null) return null;
+  const s = String(cell).trim().replace(/\s+/g, "");
+  const m = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})-(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/.exec(s);
+  if (!m) return null;
+  const [, d1, mo1, y1, d2, mo2, y2] = m;
+  const fullYear = y => (y.length === 2 ? 2000 + +y : +y);
+  const from = new Date(Date.UTC(fullYear(y1), +mo1 - 1, +d1));
+  const to = new Date(Date.UTC(fullYear(y2), +mo2 - 1, +d2));
+  if (isNaN(from.getTime()) || isNaN(to.getTime()) || to < from) return null;
+  return { from, to };
+}
+// Returns one seat count per ref (plain number applies to every ref; "92/70" applies the first
+// number to the first ref and the second to the second), null if the cell is blank/zero, or the
+// literal string "unparsed" to flag a value that's neither.
+function parseAllotmentSeatCell(cell, refCount) {
+  if (cell == null) return null;
+  if (typeof cell === "number") return cell ? Array(refCount).fill(cell) : null;
+  const s = String(cell).trim();
+  if (!s) return null;
+  const splitM = /^(\d+)\s*\/\s*(\d+)$/.exec(s);
+  if (splitM) return [+splitM[1], +splitM[2]].slice(0, refCount);
+  const n = Number(s);
+  if (!isNaN(n)) return n ? Array(refCount).fill(n) : null;
+  return "unparsed";
+}
+function parseAllotmentWorkbook(workbook) {
+  const occurrences = []; // { ref, date, operatorName, seats, sheetRow }
+  const manualRows = []; // { sheetName, sheetRow, reason }
+
+  workbook.SheetNames.forEach(sheetName => {
+    const grid = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: true, defval: null });
+    const headerRowIdx = [];
+    grid.forEach((row, i) => { if (typeof row[1] === "string" && row[1].toLowerCase().includes("рейс")) headerRowIdx.push(i); });
+
+    headerRowIdx.forEach((hIdx, blockI) => {
+      const header = grid[hIdx] || [];
+      const periodColIdx = header.findIndex(h => typeof h === "string" && h.toLowerCase().includes("период"));
+      if (periodColIdx < 0) return; // layout for this block couldn't be located — skip it rather than guess
+      const dayColIdxs = [1, 2, 3, 4, 5, 6, 7].map(n => periodColIdx + n);
+      const operatorCols = [];
+      for (let c = 3; c < periodColIdx; c++) {
+        const label = header[c];
+        if (typeof label !== "string") continue;
+        const name = label.trim();
+        if (!name || /транзит/i.test(name)) continue; // the transit column is deliberately skipped
+        operatorCols.push({ col: c, name });
+      }
+      if (operatorCols.length === 0) return;
+
+      const dataEnd = (blockI + 1 < headerRowIdx.length ? headerRowIdx[blockI + 1] : grid.length) - 1;
+      for (let r = hIdx + 1; r <= dataEnd && r < grid.length; r++) {
+        const row = grid[r] || [];
+        const refCell = row[1];
+        if (refCell == null || String(refCell).trim() === "") continue; // no flight number — nothing to match
+        const refs = String(refCell).split("/").map(x => x.trim()).filter(Boolean).map(n => "DV" + n);
+        if (refs.length === 0) continue;
+
+        const range = parseAllotmentImportDateRange(row[periodColIdx]);
+        const dayFlags = dayColIdxs.map(c => !!row[c]);
+        const anyDayFlagged = dayFlags.some(Boolean);
+        if (!range || !anyDayFlagged) {
+          manualRows.push({
+            sheetName, sheetRow: r + 1, refs: refs.join("/"),
+            reason: !range ? `Unrecognized date range "${row[periodColIdx] ?? ""}"` : "No weekday flags recognized",
+          });
+          continue;
+        }
+        const jsDaysFlagged = new Set();
+        dayFlags.forEach((flagged, i) => { if (flagged) jsDaysFlagged.add((i + 1) % 7); }); // ISO 1..7 -> JS getUTCDay 1..6,0
+
+        const dates = [];
+        for (let d = new Date(range.from); d <= range.to; d = addDays(d, 1)) {
+          if (jsDaysFlagged.has(d.getUTCDay())) dates.push(new Date(d));
+        }
+
+        operatorCols.forEach(({ col, name }) => {
+          const seats = parseAllotmentSeatCell(row[col], refs.length);
+          if (seats == null) return;
+          if (seats === "unparsed") {
+            manualRows.push({ sheetName, sheetRow: r + 1, refs: refs.join("/"), reason: `Unrecognized seat value for ${name}: "${row[col]}"` });
+            return;
+          }
+          dates.forEach(date => {
+            refs.forEach((ref, i) => {
+              const s = seats[i];
+              if (!s) return;
+              occurrences.push({ ref, date, operatorName: name, seats: s, sheetRow: r + 1 });
+            });
+          });
+        });
+      }
+    });
+  });
+
+  return { occurrences, manualRows };
+}
+// Groups expanded occurrences by matched flight (or by ref+date when no flight matches) and
+// operator name, summing seats — the shape BulkImportAllotmentsModal previews and, once
+// confirmed, hands to bulkImportAllotments to write.
+function buildAllotmentPreview(occurrences, flights, operators) {
+  const flightIndex = new Map(flights.map(f => [`${f.ref}|${iso(f.start)}`, f]));
+  const opIndex = new Map(operators.map(o => [o.name.trim().toLowerCase(), o]));
+  const grouped = new Map();
+  occurrences.forEach(occ => {
+    const flight = flightIndex.get(`${occ.ref}|${iso(occ.date)}`);
+    const opName = occ.operatorName.trim();
+    const key = `${flight ? flight.id : `${occ.ref}|${iso(occ.date)}`}__${opName.toLowerCase()}`;
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        ref: occ.ref, date: occ.date, flightId: flight?.id || null, matched: !!flight,
+        operatorName: opName, isNewOperator: !opIndex.has(opName.toLowerCase()), seats: 0, include: true,
+      });
+    }
+    grouped.get(key).seats += occ.seats;
+  });
+  return [...grouped.values()].sort((a, b) => iso(a.date).localeCompare(iso(b.date)) || a.ref.localeCompare(b.ref));
+}
+
+function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, onCommit }) {
+  const { t } = useLanguage();
+  const [fileName, setFileName] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [manualRows, setManualRows] = useState([]);
+  const [preview, setPreview] = useState(null); // array from buildAllotmentPreview, or null before a file is parsed
+  const [allotmentType, setAllotmentType] = useState("fixed");
+
+  async function handleFile(file) {
+    setError(null);
+    setBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const workbook = XLSX.read(buf, { type: "array" });
+      const { occurrences, manualRows: manual } = parseAllotmentWorkbook(workbook);
+      if (occurrences.length === 0) {
+        setError(t("noAllotmentRowsFound"));
+        setBusy(false);
+        return;
+      }
+      setFileName(file.name);
+      setManualRows(manual);
+      setPreview(buildAllotmentPreview(occurrences, flights, operators));
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+    setBusy(false);
+  }
+
+  const included = preview?.filter(r => r.include && r.matched) ?? [];
+  const unmatchedCount = preview?.filter(r => !r.matched).length ?? 0;
+  const newOperatorNames = [...new Set((preview ?? []).filter(r => r.isNewOperator).map(r => r.operatorName))];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 760, maxWidth: "95vw", maxHeight: "88vh", overflow: "auto" }}>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkImportAllotmentsTitle")}</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("bulkImportAllotmentsExplain")}</div>
+
+        {!preview && (
+          <>
+            <label style={{ ...miniBtn, display: "inline-flex", cursor: "pointer", background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>
+              {busy ? t("parsingEllipsis") : t("chooseExcelFile")}
+              <input type="file" accept=".xlsx,.xls" disabled={busy} onChange={e => e.target.files[0] && handleFile(e.target.files[0])} style={{ display: "none" }} />
+            </label>
+            {error && <div style={{ marginTop: 10, fontSize: 12, color: C.red }}>{error}</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+            </div>
+          </>
+        )}
+
+        {preview && (
+          <>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{fileName}</div>
+            {manualRows.length > 0 && (
+              <div style={{ fontSize: 11.5, color: C.amber, background: C.amberSoft, borderRadius: 8, padding: "6px 10px", marginBottom: 8 }}>
+                {t("manualReviewRows", manualRows.length)}
+                <div style={{ marginTop: 4, maxHeight: 70, overflowY: "auto", fontFamily: MONO, fontSize: 10.5 }}>
+                  {manualRows.map((m, i) => <div key={i}>{t("rowLabel")} {m.sheetRow} ({m.refs || "—"}): {m.reason}</div>)}
+                </div>
+              </div>
+            )}
+            {unmatchedCount > 0 && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{t("unmatchedRowsNote", unmatchedCount)}</div>}
+            {newOperatorNames.length > 0 && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{t("newOperatorsNote", newOperatorNames.length, newOperatorNames.join(", "))}</div>}
+
+            <FieldSm label={t("defaultTypeForImport")}>
+              <select value={allotmentType} onChange={e => setAllotmentType(e.target.value)} style={{ ...inputStyle, width: 220 }}>
+                <option value="fixed">{t("allotmentTypeFirm")}</option>
+                <option value="option">{t("allotmentTypeOption")}</option>
+              </select>
+            </FieldSm>
+
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", margin: "12px 0", maxHeight: 360, overflowY: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("colDate")}</th><th style={{ padding: "6px 8px" }}>{t("colFlight")}</th>
+                  <th style={{ padding: "6px 8px" }}>{t("colOperator")}</th><th style={{ padding: "6px 8px" }}>{t("colSeats")}</th><th style={{ padding: "6px 8px" }}>{t("colMatchStatus")}</th>
+                </tr></thead>
+                <tbody>
+                  {preview.map((r, i) => {
+                    const existing = r.matched ? allotments.find(a => a.flightId === r.flightId && a.operatorId === operators.find(o => o.name.trim().toLowerCase() === r.operatorName.toLowerCase())?.id && a.status !== "cancelled" && a.status !== "released") : null;
+                    return (
+                      <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: r.matched ? 1 : 0.55 }}>
+                        <td style={{ padding: "6px 8px" }}><input type="checkbox" checked={r.include} disabled={!r.matched} onChange={e => setPreview(ps => ps.map((x, xi) => xi === i ? { ...x, include: e.target.checked } : x))} /></td>
+                        <td style={{ padding: "6px 8px", fontFamily: MONO }}>{iso(r.date)}</td>
+                        <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.ref}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.operatorName}{r.isNewOperator && <Badge color={C.violet}>{t("newOperatorStatus")}</Badge>}</td>
+                        <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.seats}{existing ? ` (+${existing.seatsAllocated})` : ""}</td>
+                        <td style={{ padding: "6px 8px" }}><Badge color={r.matched ? C.green : C.red}>{r.matched ? t("matchedStatus") : t("unmatchedStatus")}</Badge></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("importSummary", included.length, unmatchedCount, newOperatorNames.length)}</span>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+                <button onClick={() => onCommit(included, allotmentType)} disabled={included.length === 0}
+                  style={{ ...miniBtn, background: included.length ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: included.length ? C.amber : C.faint, fontWeight: 600 }}>
+                  {t("importAllotmentsN", included.length)}
+                </button>
               </div>
             </div>
           </>
