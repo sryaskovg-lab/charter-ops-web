@@ -1041,6 +1041,23 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, ...patch } : a));
   }
 
+  // Deliberate, explicit override of the no-reprice rule above — patchAllotment refuses any
+  // price change on an allotment that already has seats, by design, to stop an accidental or
+  // silent repricing (e.g. from a route-rate change meant only for future allocations). This is
+  // the one sanctioned way to actually correct or renegotiate the price on seats already on the
+  // books: a separate action the person has to reach for on purpose, not a side effect of
+  // editing a rate card or adding more seats.
+  async function repriceAllotment(id, newPrice) {
+    const current = allotments.find(a => a.id === id);
+    if (!current || !newPrice || newPrice <= 0 || newPrice === current.pricePerSeat) return;
+    const { error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).eq("id", id);
+    if (error) { pushToast(`Could not change price: ${error.message}`, "warn"); return; }
+    setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, pricePerSeat: newPrice } : a));
+    const op = operators.find(o => o.id === current.operatorId);
+    pushToast(`Price changed to $${newPrice}/seat — ${current.seatsAllocated} already-allocated seat${current.seatsAllocated === 1 ? "" : "s"} repriced retroactively`, "warn");
+    pushNotification("Allotment repriced", `${op?.name || "Operator"} · $${current.pricePerSeat} → $${newPrice}/seat`, "allotment");
+  }
+
   async function removeAllotment(id) {
     // Same rule again: removing an allotment with seats on it is a reduction to zero, which
     // isn't allowed once seats are allocated. Only a genuinely empty row could ever be removed.
@@ -1620,7 +1637,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               onSaveAtfmRecord={patch => saveAtfmRecord(selectedFlight.id, patch)}
               onUpdateFlight={patch => updateFlight(selectedFlight.id, patch)}
               onAddAllotment={(opId, seats, price, allotmentType) => addAllotment(selectedFlight.id, opId, seats, price, allotmentType)}
-              onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment}
+              onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment} onRepriceAllotment={repriceAllotment}
               onOpenSCR={role => openSCR([selectedFlight], role)}
               onDeleteFlight={deleteFlight}
               onClose={() => setSelectedFlightId(null)} />
@@ -1628,7 +1645,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         </div>
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} />}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -2478,7 +2495,7 @@ function slotStatusColor(status) {
   if (status === "sent" || status === "offered" || status === "waitlisted" || status === "ready_to_send") return C.amber;
   return C.faint;
 }
-function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, profiles, slotRequests, slotCorrespondence, atfmRecord, onSaveSlotRequest, onAddSlotCorrespondence, onSaveAtfmRecord, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onDeleteFlight, onClose }) {
+function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, profiles, slotRequests, slotCorrespondence, atfmRecord, onSaveSlotRequest, onAddSlotCorrespondence, onSaveAtfmRecord, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onRepriceAllotment, onOpenSCR, onDeleteFlight, onClose }) {
   const { t } = useLanguage();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addingOp, setAddingOp] = useState(operators[0].id);
@@ -2487,6 +2504,8 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
   const [addingType, setAddingType] = useState(operators[0].allotmentType === "option" ? "option" : "fixed");
   const [draftDep, setDraftDep] = useState(flight.depTime || "");
   const [draftArr, setDraftArr] = useState(flight.arrTime || "");
+  const [repricingId, setRepricingId] = useState(null);
+  const [repricingValue, setRepricingValue] = useState("");
   const activeAllotments = allotments.filter(a => a.status !== "cancelled");
   const timeDirty = draftDep !== (flight.depTime || "") || draftArr !== (flight.arrTime || "");
 
@@ -2618,8 +2637,22 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
                   <Badge color={a.allotmentType === "option" ? C.amber : C.cyan}>{a.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}</Badge>
                 )}
               </div>
-              <div style={{ display: "flex", gap: 10, marginTop: 5, fontSize: 11.5, color: C.muted, alignItems: "center" }}>
-                <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+              <div style={{ display: "flex", gap: 8, marginTop: 5, fontSize: 11.5, color: C.muted, alignItems: "center" }}>
+                {repricingId === a.id ? (
+                  <>
+                    <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ $</span>
+                    <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 70, padding: "2px 5px" }} />
+                    <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10.5, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                    <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10.5 }}>{t("cancel")}</button>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                    {!released && perms.editContracts && (
+                      <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("changePriceBtn")}</button>
+                    )}
+                  </>
+                )}
               </div>
               {a.allotmentType === "option" && a.optionReleaseAt && !released && (
                 <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>{t("autoReleases", iso(a.optionReleaseAt))}</div>
@@ -4659,7 +4692,7 @@ function ReportsModal({ onClose, pushToast }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments }) {
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment }) {
   const { t } = useLanguage();
   const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" | "release" }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -4673,6 +4706,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [flightRateType, setFlightRateType] = useState("fixed");
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
+  const [repricingId, setRepricingId] = useState(null);
+  const [repricingValue, setRepricingValue] = useState("");
   const [newRouteCode, setNewRouteCode] = useState("");
   const [newRoutePrice, setNewRoutePrice] = useState("");
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
@@ -4833,11 +4868,25 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                       {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noActiveAllotments2")}</div>}
                       {opAllotments.map(a => {
                         const fl = flights.find(f => f.id === a.flightId);
-                        return <div key={a.id} style={{ display: "flex", gap: 14, fontSize: 12, fontFamily: MONO, color: C.text }}>
+                        return <div key={a.id} style={{ display: "flex", gap: 10, fontSize: 12, fontFamily: MONO, color: C.text, alignItems: "center" }}>
                           <span style={{ width: 70 }}>{fl?.ref}</span><span style={{ width: 90, color: C.muted }}>{iso(fl?.start)}</span>
                           <span style={{ width: 90, color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
-                          <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
-                          <span style={{ color: C.green }}>${(a.seatsAllocated * a.pricePerSeat).toLocaleString()}</span>
+                          {repricingId === a.id ? (
+                            <>
+                              <span>{a.seatsAllocated} seats @ $</span>
+                              <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 65, padding: "2px 5px" }} />
+                              <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                              <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
+                            </>
+                          ) : (
+                            <>
+                              <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                              {perms.editContracts && (
+                                <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5 }}>{t("changePriceBtn")}</button>
+                              )}
+                            </>
+                          )}
+                          <span style={{ color: C.green, marginLeft: "auto" }}>${(a.seatsAllocated * a.pricePerSeat).toLocaleString()}</span>
                         </div>;
                       })}
                     </div>
