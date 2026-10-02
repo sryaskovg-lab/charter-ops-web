@@ -1029,6 +1029,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         const patch = {};
         if (before.defaultRate !== o.defaultRate) patch.rate_per_seat = o.defaultRate;
         if (JSON.stringify(before.ratesByDestination) !== JSON.stringify(o.ratesByDestination)) patch.rates_by_destination = o.ratesByDestination;
+        if (before.allotmentType !== o.allotmentType) patch.default_allotment_type = o.allotmentType;
+        if (before.optionReleaseDays !== o.optionReleaseDays) patch.default_option_release_days = o.optionReleaseDays;
         if (Object.keys(patch).length) {
           supabase.from("contracts").update(patch).eq("id", o.contractId)
             .then(({ error }) => { if (error) pushToast(`Rate update failed: ${error.message}`, "warn"); });
@@ -4497,6 +4499,10 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
+  function updateAllotmentType(id, allotmentType) {
+    setOperators(ops => ops.map(o => o.id === id ? { ...o, allotmentType, optionReleaseDays: allotmentType === "option" ? (o.optionReleaseDays || 14) : null } : o));
+  }
+  function updateOptionReleaseDays(id, days) { setOperators(ops => ops.map(o => o.id === id ? { ...o, optionReleaseDays: days } : o)); }
   function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
@@ -4546,7 +4552,19 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                         </div>
                       : <span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>{t("none")}</span>}</span>}
                   </td>
-                  <td style={td}><Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge></td>
+                  <td style={td}>
+                    {perms.editContracts
+                      ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                          <select value={o.allotmentType === "option" ? "option" : "fixed"} onChange={e => updateAllotmentType(o.id, e.target.value)} style={{ ...inputStyle, width: 90 }}>
+                            <option value="fixed">{t("allotmentTypeFirm")}</option>
+                            <option value="option">{t("allotmentTypeOption")}</option>
+                          </select>
+                          {o.allotmentType === "option" && (
+                            <input type="number" min={0} value={o.optionReleaseDays ?? 14} onChange={e => updateOptionReleaseDays(o.id, +e.target.value)} title={t("optionReleaseDays")} style={{ ...inputStyle, width: 50 }} />
+                          )}
+                        </div>
+                      : <Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge>}
+                  </td>
                   <td style={td}><Badge color={o.status === "active" ? C.green : C.red}>{o.status.replace("_", " ").toUpperCase()}</Badge></td>
                   <td style={{ ...td, fontFamily: MONO }}>{totalSeats}</td>
                   <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
