@@ -920,7 +920,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     else pushToast(`${f.ref} reassigned to ${resources.find(r => r.id === newResourceId)?.code} — date and time unchanged`, "ok");
   }
 
-  async function addAllotment(flightId, operatorId, seats, priceOverride) {
+  async function addAllotment(flightId, operatorId, seats, priceOverride, allotmentTypeOverride) {
     const op = operators.find(o => o.id === operatorId);
     const flight = flights.find(f => f.id === flightId);
     // Business rule: once an operator has seats allocated on a flight (or across a series),
@@ -938,10 +938,14 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       return;
     }
     const price = priceOverride ?? rateFor(op, flight?.destination);
-    const optionReleaseAt = op.allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
+    // Allotment type is chosen by staff at the moment of allocation — it defaults to the
+    // operator's standing contract type but is overridable per allotment, and stays editable
+    // afterward via patchAllotment.
+    const allotmentType = allotmentTypeOverride ?? op.allotmentType;
+    const optionReleaseAt = allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
     const { data, error } = await supabase.from("allotments").insert({
       flight_id: flightId, tour_operator_id: operatorId, contract_id: op.contractId,
-      seats_allocated: seats, price_per_seat: price, allotment_type: op.allotmentType,
+      seats_allocated: seats, price_per_seat: price, allotment_type: allotmentType,
       option_release_at: optionReleaseAt ? optionReleaseAt.toISOString() : null,
     }).select().single();
     if (error) { pushToast(`Could not allocate seats: ${error.message}`, "warn"); return; }
@@ -970,6 +974,22 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (patch.seatsAllocated !== undefined) dbPatch.seats_allocated = patch.seatsAllocated;
     if (patch.pricePerSeat !== undefined) dbPatch.price_per_seat = patch.pricePerSeat;
     if (patch.status !== undefined) dbPatch.status = patch.status;
+    // Allotment type (firm block vs. option/soft block) is staff-chosen per allotment, not
+    // locked in at creation — it can be switched later as the booking firms up or softens.
+    // Switching to "option" without an existing release date seeds one from the operator's
+    // default lead time; switching to "fixed" clears it, since a firm block never auto-releases.
+    if (patch.allotmentType !== undefined && current && patch.allotmentType !== current.allotmentType) {
+      dbPatch.allotment_type = patch.allotmentType;
+      if (patch.allotmentType === "option") {
+        const op = operators.find(o => o.id === current.operatorId);
+        const releaseAt = current.optionReleaseAt || addDays(today, op?.optionReleaseDays || 14);
+        dbPatch.option_release_at = releaseAt.toISOString();
+        patch = { ...patch, optionReleaseAt: releaseAt };
+      } else {
+        dbPatch.option_release_at = null;
+        patch = { ...patch, optionReleaseAt: null };
+      }
+    }
     const { error } = await supabase.from("allotments").update(dbPatch).eq("id", id);
     if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return; }
     setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, ...patch } : a));
@@ -1460,7 +1480,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               onAddSlotCorrespondence={addSlotCorrespondence}
               onSaveAtfmRecord={patch => saveAtfmRecord(selectedFlight.id, patch)}
               onUpdateFlight={patch => updateFlight(selectedFlight.id, patch)}
-              onAddAllotment={(opId, seats, price) => addAllotment(selectedFlight.id, opId, seats, price)}
+              onAddAllotment={(opId, seats, price, allotmentType) => addAllotment(selectedFlight.id, opId, seats, price, allotmentType)}
               onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment}
               onOpenSCR={role => openSCR([selectedFlight], role)}
               onDeleteFlight={deleteFlight}
@@ -2325,6 +2345,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
   const [addingOp, setAddingOp] = useState(operators[0].id);
   const [addingSeats, setAddingSeats] = useState(20);
   const [addingPrice, setAddingPrice] = useState(rateFor(operators[0], flight.destination));
+  const [addingType, setAddingType] = useState(operators[0].allotmentType === "option" ? "option" : "fixed");
   const [draftDep, setDraftDep] = useState(flight.depTime || "");
   const [draftArr, setDraftArr] = useState(flight.arrTime || "");
   const activeAllotments = allotments.filter(a => a.status !== "cancelled");
@@ -2449,7 +2470,14 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
             <div key={a.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, opacity: released ? 0.55 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 12.5, color: C.text }}>{op?.name}</span>
-                <Badge color={released ? C.faint : a.allotmentType === "option" ? C.amber : C.cyan}>{released ? t("released") : (a.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm"))}</Badge>
+                {released ? <Badge color={C.faint}>{t("released")}</Badge> : perms.editAllotments ? (
+                  <select value={a.allotmentType === "option" ? "option" : "fixed"} onChange={e => onPatchAllotment(a.id, { allotmentType: e.target.value })} style={{ ...inputStyle, width: 90, padding: "3px 6px", fontSize: 11 }}>
+                    <option value="fixed">{t("allotmentTypeFirm")}</option>
+                    <option value="option">{t("allotmentTypeOption")}</option>
+                  </select>
+                ) : (
+                  <Badge color={a.allotmentType === "option" ? C.amber : C.cyan}>{a.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}</Badge>
+                )}
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 5, fontSize: 11.5, color: C.muted, alignItems: "center" }}>
                 <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
@@ -2469,16 +2497,22 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
         <div style={{ border: `1px dashed ${C.border}`, borderRadius: 10, padding: 8 }}>
           <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("addAllotment")}</div>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <select value={addingOp} onChange={e => { setAddingOp(e.target.value); setAddingPrice(rateFor(operators.find(o => o.id === e.target.value), flight.destination)); }} style={{ ...inputStyle, flex: 1 }}>
+            <select value={addingOp} onChange={e => { const newOp = operators.find(o => o.id === e.target.value); setAddingOp(e.target.value); setAddingPrice(rateFor(newOp, flight.destination)); setAddingType(newOp?.allotmentType === "option" ? "option" : "fixed"); }} style={{ ...inputStyle, flex: 1 }}>
               {operators.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
             <input type="number" value={addingSeats} onChange={e => setAddingSeats(+e.target.value)} title={t("seatsTitle")} style={{ ...inputStyle, width: 60 }} />
+          </div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <select value={addingType} onChange={e => setAddingType(e.target.value)} style={{ ...inputStyle, flex: 1 }}>
+              <option value="fixed">{t("allotmentTypeFirm")}</option>
+              <option value="option">{t("allotmentTypeOption")}</option>
+            </select>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>{t("pricePerSeatThisFlight")}</span>
             <span style={{ fontSize: 11, color: C.faint }}>$</span>
             <input type="number" value={addingPrice} onChange={e => setAddingPrice(+e.target.value)} title={t("pricePerSeatTitle")} style={{ ...inputStyle, width: 70 }} />
-            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>{t("add")}</button>
+            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice, addingType)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>{t("add")}</button>
           </div>
           <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>{t("defaultsToRate", operators.find(o => o.id === addingOp)?.name, flight.destination)}</div>
         </div>
@@ -4496,6 +4530,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [flightRateSelected, setFlightRateSelected] = useState(() => new Set());
   const [flightRateSeats, setFlightRateSeats] = useState(10);
   const [flightRatePrice, setFlightRatePrice] = useState("");
+  const [flightRateType, setFlightRateType] = useState("fixed");
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
@@ -4510,7 +4545,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   function createAllotmentsFromSearch(operatorId) {
     const price = +flightRatePrice;
     if (!price || flightRateSelected.size === 0) return;
-    flightRateSelected.forEach(flightId => onAddAllotment(flightId, operatorId, flightRateSeats, price));
+    flightRateSelected.forEach(flightId => onAddAllotment(flightId, operatorId, flightRateSeats, price, flightRateType));
     setFlightRateSelected(new Set());
     setFlightRateSearch("");
     setFlightRatePrice("");
@@ -4570,7 +4605,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
                   <td style={td}>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
+                      <button onClick={() => { setFlightRateType(o.allotmentType === "option" ? "option" : "fixed"); toggle(o.id, "rates"); }} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
                       <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? t("hide") : t("viewSeatsBtn")}</button>
                       {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? t("hide") : t("releaseSeatsRowBtn")}</button>}
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
@@ -4610,6 +4645,12 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                           <FieldSm label={t("fieldSeats")}><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
                           <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                          <FieldSm label={t("thAllotmentType")}>
+                            <select value={flightRateType} onChange={e => setFlightRateType(e.target.value)} style={{ ...inputStyle, width: 100 }}>
+                              <option value="fixed">{t("allotmentTypeFirm")}</option>
+                              <option value="option">{t("allotmentTypeOption")}</option>
+                            </select>
+                          </FieldSm>
                           <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
                             style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
                             {t("addCount", flightRateSelected.size)}
@@ -4719,8 +4760,8 @@ function AddOperatorModal({ onClose, onCreate }) {
             <FieldSm label={t("fieldDefaultRatePerSeat")}><input type="number" value={form.defaultRate} onChange={e => setForm({ ...form, defaultRate: +e.target.value })} style={inputStyle} /></FieldSm>
             <FieldSm label={t("thAllotmentType")}>
               <select value={form.allotmentType} onChange={e => setForm({ ...form, allotmentType: e.target.value })} style={inputStyle}>
-                <option value="fixed">{t("fixed")}</option>
-                <option value="option">{t("option")}</option>
+                <option value="fixed">{t("allotmentTypeFirm")}</option>
+                <option value="option">{t("allotmentTypeOption")}</option>
               </select>
             </FieldSm>
           </div>
