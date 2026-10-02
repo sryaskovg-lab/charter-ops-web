@@ -890,12 +890,35 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   async function bulkDeleteFlights(flightIds) {
     if (!perms.editFlight || flightIds.length === 0) return;
     const affected = allotments.filter(a => flightIds.includes(a.flightId) && a.status !== "cancelled" && a.status !== "released").length;
-    const { error } = await supabase.from("flights").delete().in("id", flightIds);
-    if (error) { pushToast(`Bulk delete failed: ${error.message}`, "warn"); return; }
-    setFlightsRaw(fl => fl.filter(f => !flightIds.includes(f.id)));
-    setAllotmentsRaw(as => as.filter(a => !flightIds.includes(a.flightId)));
-    if (flightIds.includes(selectedFlightId)) setSelectedFlightId(null);
-    pushToast(`${flightIds.length} flight${flightIds.length === 1 ? "" : "s"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with them` : ""}`, affected ? "warn" : "ok");
+    // PostgREST puts .in() values straight into the request URL (id=in.(uuid,uuid,...)), so a
+    // large selection (a wide date range across a real schedule easily runs to hundreds of
+    // flights) can push the URL past the host's length limit and come back as a bare "Bad
+    // Request" with no useful detail. Chunking keeps every request well under that limit and
+    // still reports exactly how many flights, if any, failed to delete.
+    const CHUNK = 150;
+    const chunks = [];
+    for (let i = 0; i < flightIds.length; i += CHUNK) chunks.push(flightIds.slice(i, i + CHUNK));
+    const deletedIds = [];
+    let firstError = null;
+    for (const chunk of chunks) {
+      const { error } = await supabase.from("flights").delete().in("id", chunk);
+      if (error) { firstError = firstError || error; continue; }
+      deletedIds.push(...chunk);
+    }
+    if (deletedIds.length) {
+      setFlightsRaw(fl => fl.filter(f => !deletedIds.includes(f.id)));
+      setAllotmentsRaw(as => as.filter(a => !deletedIds.includes(a.flightId)));
+      if (deletedIds.includes(selectedFlightId)) setSelectedFlightId(null);
+    }
+    if (firstError) {
+      const failedCount = flightIds.length - deletedIds.length;
+      pushToast(deletedIds.length
+        ? `Deleted ${deletedIds.length} flight(s), but ${failedCount} failed: ${firstError.message}`
+        : `Bulk delete failed: ${firstError.message}`, "warn");
+      if (!deletedIds.length) return;
+    } else {
+      pushToast(`${deletedIds.length} flight${deletedIds.length === 1 ? "" : "s"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with them` : ""}`, affected ? "warn" : "ok");
+    }
     setShowBulkDelete(false);
   }
 
