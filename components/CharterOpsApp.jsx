@@ -189,7 +189,30 @@ function mapOperator(o, contract) {
     optionReleaseDays: contract?.default_option_release_days ?? null,
   };
 }
-function rateFor(op, destination) { return op?.ratesByDestination?.[destination] ?? op?.defaultRate ?? 0; }
+// Rates are keyed by route ("ALA-PQC"), not just destination — the same operator can be
+// charged differently depending on where the flight originates, not only where it lands. The
+// plain-destination key is still checked as a fallback so rates set before this existed (or
+// pasted in via the operator CSV importer with just a destination) keep working.
+function routeKeyFor(origin, destination) { return `${origin}-${destination}`; }
+// A tech-stop journey ("ALA-DMB-SYX") is really two separate flight legs in this system
+// (ALA-DMB and DMB-SYX, each its own flight record with its own allotments) — there's no
+// single flight row spanning all three codes. So entering one through-route with one price
+// fans it out into a rate for each consecutive leg at that same price, rather than being stored
+// as a single three-code key that would never match any real flight's origin/destination.
+function expandRouteSegments(routeStr) {
+  const codes = String(routeStr || "").split("-").map(s => s.trim().toUpperCase()).filter(Boolean);
+  const keys = [];
+  for (let i = 0; i + 1 < codes.length; i++) keys.push(routeKeyFor(codes[i], codes[i + 1]));
+  return keys;
+}
+function rateFor(op, origin, destination) {
+  if (!op) return 0;
+  const byRoute = op.ratesByDestination?.[routeKeyFor(origin, destination)];
+  if (byRoute != null) return byRoute;
+  const byDest = op.ratesByDestination?.[destination];
+  if (byDest != null) return byDest;
+  return op.defaultRate ?? 0;
+}
 
 async function fetchAll() {
   const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }] = await Promise.all([
@@ -960,7 +983,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       pushNotification("Seats added", `+${seats} seats · ${op.name} · ${flight?.ref || ""}`, "allotment");
       return;
     }
-    const price = priceOverride ?? rateFor(op, flight?.destination);
+    const price = priceOverride ?? rateFor(op, flight?.origin, flight?.destination);
     // Allotment type is chosen by staff at the moment of allocation — it defaults to the
     // operator's standing contract type but is overridable per allotment, and stays editable
     // afterward via patchAllotment.
@@ -973,7 +996,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     }).select().single();
     if (error) { pushToast(`Could not allocate seats: ${error.message}`, "warn"); return; }
     setAllotmentsRaw(as => [...as, mapAllotment(data)]);
-    const destRate = rateFor(op, flight?.destination);
+    const destRate = rateFor(op, flight?.origin, flight?.destination);
     const priceNote = price !== destRate ? ` at $${price}/seat (${op.name}'s rate to ${flight?.destination} is $${destRate})` : ` at $${price}/seat`;
     pushToast(`Allocated ${seats} seats to ${op.name}${priceNote}`, "ok");
     pushNotification("Seats allocated", `${seats} seats · ${op.name} · ${flight?.ref || ""}`, "allotment");
@@ -1119,12 +1142,11 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // batched into chunked multi-row inserts and top-ups are applied in a loop, with one summary
   // toast at the end. New operator names get created first (mirroring addOperator's insert
   // shape) so every row below always resolves to a real operator id.
-  // destPrices is { destination: pricePerSeat } entered once for the whole import — it only
-  // fills a gap (an operator with no per-destination rate of its own for that destination yet);
-  // an operator's existing rate always wins. Any gap it fills gets written back onto that
-  // operator's contract so the rate sticks around for the next single-row allocation too, not
-  // just this import.
-  async function bulkImportAllotments(rows, allotmentType, destPrices = {}) {
+  // routePrices is { "ALA-PQC": pricePerSeat } entered once for the whole import — it only
+  // fills a gap (an operator with no rate of its own for that exact route yet); an operator's
+  // existing rate always wins. Any gap it fills gets written back onto that operator's contract
+  // so the rate sticks around for the next single-row allocation too, not just this import.
+  async function bulkImportAllotments(rows, allotmentType, routePrices = {}) {
     const newNames = [...new Set(rows.filter(r => r.isNewOperator).map(r => r.operatorName))];
     const createdOperators = [];
     for (const name of newNames) {
@@ -1142,7 +1164,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
 
     const toInsert = [];
     const toTopUp = [];
-    const contractFills = new Map(); // operatorId -> { op, rates: { destination: price } } — gaps the import price filled
+    const contractFills = new Map(); // operatorId -> { op, rates: { routeKey: price } } — gaps the import price filled
     let skipped = 0;
     for (const row of rows) {
       const op = opByName.get(row.operatorName.trim().toLowerCase());
@@ -1152,12 +1174,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       if (existing) {
         toTopUp.push({ id: existing.id, newTotal: existing.seatsAllocated + row.seats });
       } else {
-        const ownRate = op.ratesByDestination?.[flight.destination];
-        const importRate = destPrices[flight.destination] ? +destPrices[flight.destination] : null;
+        const routeKey = routeKeyFor(flight.origin, flight.destination);
+        const ownRate = op.ratesByDestination?.[routeKey] ?? op.ratesByDestination?.[flight.destination];
+        const importRate = routePrices[routeKey] ? +routePrices[routeKey] : null;
         const price = ownRate ?? importRate ?? op.defaultRate ?? 0;
         if (ownRate == null && importRate != null) {
           if (!contractFills.has(op.id)) contractFills.set(op.id, { op, rates: {} });
-          contractFills.get(op.id).rates[flight.destination] = importRate;
+          contractFills.get(op.id).rates[routeKey] = importRate;
         }
         const optionReleaseAt = allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
         toInsert.push({
@@ -2460,7 +2483,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addingOp, setAddingOp] = useState(operators[0].id);
   const [addingSeats, setAddingSeats] = useState(20);
-  const [addingPrice, setAddingPrice] = useState(rateFor(operators[0], flight.destination));
+  const [addingPrice, setAddingPrice] = useState(rateFor(operators[0], flight.origin, flight.destination));
   const [addingType, setAddingType] = useState(operators[0].allotmentType === "option" ? "option" : "fixed");
   const [draftDep, setDraftDep] = useState(flight.depTime || "");
   const [draftArr, setDraftArr] = useState(flight.arrTime || "");
@@ -2613,7 +2636,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
         <div style={{ border: `1px dashed ${C.border}`, borderRadius: 10, padding: 8 }}>
           <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("addAllotment")}</div>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <select value={addingOp} onChange={e => { const newOp = operators.find(o => o.id === e.target.value); setAddingOp(e.target.value); setAddingPrice(rateFor(newOp, flight.destination)); setAddingType(newOp?.allotmentType === "option" ? "option" : "fixed"); }} style={{ ...inputStyle, flex: 1 }}>
+            <select value={addingOp} onChange={e => { const newOp = operators.find(o => o.id === e.target.value); setAddingOp(e.target.value); setAddingPrice(rateFor(newOp, flight.origin, flight.destination)); setAddingType(newOp?.allotmentType === "option" ? "option" : "fixed"); }} style={{ ...inputStyle, flex: 1 }}>
               {operators.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
             <input type="number" value={addingSeats} onChange={e => setAddingSeats(+e.target.value)} title={t("seatsTitle")} style={{ ...inputStyle, width: 60 }} />
@@ -4650,28 +4673,30 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
   const [flightRateType, setFlightRateType] = useState("fixed");
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
-  const [newDestCode, setNewDestCode] = useState("");
-  const [newDestPrice, setNewDestPrice] = useState("");
+  const [newRouteCode, setNewRouteCode] = useState("");
+  const [newRoutePrice, setNewRoutePrice] = useState("");
   function updateDefaultRate(id, rate) { setOperators(ops => ops.map(o => o.id === id ? { ...o, defaultRate: rate } : o)); }
   function updateAllotmentType(id, allotmentType) {
     setOperators(ops => ops.map(o => o.id === id ? { ...o, allotmentType, optionReleaseDays: allotmentType === "option" ? (o.optionReleaseDays || 14) : null } : o));
   }
   function updateOptionReleaseDays(id, days) { setOperators(ops => ops.map(o => o.id === id ? { ...o, optionReleaseDays: days } : o)); }
-  // Standing, always-available per-destination rate card for an operator — the general
-  // mechanism the bulk importer's one-off "fill the gap" price feeds into and reads from, not
-  // something tied to any particular import. Lets staff set/change/remove the $/seat this
-  // operator is charged to a given destination at any time, independent of any specific flight
-  // or allocation; rateFor() then uses it for every future "Allocate seats" and bulk import.
-  function updateDestRate(id, dest, price) { setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [dest]: price } } : o)); }
-  function removeDestRate(id, dest) {
+  // Standing, always-available per-route rate card for an operator — the general mechanism the
+  // bulk importer's one-off "fill the gap" price feeds into and reads from, not something tied
+  // to any particular import. Keyed by route ("ALA-PQC"), not just destination, since the same
+  // operator can be charged differently depending on where the flight originates. Lets staff
+  // set/change/remove the $/seat for a given route at any time, independent of any specific
+  // flight or allocation; rateFor() then uses it for every future "Allocate seats" and bulk
+  // import (falling back to a plain destination-only key for rates set before routes existed).
+  function updateRouteRate(id, route, price) { setOperators(ops => ops.map(o => o.id === id ? { ...o, ratesByDestination: { ...o.ratesByDestination, [route]: price } } : o)); }
+  function removeRouteRate(id, route) {
     setOperators(ops => ops.map(o => {
       if (o.id !== id) return o;
       const rest = { ...o.ratesByDestination };
-      delete rest[dest];
+      delete rest[route];
       return { ...o, ratesByDestination: rest };
     }));
   }
-  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); setNewDestCode(""); setNewDestPrice(""); }
+  function toggle(id, panel) { setExpanded(e => (e && e.id === id && e.panel === panel) ? null : { id, panel }); setReleaseSelected(new Map()); setConfirmRelease(false); setNewRouteCode(""); setNewRoutePrice(""); }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
     : [];
@@ -4709,8 +4734,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
             const isSeats = expanded?.id === o.id && expanded.panel === "seats";
             const isRates = expanded?.id === o.id && expanded.panel === "rates";
             const isRelease = expanded?.id === o.id && expanded.panel === "release";
-            const isDestRates = expanded?.id === o.id && expanded.panel === "destRates";
-            const destsWithFlights = [...new Set(flights.map(f => f.destination))].filter(d => !(o.ratesByDestination || {})[d]).sort();
+            const isRouteRates = expanded?.id === o.id && expanded.panel === "routeRates";
+            const routesWithFlights = [...new Set(flights.map(f => routeKeyFor(f.origin, f.destination)))].filter(r => !(o.ratesByDestination || {})[r]).sort();
             return (
               <React.Fragment key={o.id}>
                 <tr style={{ borderTop: `1px solid ${C.borderSoft}` }}>
@@ -4744,7 +4769,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                       <button onClick={() => { setFlightRateType(o.allotmentType === "option" ? "option" : "fixed"); toggle(o.id, "rates"); }} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
                       <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? t("hide") : t("viewSeatsBtn")}</button>
                       {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? t("hide") : t("releaseSeatsRowBtn")}</button>}
-                      {perms.editContracts && <button onClick={() => toggle(o.id, "destRates")} style={miniBtn}>{isDestRates ? t("hide") : t("destRatesBtn")}</button>}
+                      {perms.editContracts && <button onClick={() => toggle(o.id, "routeRates")} style={miniBtn}>{isRouteRates ? t("hide") : t("routeRatesBtn")}</button>}
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
@@ -4818,28 +4843,32 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                     </div>
                   </td></tr>
                 )}
-                {isDestRates && (
+                {isRouteRates && (
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("destRatesExplain", o.name)}</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("routeRatesExplain", o.name)}</div>
                     <div style={{ border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8, overflow: "hidden" }}>
-                      {Object.keys(o.ratesByDestination || {}).length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noDestRatesYet")}</div>}
-                      {Object.entries(o.ratesByDestination || {}).sort(([a], [b]) => a.localeCompare(b)).map(([dest, price]) => (
-                        <div key={dest} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
-                          <span style={{ width: 60, fontWeight: 700 }}>{dest}</span>
-                          <input type="number" min={0} value={price} onChange={e => updateDestRate(o.id, dest, e.target.value === "" ? 0 : +e.target.value)} style={{ ...inputStyle, width: 90 }} />
-                          <button onClick={() => removeDestRate(o.id, dest)} title={t("removeDestRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
+                      {Object.keys(o.ratesByDestination || {}).length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noRouteRatesYet")}</div>}
+                      {Object.entries(o.ratesByDestination || {}).sort(([a], [b]) => a.localeCompare(b)).map(([route, price]) => (
+                        <div key={route} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
+                          <span style={{ width: 90, fontWeight: 700 }}>{route}</span>
+                          <input type="number" min={0} value={price} onChange={e => updateRouteRate(o.id, route, e.target.value === "" ? 0 : +e.target.value)} style={{ ...inputStyle, width: 90 }} />
+                          <button onClick={() => removeRouteRate(o.id, route)} title={t("removeRouteRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
                         </div>
                       ))}
                     </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                      <FieldSm label={t("fieldDestination")}>
-                        <input value={newDestCode} onChange={e => setNewDestCode(e.target.value.toUpperCase().slice(0, 4))} placeholder={t("destCodePlaceholder")} list={`dest-options-${o.id}`} style={{ ...inputStyle, width: 90 }} />
-                        <datalist id={`dest-options-${o.id}`}>{destsWithFlights.map(d => <option key={d} value={d} />)}</datalist>
+                      <FieldSm label={t("fieldRoute")}>
+                        <input value={newRouteCode} onChange={e => setNewRouteCode(e.target.value.toUpperCase())} placeholder={t("routeCodePlaceholder")} list={`route-options-${o.id}`} style={{ ...inputStyle, width: 130 }} />
+                        <datalist id={`route-options-${o.id}`}>{routesWithFlights.map(r => <option key={r} value={r} />)}</datalist>
                       </FieldSm>
-                      <FieldSm label={t("fieldPricePerSeat")}><input type="number" min={0} value={newDestPrice} onChange={e => setNewDestPrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
-                      <button disabled={!newDestCode.trim() || !newDestPrice} onClick={() => { updateDestRate(o.id, newDestCode.trim(), +newDestPrice); setNewDestCode(""); setNewDestPrice(""); }}
-                        style={{ ...miniBtn, background: (newDestCode.trim() && newDestPrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (newDestCode.trim() && newDestPrice) ? C.amber : C.faint, fontWeight: 600 }}>{t("add")}</button>
+                      <FieldSm label={t("fieldPricePerSeat")}><input type="number" min={0} value={newRoutePrice} onChange={e => setNewRoutePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                      <button disabled={expandRouteSegments(newRouteCode).length === 0 || !newRoutePrice} onClick={() => {
+                        const keys = expandRouteSegments(newRouteCode);
+                        setOperators(ops => ops.map(o2 => o2.id === o.id ? { ...o2, ratesByDestination: { ...o2.ratesByDestination, ...Object.fromEntries(keys.map(k => [k, +newRoutePrice])) } } : o2));
+                        setNewRouteCode(""); setNewRoutePrice("");
+                      }} style={{ ...miniBtn, background: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? C.amber : C.faint, fontWeight: 600 }}>{t("add")}</button>
                     </div>
+                    <div style={{ fontSize: 10, color: C.faint, marginTop: 6 }}>{t("techStopRouteHint")}</div>
                   </td></tr>
                 )}
                 {isRelease && (() => {
@@ -4900,7 +4929,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       </table>
       {showAddOperator && <AddOperatorModal onClose={() => setShowAddOperator(false)} onCreate={op => { onAddOperator(op); setShowAddOperator(false); }} />}
       {showBulkOperators && <BulkImportOperatorsModal existingNames={operators.map(o => o.name.toLowerCase())} onClose={() => setShowBulkOperators(false)} onCommit={rows => { onBulkImportOperators(rows); setShowBulkOperators(false); }} />}
-      {showBulkAllotments && <BulkImportAllotmentsModal operators={operators} flights={flights} allotments={allotments} onClose={() => setShowBulkAllotments(false)} onCommit={(rows, allotmentType, destPrices) => { onBulkImportAllotments(rows, allotmentType, destPrices); setShowBulkAllotments(false); }} />}
+      {showBulkAllotments && <BulkImportAllotmentsModal operators={operators} flights={flights} allotments={allotments} onClose={() => setShowBulkAllotments(false)} onCommit={(rows, allotmentType, routePrices) => { onBulkImportAllotments(rows, allotmentType, routePrices); setShowBulkAllotments(false); }} />}
     </div>
   );
 }
@@ -5166,7 +5195,7 @@ function buildAllotmentPreview(occurrences, flights, operators) {
     const key = `${flight ? flight.id : `${occ.ref}|${iso(occ.date)}`}__${opName.toLowerCase()}`;
     if (!grouped.has(key)) {
       grouped.set(key, {
-        ref: occ.ref, date: occ.date, flightId: flight?.id || null, destination: flight?.destination || null, matched: !!flight,
+        ref: occ.ref, date: occ.date, flightId: flight?.id || null, origin: flight?.origin || null, destination: flight?.destination || null, matched: !!flight,
         operatorName: opName, isNewOperator: !opIndex.has(opName.toLowerCase()), seats: 0, include: true,
       });
     }
@@ -5183,7 +5212,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
   const [manualRows, setManualRows] = useState([]);
   const [preview, setPreview] = useState(null); // array from buildAllotmentPreview, or null before a file is parsed
   const [allotmentType, setAllotmentType] = useState("fixed");
-  const [destPrices, setDestPrices] = useState({}); // { destination: "120" } — one $/seat per destination for the whole import; only fills an operator's missing per-destination rate, never overrides one it already has
+  const [routePrices, setRoutePrices] = useState({}); // { "ALA-PQC": "120" } — one $/seat per route for the whole import; only fills an operator's missing rate for that exact route, never overrides one it already has
 
   async function handleFile(file) {
     setError(null);
@@ -5209,7 +5238,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
   const included = preview?.filter(r => r.include && r.matched) ?? [];
   const unmatchedCount = preview?.filter(r => !r.matched).length ?? 0;
   const newOperatorNames = [...new Set((preview ?? []).filter(r => r.isNewOperator).map(r => r.operatorName))];
-  const destinations = [...new Set((preview ?? []).filter(r => r.matched).map(r => r.destination).filter(Boolean))].sort();
+  const routes = [...new Set((preview ?? []).filter(r => r.matched && r.origin && r.destination).map(r => routeKeyFor(r.origin, r.destination)))].sort();
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
@@ -5251,15 +5280,15 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
               </select>
             </FieldSm>
 
-            {destinations.length > 0 && (
+            {routes.length > 0 && (
               <div style={{ marginTop: 10 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 4 }}>{t("pricePerDestinationTitle")}</div>
-                <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 8 }}>{t("pricePerDestinationExplain")}</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 4 }}>{t("pricePerRouteTitle")}</div>
+                <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 8 }}>{t("pricePerRouteExplain")}</div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
-                  {destinations.map(dest => (
-                    <FieldSm key={dest} label={dest}>
-                      <input type="number" min={0} placeholder="$/seat" value={destPrices[dest] ?? ""}
-                        onChange={e => setDestPrices(dp => ({ ...dp, [dest]: e.target.value }))}
+                  {routes.map(route => (
+                    <FieldSm key={route} label={route}>
+                      <input type="number" min={0} placeholder="$/seat" value={routePrices[route] ?? ""}
+                        onChange={e => setRoutePrices(rp => ({ ...rp, [route]: e.target.value }))}
                         style={{ ...inputStyle, width: 90 }} />
                     </FieldSm>
                   ))}
@@ -5295,7 +5324,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
               <span style={{ fontSize: 11.5, color: C.muted }}>{t("importSummary", included.length, unmatchedCount, newOperatorNames.length)}</span>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
-                <button onClick={() => onCommit(included, allotmentType, destPrices)} disabled={included.length === 0}
+                <button onClick={() => onCommit(included, allotmentType, routePrices)} disabled={included.length === 0}
                   style={{ ...miniBtn, background: included.length ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: included.length ? C.amber : C.faint, fontWeight: 600 }}>
                   {t("importAllotmentsN", included.length)}
                 </button>
