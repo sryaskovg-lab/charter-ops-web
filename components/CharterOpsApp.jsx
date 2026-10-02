@@ -1119,7 +1119,12 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // batched into chunked multi-row inserts and top-ups are applied in a loop, with one summary
   // toast at the end. New operator names get created first (mirroring addOperator's insert
   // shape) so every row below always resolves to a real operator id.
-  async function bulkImportAllotments(rows, allotmentType) {
+  // destPrices is { destination: pricePerSeat } entered once for the whole import — it only
+  // fills a gap (an operator with no per-destination rate of its own for that destination yet);
+  // an operator's existing rate always wins. Any gap it fills gets written back onto that
+  // operator's contract so the rate sticks around for the next single-row allocation too, not
+  // just this import.
+  async function bulkImportAllotments(rows, allotmentType, destPrices = {}) {
     const newNames = [...new Set(rows.filter(r => r.isNewOperator).map(r => r.operatorName))];
     const createdOperators = [];
     for (const name of newNames) {
@@ -1137,6 +1142,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
 
     const toInsert = [];
     const toTopUp = [];
+    const contractFills = new Map(); // operatorId -> { op, rates: { destination: price } } — gaps the import price filled
     let skipped = 0;
     for (const row of rows) {
       const op = opByName.get(row.operatorName.trim().toLowerCase());
@@ -1146,7 +1152,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       if (existing) {
         toTopUp.push({ id: existing.id, newTotal: existing.seatsAllocated + row.seats });
       } else {
-        const price = rateFor(op, flight.destination);
+        const ownRate = op.ratesByDestination?.[flight.destination];
+        const importRate = destPrices[flight.destination] ? +destPrices[flight.destination] : null;
+        const price = ownRate ?? importRate ?? op.defaultRate ?? 0;
+        if (ownRate == null && importRate != null) {
+          if (!contractFills.has(op.id)) contractFills.set(op.id, { op, rates: {} });
+          contractFills.get(op.id).rates[flight.destination] = importRate;
+        }
         const optionReleaseAt = allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
         toInsert.push({
           flight_id: flight.id, tour_operator_id: op.id, contract_id: op.contractId,
@@ -1154,6 +1166,15 @@ function CharterOpsAppInner({ profile, onSignOut }) {
           option_release_at: optionReleaseAt ? optionReleaseAt.toISOString() : null,
         });
       }
+    }
+
+    let ratesFilled = 0;
+    for (const { op, rates } of contractFills.values()) {
+      const newRates = { ...op.ratesByDestination, ...rates };
+      const { error } = await supabase.from("contracts").update({ rates_by_destination: newRates }).eq("id", op.contractId);
+      if (error) { pushToast(`Could not save ${op.name}'s new destination rate(s): ${error.message}`, "warn"); continue; }
+      setOperatorsRaw(ops => ops.map(o => o.id === op.id ? { ...o, ratesByDestination: newRates } : o));
+      ratesFilled += Object.keys(rates).length;
     }
 
     const inserted = [];
@@ -1178,6 +1199,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (createdOperators.length) parts.push(`${createdOperators.length} new operator${createdOperators.length === 1 ? "" : "s"}`);
     if (inserted.length) parts.push(`${inserted.length} new allocation${inserted.length === 1 ? "" : "s"}`);
     if (toppedUp) parts.push(`${toppedUp} topped up`);
+    if (ratesFilled) parts.push(`${ratesFilled} destination rate${ratesFilled === 1 ? "" : "s"} saved`);
     if (skipped) parts.push(`${skipped} skipped`);
     pushToast(parts.length ? `Import complete: ${parts.join(", ")}` : "Nothing to import", parts.length ? "ok" : "warn");
     pushNotification("Tour-operator allotments imported", parts.join(", ") || "Nothing imported", "allotment");
@@ -4835,7 +4857,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
       </table>
       {showAddOperator && <AddOperatorModal onClose={() => setShowAddOperator(false)} onCreate={op => { onAddOperator(op); setShowAddOperator(false); }} />}
       {showBulkOperators && <BulkImportOperatorsModal existingNames={operators.map(o => o.name.toLowerCase())} onClose={() => setShowBulkOperators(false)} onCommit={rows => { onBulkImportOperators(rows); setShowBulkOperators(false); }} />}
-      {showBulkAllotments && <BulkImportAllotmentsModal operators={operators} flights={flights} allotments={allotments} onClose={() => setShowBulkAllotments(false)} onCommit={(rows, allotmentType) => { onBulkImportAllotments(rows, allotmentType); setShowBulkAllotments(false); }} />}
+      {showBulkAllotments && <BulkImportAllotmentsModal operators={operators} flights={flights} allotments={allotments} onClose={() => setShowBulkAllotments(false)} onCommit={(rows, allotmentType, destPrices) => { onBulkImportAllotments(rows, allotmentType, destPrices); setShowBulkAllotments(false); }} />}
     </div>
   );
 }
@@ -5101,7 +5123,7 @@ function buildAllotmentPreview(occurrences, flights, operators) {
     const key = `${flight ? flight.id : `${occ.ref}|${iso(occ.date)}`}__${opName.toLowerCase()}`;
     if (!grouped.has(key)) {
       grouped.set(key, {
-        ref: occ.ref, date: occ.date, flightId: flight?.id || null, matched: !!flight,
+        ref: occ.ref, date: occ.date, flightId: flight?.id || null, destination: flight?.destination || null, matched: !!flight,
         operatorName: opName, isNewOperator: !opIndex.has(opName.toLowerCase()), seats: 0, include: true,
       });
     }
@@ -5118,6 +5140,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
   const [manualRows, setManualRows] = useState([]);
   const [preview, setPreview] = useState(null); // array from buildAllotmentPreview, or null before a file is parsed
   const [allotmentType, setAllotmentType] = useState("fixed");
+  const [destPrices, setDestPrices] = useState({}); // { destination: "120" } — one $/seat per destination for the whole import; only fills an operator's missing per-destination rate, never overrides one it already has
 
   async function handleFile(file) {
     setError(null);
@@ -5143,6 +5166,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
   const included = preview?.filter(r => r.include && r.matched) ?? [];
   const unmatchedCount = preview?.filter(r => !r.matched).length ?? 0;
   const newOperatorNames = [...new Set((preview ?? []).filter(r => r.isNewOperator).map(r => r.operatorName))];
+  const destinations = [...new Set((preview ?? []).filter(r => r.matched).map(r => r.destination).filter(Boolean))].sort();
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
@@ -5184,6 +5208,22 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
               </select>
             </FieldSm>
 
+            {destinations.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, marginBottom: 4 }}>{t("pricePerDestinationTitle")}</div>
+                <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 8 }}>{t("pricePerDestinationExplain")}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+                  {destinations.map(dest => (
+                    <FieldSm key={dest} label={dest}>
+                      <input type="number" min={0} placeholder="$/seat" value={destPrices[dest] ?? ""}
+                        onChange={e => setDestPrices(dp => ({ ...dp, [dest]: e.target.value }))}
+                        style={{ ...inputStyle, width: 90 }} />
+                    </FieldSm>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", margin: "12px 0", maxHeight: 360, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
@@ -5212,7 +5252,7 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
               <span style={{ fontSize: 11.5, color: C.muted }}>{t("importSummary", included.length, unmatchedCount, newOperatorNames.length)}</span>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
-                <button onClick={() => onCommit(included, allotmentType)} disabled={included.length === 0}
+                <button onClick={() => onCommit(included, allotmentType, destPrices)} disabled={included.length === 0}
                   style={{ ...miniBtn, background: included.length ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: included.length ? C.amber : C.faint, fontWeight: 600 }}>
                   {t("importAllotmentsN", included.length)}
                 </button>
