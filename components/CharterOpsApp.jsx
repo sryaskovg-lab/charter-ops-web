@@ -7,6 +7,7 @@ import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
   flightGeometry, assignLanes, colorForDestination, mapFlight, computeScheduleIssues, FLIGHT_COLORS,
 } from "../lib/scheduling-utils";
+import { LanguageProvider, useLanguage } from "../lib/i18n";
 
 // deck.gl's React component renders WebGL, so like any browser-only library under Next.js it
 // needs to be kept out of server-side rendering — dynamic() with ssr:false is the standard fix.
@@ -339,7 +340,11 @@ function IconX({ size = 22 }) { return <svg width={size} height={size} viewBox="
 function IconMenu() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>; }
 function IconSlot() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l4 2" /></svg>; }
 
-export default function CharterOpsApp({ profile, onSignOut }) {
+export default function CharterOpsApp(props) {
+  return <LanguageProvider><CharterOpsAppInner {...props} /></LanguageProvider>;
+}
+function CharterOpsAppInner({ profile, onSignOut }) {
+  const { t, lang, setLang } = useLanguage();
   const role = profile.role;
   const [tab, setTab] = useState("schedule");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1265,12 +1270,12 @@ export default function CharterOpsApp({ profile, onSignOut }) {
   }
 
   const NAV_ITEMS = [
-    ["dashboard", "Dashboard", IconChart],
-    ["schedule", "Schedule", IconCalendar],
-    ["aircraft", "Aircraft", IconPlane],
-    ["operators", "Tour operators", IconBuilding],
-    ["slots", "Slots", IconSlot],
-    ...(perms.manageUsers ? [["team", "Team", IconUsers]] : []),
+    ["dashboard", t("nav_dashboard"), IconChart],
+    ["schedule", t("nav_schedule"), IconCalendar],
+    ["aircraft", t("nav_aircraft"), IconPlane],
+    ["operators", t("nav_operators"), IconBuilding],
+    ["slots", "Slots", IconSlot], // left in English on purpose — the Slots tab's own content (coordination statuses, SCR) is English-only, so an un-translated tab name is the honest signal
+    ...(perms.manageUsers ? [["team", t("nav_team"), IconUsers]] : []),
   ];
 
   return (
@@ -1305,7 +1310,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
 
       {!loaded ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", color: C.muted, fontFamily: MONO, fontSize: 13 }}>
-          Loading shared schedule…
+          {t("loadingShared")}
         </div>
       ) : (
       <>
@@ -1321,13 +1326,13 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         transition: "width 0.15s ease, padding 0.15s ease, transform 0.2s ease",
       }}>
         {!isMobile && (
-          <button onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          <button onClick={() => setSidebarCollapsed(v => !v)} title={sidebarCollapsed ? t("expandSidebar") : t("collapseSidebar")}
             style={{ position: "absolute", top: 20, right: -11, width: 22, height: 22, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, padding: 0, zIndex: 5 }}>
             {sidebarCollapsed ? "›" : "‹"}
           </button>
         )}
         {isMobile && (
-          <button onClick={() => setMobileSidebarOpen(false)} title="Close menu"
+          <button onClick={() => setMobileSidebarOpen(false)} title={t("closeMenu")}
             style={{ position: "absolute", top: 16, right: 16, width: 28, height: 28, borderRadius: 999, border: `1px solid ${SIDEBAR.border}`, background: SIDEBAR.bgActive, color: SIDEBAR.muted, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 }}>
             <IconX size={15} />
           </button>
@@ -1349,27 +1354,35 @@ export default function CharterOpsApp({ profile, onSignOut }) {
         <div style={{ borderTop: `1px solid ${SIDEBAR.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: (sidebarCollapsed && !isMobile) ? "0" : "0 10px", justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
             <span style={{ width: 7, height: 7, borderRadius: 99, background: live ? C.green : SIDEBAR.muted, display: "inline-block", animation: live ? "pulseDot 1.6s infinite" : "none", flexShrink: 0 }} />
-            {!(sidebarCollapsed && !isMobile) && (live ? "Synced" : "Offline")}
+            {!(sidebarCollapsed && !isMobile) && (live ? t("synced") : t("offline"))}
           </div>
           {!(sidebarCollapsed && !isMobile) && (
             <div style={{ padding: "0 10px", fontSize: 12, color: SIDEBAR.text, lineHeight: 1.4 }}>
-              {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{ROLES[role]?.label}</span>
+              {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{roleLabel(role, t)}</span>
             </div>
           )}
-          <button onClick={onSignOut} title={(sidebarCollapsed && !isMobile) ? "Sign out" : undefined} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>{(sidebarCollapsed && !isMobile) ? "⏻" : "Sign out"}</button>
+          {!(sidebarCollapsed && !isMobile) && (
+            <div style={{ display: "flex", gap: 2, background: SIDEBAR.bgActive, borderRadius: 999, padding: 2 }}>
+              {["en", "ru"].map(l => (
+                <button key={l} onClick={() => setLang(l)} title="Interface language — Slots tab and SCR/ATFM text always stay in English"
+                  style={{ flex: 1, background: lang === l ? SIDEBAR.bg : "transparent", color: SIDEBAR.text, border: "none", borderRadius: 999, padding: "4px 0", fontSize: 11, fontWeight: lang === l ? 700 : 500, cursor: "pointer", fontFamily: SANS, textTransform: "uppercase" }}>{l}</button>
+              ))}
+            </div>
+          )}
+          <button onClick={onSignOut} title={(sidebarCollapsed && !isMobile) ? t("signOut") : undefined} style={{ ...miniBtn, width: "100%", background: SIDEBAR.bgActive, color: SIDEBAR.text, borderColor: SIDEBAR.border }}>{(sidebarCollapsed && !isMobile) ? "⏻" : t("signOut")}</button>
         </div>
       </aside>
 
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: isMobile ? "10px 12px" : "12px 20px", borderBottom: `1px solid ${C.borderSoft}`, background: C.panel, position: "relative", gap: 8 }}>
         {isMobile && (
-          <button onClick={() => setMobileSidebarOpen(true)} title="Menu" style={{ ...miniBtn, padding: 8, flexShrink: 0 }}>
+          <button onClick={() => setMobileSidebarOpen(true)} title={t("menu")} style={{ ...miniBtn, padding: 8, flexShrink: 0 }}>
             <IconMenu />
           </button>
         )}
         <div style={{ position: "relative", flex: isMobile ? 1 : undefined, width: isMobile ? undefined : 320, minWidth: 0 }}>
           <span style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: C.faint }}><IconSearch /></span>
-          <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder={isMobile ? "Search…" : "Search flights, routes, operators…"}
+          <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder={isMobile ? t("searchPlaceholderShort") : t("searchPlaceholder")}
             style={{ ...inputStyle, paddingLeft: 36, background: C.panel2, border: `1px solid ${C.borderSoft}`, width: "100%" }} />
           {searchQuery.trim() && (
             <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, width: "100%", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.12)", zIndex: 50, maxHeight: 280, overflow: "auto" }}>
@@ -1377,7 +1390,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
                 const q = searchQuery.trim().toLowerCase();
                 const matchedFlights = flights.filter(f => f.ref.toLowerCase().includes(q) || f.origin.toLowerCase().includes(q) || f.destination.toLowerCase().includes(q)).slice(0, 5);
                 const matchedOps = operators.filter(o => o.name.toLowerCase().includes(q)).slice(0, 5);
-                if (!matchedFlights.length && !matchedOps.length) return <div style={{ padding: 14, fontSize: 12.5, color: C.faint }}>No matches.</div>;
+                if (!matchedFlights.length && !matchedOps.length) return <div style={{ padding: 14, fontSize: 12.5, color: C.faint }}>{t("noMatches")}</div>;
                 return <>
                   {matchedFlights.map(f => (
                     <div key={f.id} onClick={() => { setTab("schedule"); setSelectedFlightId(f.id); setSearchQuery(""); }}
@@ -1388,7 +1401,7 @@ export default function CharterOpsApp({ profile, onSignOut }) {
                   {matchedOps.map(o => (
                     <div key={o.id} onClick={() => { setTab("operators"); setSearchQuery(""); }}
                       style={{ padding: "9px 14px", fontSize: 12.5, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
-                      <span style={{ color: C.text }}>{o.name}</span> <span style={{ color: C.faint }}>· tour operator</span>
+                      <span style={{ color: C.text }}>{o.name}</span> <span style={{ color: C.faint }}>· {t("tourOperatorTag")}</span>
                     </div>
                   ))}
                 </>;
@@ -1404,8 +1417,8 @@ export default function CharterOpsApp({ profile, onSignOut }) {
             </button>
             {showNotifPanel && (
               <div style={{ position: "absolute", top: "calc(100% + 8px)", right: 0, width: "min(300px, 88vw)", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.14)", zIndex: 50, maxHeight: 320, overflow: "auto" }}>
-                <div style={{ padding: "10px 14px", fontSize: 12, fontWeight: 600, borderBottom: `1px solid ${C.borderSoft}` }}>Notifications</div>
-                {notifications.length === 0 && <div style={{ padding: 16, fontSize: 12, color: C.faint }}>Nothing yet — actions across the app show up here.</div>}
+                <div style={{ padding: "10px 14px", fontSize: 12, fontWeight: 600, borderBottom: `1px solid ${C.borderSoft}` }}>{t("notifications")}</div>
+                {notifications.length === 0 && <div style={{ padding: 16, fontSize: 12, color: C.faint }}>{t("notificationsEmpty")}</div>}
                 {notifications.map(n => <NotificationRow key={n.id} n={n} />)}
               </div>
             )}
@@ -1487,6 +1500,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // alongside the other pure logic so it can be unit tested directly.
 
 function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+  const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
   // population race, the timezone disguise, the move/resize conflation, three attempts at
@@ -1688,12 +1702,12 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
       if (!perms.editFlight) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         if (multiSelectIds.size > 0) {
-          if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
+          if (window.confirm(t("deleteFlightsSelectedConfirm", multiSelectIds.size))) {
             multiSelectIds.forEach(id => onDeleteFlight(id));
             setMultiSelectIds(new Set());
           }
         } else if (selectedFlightId) {
-          if (window.confirm("Delete this flight? This can't be undone.")) onDeleteFlight(selectedFlightId);
+          if (window.confirm(t("deleteFlightConfirm"))) onDeleteFlight(selectedFlightId);
         }
       }
       if ((e.key === "ArrowLeft" || e.key === "ArrowRight") && selectedFlightId && multiSelectIds.size === 0) {
@@ -1710,43 +1724,43 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3 }}>
-            {[["day", "Day"], ["period", "Period"]].map(([k, l]) => (
+            {[["day", t("viewDay")], ["period", t("viewPeriod")]].map(([k, l]) => (
               <button key={k} onClick={() => setViewMode(k)} style={{ background: viewMode === k ? C.panel : "transparent", color: viewMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 12px", fontSize: 12, fontWeight: viewMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: viewMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
             ))}
           </div>
           {viewMode === "period" && (
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <input type="date" value={rangeFrom} onChange={e => setRangeFrom(e.target.value)} style={{ ...inputStyle, padding: "6px 8px" }} />
-              <span style={{ fontSize: 11.5, color: C.muted }}>to</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("dateRangeTo")}</span>
               <input type="date" value={rangeTo} min={rangeFrom} onChange={e => setRangeTo(e.target.value)} style={{ ...inputStyle, padding: "6px 8px" }} />
             </div>
           )}
           <div style={{ display: "flex", gap: 4, borderLeft: `1px solid ${C.borderSoft}`, paddingLeft: 12 }}>
             <button onClick={() => onShiftView(-1)} style={navBtn}>◀</button>
-            <button onClick={onJumpToday} style={navBtn}>Today</button>
+            <button onClick={onJumpToday} style={navBtn}>{t("today")}</button>
             <button onClick={() => onShiftView(1)} style={navBtn}>▶</button>
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <input value={filterText} onChange={e => setFilterText(e.target.value)} placeholder="Filter (ref, route)…"
+          <input value={filterText} onChange={e => setFilterText(e.target.value)} placeholder={t("filterPlaceholder")}
             style={{ ...inputStyle, width: 150, fontSize: 12 }} />
           <button onClick={() => setShowLocal(v => !v)} title="Times are always stored in UTC — this only changes the display" style={{ ...navBtn, background: showLocal ? C.cyanSoft : "transparent", borderColor: showLocal ? C.cyan : C.border, color: showLocal ? C.cyan : C.text }}>
-            {showLocal ? "Local time" : "UTC"}
+            {showLocal ? t("localTime") : t("utc")}
           </button>
           <button onClick={() => setShowIssues(v => !v)} title="Turnaround, routing, capacity and double-booking checks"
             style={{ ...navBtn, background: showIssues ? C.redSoft : (errorCount > 0 ? C.redSoft : activeIssues.length > 0 ? C.amberSoft : "transparent"), borderColor: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.border, color: activeIssues.length > 0 ? (errorCount > 0 ? C.red : C.amber) : C.text, fontWeight: activeIssues.length > 0 ? 600 : 500 }}>
-            Issues{activeIssues.length > 0 ? ` (${activeIssues.length})` : ""}
+            {t("issues")}{activeIssues.length > 0 ? ` (${activeIssues.length})` : ""}
           </button>
           {perms.editFlight && (
             <button onClick={() => setDraftMode(v => !v)} title="While on, your own drags/resizes/deletes/duplicates and drawer edits are queued for review instead of applied live — other users editing without it on are unaffected"
               style={{ ...navBtn, background: draftMode ? C.amber : "transparent", color: draftMode ? ON_ACCENT : C.text, borderColor: draftMode ? C.amber : C.border, fontWeight: draftMode ? 600 : 500 }}>
-              {draftMode ? "Draft mode: ON" : "Draft mode: OFF"}
+              {draftMode ? t("draftModeOn") : t("draftModeOff")}
             </button>
           )}
           {draftChanges.length > 0 && (
             <button onClick={() => setShowDraftPanel(v => !v)}
               style={{ ...navBtn, background: showDraftPanel ? C.amberSoft : C.amberSoft, borderColor: C.amber, color: C.amber, fontWeight: 600 }}>
-              Draft changes ({draftChanges.length})
+              {t("draftChangesCount")} ({draftChanges.length})
             </button>
           )}
           <div title="Box size / zoom (in Period view)" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 8px", border: `1px solid ${C.border}`, borderRadius: 8, height: 32 }}>
@@ -1759,24 +1773,24 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             <span style={{ fontSize: 13 }}>A</span>
           </div>
           <div style={{ position: "relative" }}>
-            <button onClick={e => { e.stopPropagation(); setShowMoreMenu(v => !v); }} style={navBtn}>More ▾</button>
+            <button onClick={e => { e.stopPropagation(); setShowMoreMenu(v => !v); }} style={navBtn}>{t("more")}</button>
             {showMoreMenu && (
               <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.16)", zIndex: 60, minWidth: 170, padding: 6 }}>
                 <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
                 {perms.editFlight && <>
-                  <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate rotation</button>
-                  <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>Scheduling engine</button>
-                  <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk import</button>
-                  <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>Bulk retime</button>
-                  <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>Bulk delete</button>
+                  <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("generateRotation")}</button>
+                  <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
+                  <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkImport")}</button>
+                  <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkRetime")}</button>
+                  <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>{t("bulkDelete")}</button>
                 </>}
               </div>
             )}
           </div>
-          {perms.editFlight && <button onClick={onNewFlight} style={{ ...navBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New flight</button>}
+          {perms.editFlight && <button onClick={onNewFlight} style={{ ...navBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("newFlight")}</button>}
         </div>
       </div>
-      {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>Showing each flight's departure/arrival in its own station's local time. "?" means that station isn't in the timezone table yet.</div>}
+      {showLocal && <div style={{ fontSize: 11, color: C.faint, marginTop: -6, marginBottom: 10 }}>{t("showLocalTimeNote")}</div>}
 
       <div ref={boardRef} style={{ overflowX: "auto", overflowY: "auto", maxHeight: "70vh", border: `1px solid ${C.border}`, borderRadius: 12 }}>
         <div style={{ minWidth: LABELW + days.length * COL, position: "relative" }}>
@@ -1787,7 +1801,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             </div>
           )}
           <div style={{ display: "flex", position: "sticky", top: 0, zIndex: 25, background: C.panel, borderBottom: `1px solid ${C.border}` }}>
-            <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO, position: "sticky", left: 0, zIndex: 30, background: C.panel }}>Aircraft</div>
+            <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", fontSize: 11, color: C.faint, fontFamily: MONO, position: "sticky", left: 0, zIndex: 30, background: C.panel }}>{t("aircraftColHeader")}</div>
             {days.map((d, i) => {
               const dow = d.getUTCDay();
               const isWeekend = dow === 0 || dow === 6;
@@ -1815,7 +1829,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
               <>
                 {filterActive && !anyMatch && (
                   <div style={{ padding: "28px 16px", textAlign: "center", color: C.muted, fontSize: 12.5 }}>
-                    Nothing matches "{filterText}". Try a flight number or a 3-4 letter airport code.
+                    {t("noMatchesFilter", filterText)}
                   </div>
                 )}
                 {sortedResources.map(res => {
@@ -1859,7 +1873,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   <span style={{ fontFamily: MONO, fontWeight: 700, color: C.text }}>{res.code}</span>
                   <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 10.5, color: C.text, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 5, padding: "1px 6px", marginLeft: 8 }}>{res.capacity}Y</span>
                 </div>
-                {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>up to {maxLanes} flights/day</div>}
+                {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>{t("upToFlightsPerDay", maxLanes)}</div>}
               </div>
               <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? (panDragActive ? "grabbing" : "grab") : "default" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
@@ -1987,7 +2001,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                       </div>
                       {isBeingResized && (
                         <div style={{ position: "absolute", left: leftPx + widthPx / 2, top: barTop - 22, transform: "translateX(-50%)", background: C.text, color: "#fff", fontSize: 10.5, fontFamily: MONO, padding: "2px 6px", borderRadius: 5, whiteSpace: "nowrap", pointerEvents: "none", zIndex: 30 }}>
-                          {resizeDrag.edge === "left" ? "dep " : "arr "}
+                          {resizeDrag.edge === "left" ? t("depShort") : t("arrShort")}
                           {minutesToHHMM((((resizeDrag.edge === "left" ? resizeDrag.origDep : resizeDrag.origArr) + (resizeDrag.deltaMin || 0)) % 1440 + 1440) % 1440)}
                         </div>
                       )}
@@ -2096,16 +2110,16 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
       </div>
 
       <div style={{ display: "flex", gap: 16, marginTop: 12, fontSize: 11, color: C.muted, flexWrap: "wrap", alignItems: "center" }}>
-        <LegendSwatch color={C.green} label="Healthy fill" />
-        <LegendSwatch color={C.amber} label="Near full (≥92%)" />
-        <LegendSwatch color={C.red} label="Oversold" />
+        <LegendSwatch color={C.green} label={t("legendHealthy")} />
+        <LegendSwatch color={C.amber} label={t("legendNearFull")} />
+        <LegendSwatch color={C.red} label={t("legendOversold")} />
         {draftChanges.length > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 16, height: 10, border: `2px dashed ${C.amber}`, borderRadius: 3, background: C.amberSoft }} />
-            Dashed → pending draft (click to review)
+            {t("legendDraft")}
           </span>
         )}
-        <button onClick={() => setShowDestLegend(v => !v)} style={{ ...miniBtn, padding: "3px 10px", fontSize: 11 }}>{showDestLegend ? "Hide" : "Show"} destination colors</button>
+        <button onClick={() => setShowDestLegend(v => !v)} style={{ ...miniBtn, padding: "3px 10px", fontSize: 11 }}>{showDestLegend ? t("hideDestColors") : t("showDestColors")}</button>
       </div>
       {showDestLegend && (
         <div style={{ display: "flex", gap: 12, marginTop: 8, flexWrap: "wrap", fontSize: 11, color: C.muted }}>
@@ -2118,7 +2132,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
       )}
       {touchDrag && (
         <div style={{ position: "fixed", left: touchDrag.x + 14, top: touchDrag.y - 16, background: C.amber, color: ON_ACCENT, padding: "5px 10px", borderRadius: 8, fontSize: 11.5, fontFamily: MONO, fontWeight: 600, pointerEvents: "none", zIndex: 999, boxShadow: "0 6px 18px rgba(0,0,0,0.3)" }}>
-          Moving {touchDrag.ref} — release over a day to drop
+          {t("movingFlightHint", touchDrag.ref)}
         </div>
       )}
       {hoverFlightId && (() => {
@@ -2128,16 +2142,16 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
         return (
           <div style={{ position: "fixed", left: Math.min(hoverPos.x + 14, window.innerWidth - 260), top: hoverPos.y + 18, width: 240, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 999, padding: 10, pointerEvents: "none", fontFamily: SANS }}>
             <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12.5, marginBottom: 2 }}>{f.ref} · {f.origin}→{f.destination}</div>
-            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{inv.allocated}/{inv.capacity} seats sold{inv.oversoldBy > 0 ? ` · oversold by ${inv.oversoldBy}` : ""}</div>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("seatsSold", inv.allocated, inv.capacity)}{inv.oversoldBy > 0 ? t("oversoldBySuffix", inv.oversoldBy) : ""}</div>
             {inv.live.length === 0 ? (
-              <div style={{ fontSize: 11.5, color: C.faint }}>No tour operator allotments on this flight yet.</div>
+              <div style={{ fontSize: 11.5, color: C.faint }}>{t("noAllotmentsYet")}</div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 {inv.live.map(a => {
                   const op = operators.find(o => o.id === a.operatorId);
                   return (
                     <div key={a.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
-                      <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 110 }}>{op?.name || "Unknown operator"}</span>
+                      <span style={{ color: C.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 110 }}>{op?.name || t("unknownOperator")}</span>
                       <span style={{ fontFamily: MONO, color: C.muted }}>{a.seatsAllocated} × ${a.pricePerSeat}</span>
                     </div>
                   );
@@ -2153,7 +2167,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
           <button onClick={() => {
             onQuickCreate({ resourceId: contextMenu.resourceId, date: contextMenu.date, depTime: contextMenu.depTime, arrTime: minutesToHHMM((timeToMinutes(contextMenu.depTime) + 120) % 1440) });
             setContextMenu(null);
-          }} style={ctxMenuItem}>+ New flight here</button>
+          }} style={ctxMenuItem}>{t("newFlightHere")}</button>
         </div>
       )}
       {contextMenu && contextMenu.type === "flight" && (() => {
@@ -2163,9 +2177,9 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
           <div onClick={e => e.stopPropagation()} style={{ position: "fixed", left: contextMenu.x, top: contextMenu.y, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 300, minWidth: 190, padding: 6, fontSize: 12.5 }}>
             <div style={{ padding: "4px 8px 6px", fontFamily: MONO, fontWeight: 700, color: C.text, borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 4 }}>{f.ref}</div>
             {perms.editFlight && <>
-              <button onClick={() => { onDuplicateFlight(f.id); setContextMenu(null); }} style={ctxMenuItem}>Duplicate → next day</button>
-              <button onClick={() => { window.confirm(`Delete ${f.ref}? This can't be undone.`) && onDeleteFlight(f.id); setContextMenu(null); }} style={{ ...ctxMenuItem, color: C.red }}>Delete</button>
-              <div style={{ padding: "6px 8px 2px", fontSize: 10, color: C.faint, fontWeight: 600 }}>Color</div>
+              <button onClick={() => { onDuplicateFlight(f.id); setContextMenu(null); }} style={ctxMenuItem}>{t("duplicateNextDay")}</button>
+              <button onClick={() => { window.confirm(t("deleteFlightRefConfirm", f.ref)) && onDeleteFlight(f.id); setContextMenu(null); }} style={{ ...ctxMenuItem, color: C.red }}>{t("delete")}</button>
+              <div style={{ padding: "6px 8px 2px", fontSize: 10, color: C.faint, fontWeight: 600 }}>{t("color")}</div>
               <div style={{ display: "flex", gap: 5, padding: "2px 8px 6px", flexWrap: "wrap" }}>
                 {FLIGHT_COLORS.slice(0, 9).map(c => (
                   <button key={c} onClick={() => { onSetFlightColor(f.id, c); setContextMenu(null); }} title={c} style={{ width: 16, height: 16, borderRadius: 4, background: c, border: f.color === c ? `2px solid ${C.text}` : "1px solid rgba(0,0,0,0.1)", cursor: "pointer", padding: 0 }} />
@@ -2173,41 +2187,41 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                 <button onClick={() => { onSetFlightColor(f.id, null); setContextMenu(null); }} title="Reset to destination color" style={{ width: 16, height: 16, borderRadius: 4, background: C.panel, border: `1px solid ${C.border}`, cursor: "pointer", padding: 0, fontSize: 9, color: C.faint, lineHeight: 1 }}>×</button>
               </div>
             </>}
-            {!perms.editFlight && <div style={{ padding: "6px 8px", color: C.faint }}>Read-only for your role</div>}
+            {!perms.editFlight && <div style={{ padding: "6px 8px", color: C.faint }}>{t("readOnlyRole")}</div>}
           </div>
         );
       })()}
       {multiSelectIds.size > 0 && (
         <div style={{ position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", background: C.text, color: "#fff", padding: "8px 8px 8px 16px", borderRadius: 999, display: "flex", alignItems: "center", gap: 10, boxShadow: "0 10px 30px rgba(0,0,0,0.25)", zIndex: 97, fontSize: 12.5 }}>
-          <span>{multiSelectIds.size} flight{multiSelectIds.size === 1 ? "" : "s"} selected</span>
+          <span>{t("flightsSelected", multiSelectIds.size)}</span>
           {perms.editFlight && (
             <button onClick={() => {
-              if (window.confirm(`Delete ${multiSelectIds.size} selected flight(s)? This can't be undone.`)) {
+              if (window.confirm(t("deleteFlightsSelectedConfirm", multiSelectIds.size))) {
                 multiSelectIds.forEach(id => onDeleteFlight(id));
                 setMultiSelectIds(new Set());
               }
-            }} style={{ ...miniBtn, background: C.red, color: "#fff", borderColor: C.red, padding: "5px 12px" }}>Delete</button>
+            }} style={{ ...miniBtn, background: C.red, color: "#fff", borderColor: C.red, padding: "5px 12px" }}>{t("delete")}</button>
           )}
-          <button onClick={() => setMultiSelectIds(new Set())} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>Clear</button>
+          <button onClick={() => setMultiSelectIds(new Set())} style={{ background: "none", border: "none", color: "#fff", opacity: 0.7, cursor: "pointer", padding: "5px 6px" }}>{t("clear")}</button>
         </div>
       )}
       {showIssues && (
         <div style={{ position: "fixed", top: 0, right: 0, bottom: 0, width: 380, maxWidth: "92vw", background: C.panel, borderLeft: `1px solid ${C.border}`, boxShadow: "-12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
           <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>Issues</div>
-              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Turnaround, routing, capacity, double-booking — advisory only, nothing here is blocked.</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{t("issues")}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{t("issuesSubtitle")}</div>
             </div>
             <button onClick={() => setShowIssues(false)} style={{ background: "none", border: "none", fontSize: 18, color: C.faint, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
           </div>
           <div style={{ display: "flex", borderBottom: `1px solid ${C.borderSoft}`, padding: "8px 12px 0" }}>
-            {[["active", `Active (${activeIssues.length})`], ["acknowledged", `Acknowledged (${acknowledgedIssuesList.length})`]].map(([k, l]) => (
+            {[["active", t("activeTab", activeIssues.length)], ["acknowledged", t("acknowledgedTab", acknowledgedIssuesList.length)]].map(([k, l]) => (
               <button key={k} onClick={() => setIssuesTab(k)} style={{ background: "none", border: "none", borderBottom: issuesTab === k ? `2px solid ${C.amber}` : "2px solid transparent", color: issuesTab === k ? C.text : C.muted, fontWeight: issuesTab === k ? 600 : 500, fontSize: 12.5, padding: "6px 10px", cursor: "pointer", fontFamily: SANS }}>{l}</button>
             ))}
           </div>
           <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
             {issuesTab === "active" && activeIssues.length === 0 && (
-              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>Nothing outstanding — every issue is either resolved or acknowledged.</div>
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>{t("noOutstandingIssues")}</div>
             )}
             {issuesTab === "active" && activeIssues.map(issue => (
               <div key={issue.id} style={{ background: issue.flightId === selectedFlightId ? C.amberSoft : C.panel2, border: `1px solid ${issue.severity === "error" ? C.red : C.amber}33`, borderLeft: `3px solid ${issue.severity === "error" ? C.red : C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS }}>
@@ -2225,19 +2239,19 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
                 </button>
                 {perms.editFlight && (
-                  <button onClick={() => onAcknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11 }}>Acknowledge</button>
+                  <button onClick={() => onAcknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11 }}>{t("acknowledge")}</button>
                 )}
               </div>
             ))}
             {issuesTab === "acknowledged" && acknowledgedIssuesList.length === 0 && (
-              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No acknowledged issues.</div>
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>{t("noAcknowledgedIssues")}</div>
             )}
             {issuesTab === "acknowledged" && acknowledgedIssuesList.map(issue => (
               <div key={issue.id} style={{ background: C.panel2, border: `1px solid ${C.borderSoft}`, borderLeft: `3px solid ${C.faint}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS, opacity: 0.75 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, color: C.faint, marginBottom: 3 }}>{issue.kind}</div>
                 <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4 }}>{issue.message}</div>
                 {perms.editFlight && (
-                  <button onClick={() => onUnacknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11, color: C.red, borderColor: C.red }}>Delete</button>
+                  <button onClick={() => onUnacknowledgeIssue(issue.id)} style={{ ...miniBtn, marginTop: 6, padding: "3px 9px", fontSize: 11, color: C.red, borderColor: C.red }}>{t("delete")}</button>
                 )}
               </div>
             ))}
@@ -2248,20 +2262,20 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
         <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 380, maxWidth: "92vw", background: C.panel, borderRight: `1px solid ${C.border}`, boxShadow: "12px 0 32px rgba(30,42,61,0.14)", zIndex: 200, display: "flex", flexDirection: "column" }}>
           <div style={{ padding: "14px 16px", borderBottom: `1px solid ${C.borderSoft}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>Draft changes</div>
-              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>Queued while Draft mode is on — nothing here is live until you approve it.</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{t("draftChangesCount")}</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{t("draftPanelSubtitle")}</div>
             </div>
             <button onClick={() => setShowDraftPanel(false)} style={{ background: "none", border: "none", fontSize: 18, color: C.faint, cursor: "pointer", lineHeight: 1, padding: 4 }}>×</button>
           </div>
           {draftChanges.length > 0 && perms.editFlight && (
             <div style={{ display: "flex", gap: 8, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}` }}>
-              <button onClick={onApproveAllDrafts} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, flex: 1 }}>Approve all ({draftChanges.length})</button>
-              <button onClick={() => { if (window.confirm(`Discard all ${draftChanges.length} pending draft changes? This can't be undone.`)) onDiscardAllDrafts(); }} style={{ ...miniBtn, color: C.red, borderColor: C.red, flex: 1 }}>Discard all</button>
+              <button onClick={onApproveAllDrafts} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, flex: 1 }}>{t("approveAll", draftChanges.length)}</button>
+              <button onClick={() => { if (window.confirm(t("discardAllConfirm", draftChanges.length))) onDiscardAllDrafts(); }} style={{ ...miniBtn, color: C.red, borderColor: C.red, flex: 1 }}>{t("discardAll")}</button>
             </div>
           )}
           <div style={{ flex: 1, overflowY: "auto", padding: 10 }}>
             {draftChanges.length === 0 && (
-              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>No pending draft changes.</div>
+              <div style={{ padding: "32px 16px", textAlign: "center", color: C.faint, fontSize: 12.5 }}>{t("noPendingDrafts")}</div>
             )}
             {draftChanges.map(d => (
               <div key={d.id} style={{ background: C.amberSoft, border: `1px solid ${C.amber}55`, borderLeft: `3px solid ${C.amber}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, fontFamily: SANS }}>
@@ -2269,8 +2283,8 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                 <div style={{ fontSize: 12, color: C.text, lineHeight: 1.4, marginBottom: 6 }}>{d.summary}</div>
                 {perms.editFlight && (
                   <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => onApproveDraft(d.id)} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, padding: "3px 9px", fontSize: 11 }}>Approve</button>
-                    <button onClick={() => onDiscardDraft(d.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red, padding: "3px 9px", fontSize: 11 }}>Discard</button>
+                    <button onClick={() => onApproveDraft(d.id)} style={{ ...miniBtn, background: C.green, color: "#fff", borderColor: C.green, padding: "3px 9px", fontSize: 11 }}>{t("approve")}</button>
+                    <button onClick={() => onDiscardDraft(d.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red, padding: "3px 9px", fontSize: 11 }}>{t("discard")}</button>
                   </div>
                 )}
               </div>
@@ -2304,6 +2318,7 @@ function slotStatusColor(status) {
   return C.faint;
 }
 function FlightDrawer({ flight, resources, operators, allotments, inventory, perms, profiles, slotRequests, slotCorrespondence, atfmRecord, onSaveSlotRequest, onAddSlotCorrespondence, onSaveAtfmRecord, onUpdateFlight, onAddAllotment, onPatchAllotment, onRemoveAllotment, onOpenSCR, onDeleteFlight, onClose }) {
+  const { t } = useLanguage();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [addingOp, setAddingOp] = useState(operators[0].id);
   const [addingSeats, setAddingSeats] = useState(20);
@@ -2321,15 +2336,15 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
-        <FieldRow label="Route">
+        <FieldRow label={t("fieldRoute")}>
           <span style={{ fontFamily: MONO, fontSize: 13 }}>{flight.origin} → {flight.destination}</span>
         </FieldRow>
-        <FieldRow label="Date">
+        <FieldRow label={t("fieldDate")}>
           {perms.editFlight
             ? <input type="date" value={iso(flight.start)} onChange={e => onUpdateFlight({ start: new Date(e.target.value) })} style={inputStyle} />
             : <span style={{ fontFamily: MONO, fontSize: 13 }}>{iso(flight.start)}</span>}
         </FieldRow>
-        <FieldRow label="Departs / arrives (UTC)">
+        <FieldRow label={t("fieldDepArrUtc")}>
           {perms.editFlight
             ? <div style={{ display: "flex", gap: 4 }}>
                 <input type="time" value={draftDep} onChange={e => setDraftDep(e.target.value)} style={{ ...inputStyle, width: 78 }} />
@@ -2339,34 +2354,34 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
         </FieldRow>
         {perms.editFlight && timeDirty && (
           <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-            <button onClick={() => { setDraftDep(flight.depTime || ""); setDraftArr(flight.arrTime || ""); }} style={{ ...miniBtn, fontSize: 10.5 }}>Revert</button>
-            <button onClick={() => onUpdateFlight({ depTime: draftDep, arrTime: draftArr })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, fontSize: 10.5 }}>Confirm time change</button>
+            <button onClick={() => { setDraftDep(flight.depTime || ""); setDraftArr(flight.arrTime || ""); }} style={{ ...miniBtn, fontSize: 10.5 }}>{t("revert")}</button>
+            <button onClick={() => onUpdateFlight({ depTime: draftDep, arrTime: draftArr })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, fontSize: 10.5 }}>{t("confirmTimeChange")}</button>
           </div>
         )}
         {(flight.depTime || flight.arrTime) && (
           <div style={{ fontSize: 11, color: C.muted, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: "6px 8px" }}>
-            Local: {flight.origin} {formatStationTime(flight.start, flight.depTime, flight.origin, true)} → {flight.destination} {formatStationTime(flight.start, flight.arrTime, flight.destination, true)}
+            {t("localTimePrefix")} {flight.origin} {formatStationTime(flight.start, flight.depTime, flight.origin, true)} → {flight.destination} {formatStationTime(flight.start, flight.arrTime, flight.destination, true)}
           </div>
         )}
-        <FieldRow label="Aircraft">
+        <FieldRow label={t("fieldAircraft")}>
           {perms.editFlight
             ? <select value={flight.resourceId} onChange={e => onUpdateFlight({ resourceId: e.target.value })} style={inputStyle}>
                 {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
               </select>
             : <span style={{ fontFamily: MONO, fontSize: 13 }}>{resources.find(r => r.id === flight.resourceId)?.code}</span>}
         </FieldRow>
-        <FieldRow label="Capacity">
+        <FieldRow label={t("fieldCapacity")}>
           {perms.editFlight
             ? <input type="number" value={flight.capacity} onChange={e => onUpdateFlight({ capacity: +e.target.value })} style={inputStyle} />
             : <span style={{ fontFamily: MONO, fontSize: 13 }}>{flight.capacity}</span>}
         </FieldRow>
-        <FieldRow label="Box color">
+        <FieldRow label={t("fieldBoxColor")}>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
             {FLIGHT_COLORS.map(c => (
               <button key={c} onClick={() => onUpdateFlight({ color: c })} title={c}
                 style={{ width: 18, height: 18, borderRadius: "50%", background: c, border: flight.color === c ? `2px solid ${C.text}` : `1px solid ${C.border}`, cursor: "pointer", padding: 0 }} />
             ))}
-            <button onClick={() => onUpdateFlight({ color: null })} title="Use status color"
+            <button onClick={() => onUpdateFlight({ color: null })} title={t("useStatusColor")}
               style={{ width: 18, height: 18, borderRadius: "50%", background: C.panel, border: !flight.color ? `2px solid ${C.text}` : `1px solid ${C.border}`, cursor: "pointer", padding: 0, fontSize: 9, color: C.faint }}>✕</button>
           </div>
         </FieldRow>
@@ -2393,17 +2408,17 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       {perms.editFlight && (
         <div style={{ marginBottom: 14, borderTop: `1px solid ${C.borderSoft}`, paddingTop: 12 }}>
           {!confirmDelete ? (
-            <button onClick={() => setConfirmDelete(true)} style={{ ...miniBtn, width: "100%", color: C.red, borderColor: C.red }}>Delete this flight</button>
+            <button onClick={() => setConfirmDelete(true)} style={{ ...miniBtn, width: "100%", color: C.red, borderColor: C.red }}>{t("deleteThisFlight")}</button>
           ) : (
             <div>
               <div style={{ fontSize: 11.5, color: C.red, marginBottom: 8 }}>
                 {allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length > 0
-                  ? `This flight has ${allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length} active allotment(s) — deleting it removes those too. This can't be undone.`
-                  : "This can't be undone."}
+                  ? t("deleteFlightWithAllotmentsWarn", allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length)
+                  : t("cantUndo")}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => setConfirmDelete(false)} style={{ ...miniBtn, flex: 1 }}>Cancel</button>
-                <button onClick={() => onDeleteFlight(flight.id)} style={{ ...miniBtn, flex: 1, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>Confirm delete</button>
+                <button onClick={() => setConfirmDelete(false)} style={{ ...miniBtn, flex: 1 }}>{t("cancel")}</button>
+                <button onClick={() => onDeleteFlight(flight.id)} style={{ ...miniBtn, flex: 1, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>{t("confirmDelete")}</button>
               </div>
             </div>
           )}
@@ -2411,20 +2426,20 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       )}
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
-        <MiniStat label="Capacity" value={inventory.capacity} />
-        <MiniStat label="Allocated" value={inventory.allocated} color={inventory.oversoldBy > 0 ? C.red : C.text} />
-        <MiniStat label="Unsold" value={inventory.unsold} color={C.green} />
+        <MiniStat label={t("miniStatCapacity")} value={inventory.capacity} />
+        <MiniStat label={t("miniStatAllocated")} value={inventory.allocated} color={inventory.oversoldBy > 0 ? C.red : C.text} />
+        <MiniStat label={t("miniStatUnsold")} value={inventory.unsold} color={C.green} />
       </div>
       {inventory.oversoldBy > 0 && (
         <div style={{ background: C.redSoft, border: `1px solid ${C.red}55`, color: C.red, fontSize: 12, padding: "8px 10px", borderRadius: 10, marginBottom: 12 }}>
-          Oversold by {inventory.oversoldBy} seats — reduce an allotment below or increase capacity.
+          {t("oversoldBySeatsWarn", inventory.oversoldBy)}
         </div>
       )}
-      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>Est. revenue on this flight: <span style={{ color: C.text, fontFamily: MONO }}>${inventory.revenue.toLocaleString()}</span></div>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>{t("estRevenue")} <span style={{ color: C.text, fontFamily: MONO }}>${inventory.revenue.toLocaleString()}</span></div>
 
-      <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 8 }}>Allotments</div>
+      <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 8 }}>{t("allotments")}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
-        {activeAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No seats allocated yet.</div>}
+        {activeAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noSeatsAllocatedYet")}</div>}
         {activeAllotments.map(a => {
           const op = operators.find(o => o.id === a.operatorId);
           const released = a.status === "released";
@@ -2432,13 +2447,13 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
             <div key={a.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 8, opacity: released ? 0.55 : 1 }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 12.5, color: C.text }}>{op?.name}</span>
-                <Badge color={released ? C.faint : a.allotmentType === "option" ? C.amber : C.cyan}>{released ? "RELEASED" : a.allotmentType.toUpperCase()}</Badge>
+                <Badge color={released ? C.faint : a.allotmentType === "option" ? C.amber : C.cyan}>{released ? t("released") : (a.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm"))}</Badge>
               </div>
               <div style={{ display: "flex", gap: 10, marginTop: 5, fontSize: 11.5, color: C.muted, alignItems: "center" }}>
                 <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
               </div>
               {a.allotmentType === "option" && a.optionReleaseAt && !released && (
-                <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>Auto-releases {iso(a.optionReleaseAt)} if not confirmed</div>
+                <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>{t("autoReleases", iso(a.optionReleaseAt))}</div>
               )}
               {perms.editAllotments && !released && (
                 <AddSeatsRow onAdd={n => onAddAllotment(a.operatorId, n)} />
@@ -2450,23 +2465,23 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
 
       {perms.editAllotments && (
         <div style={{ border: `1px dashed ${C.border}`, borderRadius: 10, padding: 8 }}>
-          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>Add allotment</div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("addAllotment")}</div>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <select value={addingOp} onChange={e => { setAddingOp(e.target.value); setAddingPrice(rateFor(operators.find(o => o.id === e.target.value), flight.destination)); }} style={{ ...inputStyle, flex: 1 }}>
               {operators.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
-            <input type="number" value={addingSeats} onChange={e => setAddingSeats(+e.target.value)} title="Seats" style={{ ...inputStyle, width: 60 }} />
+            <input type="number" value={addingSeats} onChange={e => setAddingSeats(+e.target.value)} title={t("seatsTitle")} style={{ ...inputStyle, width: 60 }} />
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>Price/seat for this flight</span>
+            <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>{t("pricePerSeatThisFlight")}</span>
             <span style={{ fontSize: 11, color: C.faint }}>$</span>
-            <input type="number" value={addingPrice} onChange={e => setAddingPrice(+e.target.value)} title="Price per seat, this flight only" style={{ ...inputStyle, width: 70 }} />
-            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>Add</button>
+            <input type="number" value={addingPrice} onChange={e => setAddingPrice(+e.target.value)} title={t("pricePerSeatTitle")} style={{ ...inputStyle, width: 70 }} />
+            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>{t("add")}</button>
           </div>
-          <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>Defaults to {operators.find(o => o.id === addingOp)?.name}'s rate to {flight.destination} — override it here without changing their rate table.</div>
+          <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>{t("defaultsToRate", operators.find(o => o.id === addingOp)?.name, flight.destination)}</div>
         </div>
       )}
-      {!perms.editAllotments && <div style={{ fontSize: 11.5, color: C.faint }}>Allotment editing is limited to commercial staff, liaisons, and management.</div>}
+      {!perms.editAllotments && <div style={{ fontSize: 11.5, color: C.faint }}>{t("allotmentEditLimited")}</div>}
     </div>
   );
 }
@@ -2579,12 +2594,13 @@ function FieldRow({ label, children }) {
 // Already-allocated seats can only grow, never shrink — this is the only control offered
 // on an existing allotment: how many MORE seats to add, always at the allotment's own price.
 function AddSeatsRow({ onAdd }) {
+  const { t } = useLanguage();
   const [qty, setQty] = useState(10);
   return (
     <div style={{ display: "flex", gap: 6, marginTop: 6, alignItems: "center" }}>
       <input type="number" min={1} value={qty} onChange={e => setQty(Math.max(1, +e.target.value || 1))} style={{ ...inputStyle, width: 56, padding: "3px 6px" }} />
-      <button onClick={() => onAdd(qty)} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>+ Add seats</button>
-      <span style={{ fontSize: 10, color: C.faint }}>same price · can't reduce</span>
+      <button onClick={() => onAdd(qty)} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("addSeats")}</button>
+      <span style={{ fontSize: 10, color: C.faint }}>{t("samePriceCantReduce")}</span>
     </div>
   );
 }
@@ -2597,6 +2613,7 @@ function MiniStat({ label, value, color = C.text }) {
 
 // ---------- single flight insertion ----------
 function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, onLogScr }) {
+  const { t } = useLanguage();
   const [form, setForm] = useState(() => {
     const r = prefill?.resourceId ? resources.find(x => x.id === prefill.resourceId) : resources[0];
     return {
@@ -2637,29 +2654,30 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, 
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 420, maxWidth: "92vw" }}>
         {step === "form" && (
           <>
-            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>New flight</div>
-            <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>Fill this in, generate the slot request first, then confirm to put it on the schedule.</div>
+            <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{t("newFlightTitle")}</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 12 }}>{t("newFlightSubtitle")}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Flight number"><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
-                <FieldSm label="Aircraft">
+                <FieldSm label={t("fieldFlightNumber")}><input value={form.ref} onChange={e => setForm({ ...form, ref: e.target.value.toUpperCase() })} placeholder="auto (DV####)" style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldAircraft")}>
                   <select value={form.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setForm({ ...form, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
                     {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
                   </select>
                 </FieldSm>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Origin"><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-                <FieldSm label="Destination"><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldOrigin")}><input value={form.origin} onChange={e => setForm({ ...form, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldDestination")}><input value={form.destination} onChange={e => setForm({ ...form, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Departure (UTC)"><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
-                <FieldSm label="Arrival (UTC)"><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldDepartureUtc")}><input type="time" value={form.depTime} onChange={e => setForm({ ...form, depTime: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldArrivalUtc")}><input type="time" value={form.arrTime} onChange={e => setForm({ ...form, arrTime: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Date"><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
-                <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldDate")}><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldCapacity")}><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
               </div>
+              {/* Slot request section intentionally left in English — SCR/ATFM/slot wording stays English-only per instruction. */}
               <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginTop: 4 }}>Slot request</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <FieldSm label="Request for">
@@ -2673,11 +2691,11 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, 
             </div>
             {conflict && (
               <div style={{ background: C.redSoft, border: `1px solid ${C.red}55`, color: C.red, fontSize: 12, padding: "8px 10px", borderRadius: 10, marginTop: 12 }}>
-                Heads up: {resources.find(r => r.id === form.resourceId)?.code} already flies {conflict.ref} on {form.date}. You can still add this one — just flagging it.
+                {t("conflictHeadsUp", resources.find(r => r.id === form.resourceId)?.code, conflict.ref, form.date)}
               </div>
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
               <button onClick={generateSCR} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Generate SCR</button>
             </div>
           </>
@@ -2833,6 +2851,7 @@ function groupIntoPatternsAndRemaining(parsed) {
 }
 
 function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
+  const { t } = useLanguage();
   const [mode, setMode] = useState("paste"); // "paste" | "excel"
   const [raw, setRaw] = useState(SAMPLE_PASTE);
   const [rows, setRows] = useState(null);
@@ -2930,24 +2949,24 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 720, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk import flights</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkImportTitle")}</div>
 
         {!rows && (
           <>
             <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 14, width: "fit-content" }}>
-              <button onClick={() => setMode("paste")} style={{ background: mode === "paste" ? C.panel : "transparent", color: mode === "paste" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "paste" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>Paste CSV rows</button>
-              <button onClick={() => setMode("excel")} style={{ background: mode === "excel" ? C.panel : "transparent", color: mode === "excel" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "excel" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>Upload Excel roster</button>
+              <button onClick={() => setMode("paste")} style={{ background: mode === "paste" ? C.panel : "transparent", color: mode === "paste" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "paste" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>{t("tabPasteCsv")}</button>
+              <button onClick={() => setMode("excel")} style={{ background: mode === "excel" ? C.panel : "transparent", color: mode === "excel" ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: mode === "excel" ? 600 : 500, cursor: "pointer", fontFamily: SANS }}>{t("tabUploadExcel")}</button>
             </div>
 
             {mode === "paste" && (
               <>
                 <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
-                  Paste rows in the same shape as the roster grid: flight number, route, times, aircraft, and leg type (revenue vs. ferry/positioning). Recurring weekly rows get grouped into a pattern automatically. Nothing is written until you commit at the end.
+                  {t("pasteCsvDescription")}
                 </div>
                 <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-                  <button onClick={onClose} style={miniBtn}>Cancel</button>
-                  <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+                  <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+                  <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("preview")}</button>
                 </div>
               </>
             )}
@@ -2955,15 +2974,15 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
             {mode === "excel" && (
               <>
                 <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>
-                  Upload the actual roster workbook — one sheet per tail number, flight number and route in adjacent cells under each weekday column. Sheets that don't match a tail in your fleet (summary sheets, aircraft not in the fleet list) are skipped and listed below, not silently dropped. Nothing is written until you commit at the end.
+                  {t("excelUploadDescription")}
                 </div>
                 <div style={{ border: `1.5px dashed ${C.border}`, borderRadius: 12, padding: 24, textAlign: "center" }}>
                   <input type="file" accept=".xlsx,.xls" onChange={e => { const f = e.target.files?.[0]; if (f) handleExcelFile(f); }} style={{ fontSize: 12.5 }} />
-                  {excelBusy && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 8 }}>Reading workbook…</div>}
+                  {excelBusy && <div style={{ fontSize: 11.5, color: C.muted, marginTop: 8 }}>{t("readingWorkbook")}</div>}
                   {excelError && <div style={{ fontSize: 11.5, color: C.red, marginTop: 8 }}>{excelError}</div>}
                 </div>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-                  <button onClick={onClose} style={miniBtn}>Cancel</button>
+                  <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
                 </div>
               </>
             )}
@@ -2973,13 +2992,13 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
           <>
             {excelMeta && (
               <div style={{ background: C.cyanSoft, border: `1px solid ${C.cyan}55`, borderRadius: 10, padding: 10, marginBottom: 12, fontSize: 11.5, color: C.text }}>
-                Parsed <strong>{excelMeta.fileName}</strong>. {excelMeta.skippedSheets.length > 0 && <>Skipped sheets (no matching aircraft in fleet): <strong>{excelMeta.skippedSheets.join(", ")}</strong>. </>}
-                {excelMeta.annotationCount > 0 && <>{excelMeta.annotationCount} non-flight annotation{excelMeta.annotationCount === 1 ? "" : "s"} (tour-operator labels, NOTAMs, etc.) found and left out — informational only, not imported.</>}
+                {t("parsedFilePrefix")} <strong>{excelMeta.fileName}</strong>. {excelMeta.skippedSheets.length > 0 && <>{t("skippedSheetsPrefix")} <strong>{excelMeta.skippedSheets.join(", ")}</strong>. </>}
+                {excelMeta.annotationCount > 0 && <>{t("annotationsFoundNote", excelMeta.annotationCount)}</>}
               </div>
             )}
             {patterns.length > 0 && (
               <>
-                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, margin: "10px 0 6px" }}>Detected recurring patterns</div>
+                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, margin: "10px 0 6px" }}>{t("detectedPatterns")}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
                   {patterns.map((p, i) => (
                     <div key={p.key} style={{ border: `1px solid ${C.cyan}55`, background: C.cyanSoft, borderRadius: 10, padding: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -2990,7 +3009,7 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
                         <span style={{ color: C.muted }}>{DOW_SHORT[p.dow]}s · {p.depTime}–{p.arrTime}</span>
                         {p.legType === "ferry" && <Badge color={C.muted}>FERRY</Badge>}
                       </label>
-                      <span style={{ fontSize: 11, color: C.cyan }}>{p.rows.length} occurrences → rotation template</span>
+                      <span style={{ fontSize: 11, color: C.cyan }}>{t("occurrencesRotationTemplate", p.rows.length)}</span>
                     </div>
                   ))}
                 </div>
@@ -2999,11 +3018,11 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
 
             {rows.length > 0 && (
               <>
-                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Individual rows</div>
+                <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>{t("individualRows")}</div>
                 <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12 }}>
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left" }}>
-                      <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Flt</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>A/C</th><th style={{ padding: "6px 8px" }}>Leg</th><th style={{ padding: "6px 8px" }}>Status</th>
+                      <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("thDate")}</th><th style={{ padding: "6px 8px" }}>{t("thFlt")}</th><th style={{ padding: "6px 8px" }}>{t("thRoute")}</th><th style={{ padding: "6px 8px" }}>{t("thAc")}</th><th style={{ padding: "6px 8px" }}>{t("thLeg")}</th><th style={{ padding: "6px 8px" }}>{t("thStatus")}</th>
                     </tr></thead>
                     <tbody>
                       {rows.map((r, i) => (
@@ -3024,9 +3043,10 @@ function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
             )}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{patternCount} pattern{patternCount === 1 ? "" : "s"} ({totalFlightsFromPatterns} flights) + {okRowCount} individual row{okRowCount === 1 ? "" : "s"} selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("patternsAndRowsSummary", patternCount, totalFlightsFromPatterns, okRowCount)}</span>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button onClick={() => { setRows(null); setPatterns(null); setExcelMeta(null); setExcelError(null); }} style={miniBtn}>Back</button>
+                <button onClick={() => { setRows(null); setPatterns(null); setExcelMeta(null); setExcelError(null); }} style={miniBtn}>{t("back")}</button>
+                {/* Arrival/Departure role + Generate SCR are part of the slot-request flow — left in English per instruction. */}
                 <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
                 <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
                 <button onClick={generateSCR} disabled={okRowCount + totalFlightsFromPatterns === 0} style={{ ...miniBtn, background: (okRowCount + totalFlightsFromPatterns) ? GRADIENT_PRIMARY : C.faint, boxShadow: (okRowCount + totalFlightsFromPatterns) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (okRowCount + totalFlightsFromPatterns) ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
@@ -3207,55 +3227,56 @@ function MultiDatePicker({ selected, onChange }) {
 }
 
 function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
+  const { t } = useLanguage();
   const variants = [...new Set(resources.map(r => r.variant).filter(Boolean))];
   return (
     <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: 12, marginBottom: 10 }}>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
-        <FieldSm label="Origin"><input value={req.origin} onChange={e => onChange({ origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-        <FieldSm label="Destination"><input value={req.destination} onChange={e => onChange({ destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-        <FieldSm label="Aircraft type">
+        <FieldSm label={t("fieldOrigin")}><input value={req.origin} onChange={e => onChange({ origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+        <FieldSm label={t("fieldDestination")}><input value={req.destination} onChange={e => onChange({ destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+        <FieldSm label={t("fieldAircraftType")}>
           <select value={req.aircraftType} onChange={e => onChange({ aircraftType: e.target.value })} style={inputStyle}>
-            <option value="any">Any available</option>
+            <option value="any">{t("anyAvailable")}</option>
             {variants.map(v => <option key={v} value={v}>{v}</option>)}
           </select>
         </FieldSm>
-        <FieldSm label="Flight number"><input value={req.ref} onChange={e => onChange({ ref: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+        <FieldSm label={t("fieldFlightNumber")}><input value={req.ref} onChange={e => onChange({ ref: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
       </div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
-        <FieldSm label="Departure (UTC)"><input type="time" value={req.depTime} onChange={e => onChange({ depTime: e.target.value })} style={inputStyle} /></FieldSm>
-        <FieldSm label="Arrival (UTC)"><input type="time" value={req.arrTime} onChange={e => onChange({ arrTime: e.target.value })} style={inputStyle} /></FieldSm>
+        <FieldSm label={t("fieldDepartureUtc")}><input type="time" value={req.depTime} onChange={e => onChange({ depTime: e.target.value })} style={inputStyle} /></FieldSm>
+        <FieldSm label={t("fieldArrivalUtc")}><input type="time" value={req.arrTime} onChange={e => onChange({ arrTime: e.target.value })} style={inputStyle} /></FieldSm>
       </div>
 
       <label style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, cursor: "pointer", fontSize: 12 }}>
         <input type="checkbox" checked={req.hasReturn} onChange={e => onChange({ hasReturn: e.target.checked })} />
-        Round trip — add a return leg ({req.destination || "destination"} → {req.origin || "origin"})
+        {t("roundTripLabel", req.destination || "destination", req.origin || "origin")}
       </label>
       {req.hasReturn && (
         <div style={{ border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 10, marginBottom: 8, background: C.panel2 }}>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
-            <FieldSm label="Return flight number"><input value={req.returnRef} onChange={e => onChange({ returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
-            <FieldSm label="Return departs (UTC)"><input type="time" value={req.returnDepTime} onChange={e => onChange({ returnDepTime: e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Return arrives (UTC)"><input type="time" value={req.returnArrTime} onChange={e => onChange({ returnArrTime: e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Days after outbound">
+            <FieldSm label={t("fieldReturnFlightNumber")}><input value={req.returnRef} onChange={e => onChange({ returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+            <FieldSm label={t("fieldReturnDepartsUtc")}><input type="time" value={req.returnDepTime} onChange={e => onChange({ returnDepTime: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("fieldReturnArrivesUtc")}><input type="time" value={req.returnArrTime} onChange={e => onChange({ returnArrTime: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("fieldDaysAfterOutbound")}>
               <input type="number" min={0} value={req.returnDayOffset} onChange={e => onChange({ returnDayOffset: Math.max(0, +e.target.value) })} style={{ ...inputStyle, width: 70 }} />
             </FieldSm>
           </div>
-          <div style={{ fontSize: 10.5, color: C.faint }}>0 = same-day turnaround at {req.destination || "the destination"}. The same aircraft flies both legs — the engine won't assign the outbound to one tail and the return to another.</div>
+          <div style={{ fontSize: 10.5, color: C.faint }}>{t("sameDayTurnaroundNote", req.destination || "the destination")}</div>
         </div>
       )}
 
       <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 10, width: "fit-content" }}>
-        {[["weekly", "Days of week"], ["everyN", "Every N days"], ["specific", "Pick dates"]].map(([k, l]) => (
+        {[["weekly", t("dateModeDaysOfWeek")], ["everyN", t("dateModeEveryNDays")], ["specific", t("dateModePickDates")]].map(([k, l]) => (
           <button key={k} onClick={() => onChange({ dateMode: k })} style={{ background: req.dateMode === k ? C.panel : "transparent", color: req.dateMode === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "5px 11px", fontSize: 11.5, fontWeight: req.dateMode === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, boxShadow: req.dateMode === k ? "0 1px 3px rgba(58,54,47,0.10)" : "none" }}>{l}</button>
         ))}
       </div>
 
       {(req.dateMode === "weekly" || req.dateMode === "everyN") && (
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8, alignItems: "flex-end" }}>
-          <FieldSm label="Start date"><input type="date" value={req.startDate} onChange={e => onChange({ startDate: e.target.value })} style={inputStyle} /></FieldSm>
-          <FieldSm label="End date"><input type="date" value={req.endDate} onChange={e => onChange({ endDate: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldStartDate")}><input type="date" value={req.startDate} onChange={e => onChange({ startDate: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldEndDate")}><input type="date" value={req.endDate} onChange={e => onChange({ endDate: e.target.value })} style={inputStyle} /></FieldSm>
           {req.dateMode === "everyN" && (
-            <FieldSm label="Every N days">
+            <FieldSm label={t("fieldEveryNDays")}>
               <input type="number" min={1} value={req.intervalDays} onChange={e => onChange({ intervalDays: Math.max(1, +e.target.value) })} style={{ ...inputStyle, width: 70 }} />
             </FieldSm>
           )}
@@ -3272,7 +3293,7 @@ function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
       )}
       {req.dateMode === "everyN" && (
         <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>
-          Repeats every {req.intervalDays || 1} day{(req.intervalDays || 1) === 1 ? "" : "s"} starting {req.startDate}, through {req.endDate} — not tied to weekdays.
+          {t("repeatsEveryNote", req.intervalDays || 1, req.startDate, req.endDate)}
         </div>
       )}
       {req.dateMode === "specific" && (
@@ -3282,13 +3303,14 @@ function RequirementRow({ req, resources, onChange, onRemove, canRemove }) {
       )}
 
       <div style={{ display: "flex", justifyContent: "flex-end" }}>
-        {canRemove && <button onClick={onRemove} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove route</button>}
+        {canRemove && <button onClick={onRemove} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("removeRoute")}</button>}
       </div>
     </div>
   );
 }
 
 function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onCommit, onLogScr }) {
+  const { t } = useLanguage();
   const [requirements, setRequirements] = useState([emptyRequirement()]);
   const [results, setResults] = useState(null);
   const [scrRole, setScrRole] = useState("destination");
@@ -3324,21 +3346,21 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 680, maxWidth: "94vw", maxHeight: "88vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Scheduling engine</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("schedulingEngineTitle")}</div>
 
         {!results && (
           <>
             <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 14 }}>
-              Define the routes you need covered. The engine fills in aircraft automatically — avoiding double-booking and respecting maintenance downtime — and spreads the load evenly across whatever's eligible. It's a greedy fill processed in date order, not a global optimizer: it won't rearrange an earlier assignment to make a later requirement fit better.
+              {t("schedulingEngineDescription")}
             </div>
             {requirements.map(req => (
               <RequirementRow key={req.id} req={req} resources={resources} onChange={patch => updateReq(req.id, patch)}
                 onRemove={() => setRequirements(rs => rs.filter(r => r.id !== req.id))} canRemove={requirements.length > 1} />
             ))}
-            <button onClick={() => setRequirements(rs => [...rs, emptyRequirement()])} style={{ ...miniBtn, marginBottom: 14 }}>+ Add another route</button>
+            <button onClick={() => setRequirements(rs => [...rs, emptyRequirement()])} style={{ ...miniBtn, marginBottom: 14 }}>{t("addAnotherRoute")}</button>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={generate} disabled={!canGenerate} style={{ ...miniBtn, background: canGenerate ? GRADIENT_PRIMARY : C.faint, boxShadow: canGenerate ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: canGenerate ? C.amber : C.faint, fontWeight: 600 }}>Generate schedule</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+              <button onClick={generate} disabled={!canGenerate} style={{ ...miniBtn, background: canGenerate ? GRADIENT_PRIMARY : C.faint, boxShadow: canGenerate ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: canGenerate ? C.amber : C.faint, fontWeight: 600 }}>{t("generateSchedule")}</button>
             </div>
           </>
         )}
@@ -3348,7 +3370,7 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 340, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Flight</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Aircraft</th><th style={{ padding: "6px 8px" }}>Status</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("thDate")}</th><th style={{ padding: "6px 8px" }}>{t("thFlight")}</th><th style={{ padding: "6px 8px" }}>{t("thRoute")}</th><th style={{ padding: "6px 8px" }}>{t("thAircraft")}</th><th style={{ padding: "6px 8px" }}>{t("thStatus")}</th>
                 </tr></thead>
                 <tbody>
                   {results.map((r, i) => (
@@ -3359,7 +3381,7 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
                       <td style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 11 }}>{r.origin}→{r.destination} {r.depTime}–{r.arrTime}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.resourceCode || "—"}</td>
                       <td style={{ padding: "6px 8px" }}>
-                        <Badge color={r.status === "ok" ? C.green : C.red}>{r.status === "ok" ? "ASSIGNED" : "UNASSIGNED"}</Badge>
+                        <Badge color={r.status === "ok" ? C.green : C.red}>{r.status === "ok" ? t("statusAssigned") : t("statusUnassigned")}</Badge>
                         {r.detail && <div style={{ fontSize: 10, color: C.faint, marginTop: 2 }}>{r.detail}</div>}
                       </td>
                     </tr>
@@ -3368,9 +3390,10 @@ function SchedulingEngineModal({ resources, flights, isGrounded, onClose, onComm
               </table>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} assignable{unassignedCount > 0 ? `, ${unassignedCount} couldn't be assigned` : ""}</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("assignableSummary", okCount, unassignedCount)}</span>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button onClick={() => setResults(null)} style={miniBtn}>Back</button>
+                <button onClick={() => setResults(null)} style={miniBtn}>{t("back")}</button>
+                {/* Season + Arrival/Departure + Generate SCR feed the slot-request message — left in English per instruction. */}
                 <FieldSm label="Season">
                   <input value={scrSeason} onChange={e => setScrSeason(e.target.value.toUpperCase())} placeholder="e.g. W26" title="Auto-set from the generated dates — override if this rotation should be filed under the other season" style={{ ...inputStyle, width: 56, padding: "6px 6px", textAlign: "center" }} />
                 </FieldSm>
@@ -3412,6 +3435,7 @@ const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 // ---------- rotation-template generator ----------
 function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
+  const { t } = useLanguage();
   const [pattern, setPattern] = useState({
     origin: "LGW", destination: "DBV", resourceId: resources[0].id, capacity: resources[0].capacity,
     daysOfWeek: [5], startDate: iso(addDays(today, 7)), endDate: iso(addDays(today, 70)),
@@ -3476,22 +3500,22 @@ function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 560, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Generate rotation</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("rotationGenTitle")}</div>
 
         {!preview && (
           <>
-            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Define the weekly pattern once — every matching date previews here before anything is written.</div>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("rotationGenDescription")}</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Origin"><input value={pattern.origin} onChange={e => setPattern({ ...pattern, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-                <FieldSm label="Destination"><input value={pattern.destination} onChange={e => setPattern({ ...pattern, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldOrigin")}><input value={pattern.origin} onChange={e => setPattern({ ...pattern, origin: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldDestination")}><input value={pattern.destination} onChange={e => setPattern({ ...pattern, destination: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
               </div>
-              <FieldSm label="Aircraft">
+              <FieldSm label={t("fieldAircraft")}>
                 <select value={pattern.resourceId} onChange={e => { const r = resources.find(x => x.id === e.target.value); setPattern({ ...pattern, resourceId: e.target.value, capacity: r.capacity }); }} style={inputStyle}>
                   {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.capacity} seats</option>)}
                 </select>
               </FieldSm>
-              <FieldSm label="Days of week">
+              <FieldSm label={t("dateModeDaysOfWeek")}>
                 <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                   {DOW.map((d, i) => (
                     <button key={i} onClick={() => toggleDay(i)} style={{
@@ -3504,63 +3528,63 @@ function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
                 </div>
               </FieldSm>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Start date"><input type="date" value={pattern.startDate} onChange={e => setPattern({ ...pattern, startDate: e.target.value })} style={inputStyle} /></FieldSm>
-                <FieldSm label="End date"><input type="date" value={pattern.endDate} onChange={e => setPattern({ ...pattern, endDate: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldStartDate")}><input type="date" value={pattern.startDate} onChange={e => setPattern({ ...pattern, startDate: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldEndDate")}><input type="date" value={pattern.endDate} onChange={e => setPattern({ ...pattern, endDate: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
-              <FieldSm label="Capacity"><input type="number" value={pattern.capacity} onChange={e => setPattern({ ...pattern, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldCapacity")}><input type="number" value={pattern.capacity} onChange={e => setPattern({ ...pattern, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
 
-              <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginTop: 4 }}>Outbound leg — {pattern.origin}→{pattern.destination}</div>
+              <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginTop: 4 }}>{t("outboundLegHeader", pattern.origin, pattern.destination)}</div>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                <FieldSm label="Flight number"><input value={pattern.outboundRef} onChange={e => setPattern({ ...pattern, outboundRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
-                <FieldSm label="Departure (UTC)"><input type="time" value={pattern.outboundDep} onChange={e => setPattern({ ...pattern, outboundDep: e.target.value })} style={inputStyle} /></FieldSm>
-                <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.outboundArr} onChange={e => setPattern({ ...pattern, outboundArr: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldFlightNumber")}><input value={pattern.outboundRef} onChange={e => setPattern({ ...pattern, outboundRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldDepartureUtc")}><input type="time" value={pattern.outboundDep} onChange={e => setPattern({ ...pattern, outboundDep: e.target.value })} style={inputStyle} /></FieldSm>
+                <FieldSm label={t("fieldArrivalUtc")}><input type="time" value={pattern.outboundArr} onChange={e => setPattern({ ...pattern, outboundArr: e.target.value })} style={inputStyle} /></FieldSm>
               </div>
 
               <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, cursor: "pointer" }}>
                 <input type="checkbox" checked={pattern.includeReturn} onChange={e => setPattern({ ...pattern, includeReturn: e.target.checked })} />
-                <span style={{ fontSize: 12.5 }}>Also generate the return leg</span>
+                <span style={{ fontSize: 12.5 }}>{t("alsoGenerateReturn")}</span>
               </label>
               {pattern.includeReturn && (
                 <>
-                  <div style={{ fontSize: 11, color: C.faint, fontWeight: 600 }}>Return leg</div>
-                  <div style={{ fontSize: 10, color: C.faint, marginTop: -6 }}>Doesn't have to go back the way it came — e.g. CIT→VKO out, VKO→ALA back. Leave blank to default to the reverse of the outbound route.</div>
+                  <div style={{ fontSize: 11, color: C.faint, fontWeight: 600 }}>{t("returnLegHeader")}</div>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -6 }}>{t("returnLegNote")}</div>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <FieldSm label="Origin"><input value={pattern.returnOrigin} onChange={e => setPattern({ ...pattern, returnOrigin: e.target.value.toUpperCase() })} placeholder={pattern.destination} style={inputStyle} /></FieldSm>
-                    <FieldSm label="Destination"><input value={pattern.returnDestination} onChange={e => setPattern({ ...pattern, returnDestination: e.target.value.toUpperCase() })} placeholder={pattern.origin} style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldOrigin")}><input value={pattern.returnOrigin} onChange={e => setPattern({ ...pattern, returnOrigin: e.target.value.toUpperCase() })} placeholder={pattern.destination} style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldDestination")}><input value={pattern.returnDestination} onChange={e => setPattern({ ...pattern, returnDestination: e.target.value.toUpperCase() })} placeholder={pattern.origin} style={inputStyle} /></FieldSm>
                   </div>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <FieldSm label="Flight number"><input value={pattern.returnRef} onChange={e => setPattern({ ...pattern, returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
-                    <FieldSm label="Return after (days)"><input type="number" min={0} value={pattern.returnDayOffset} onChange={e => setPattern({ ...pattern, returnDayOffset: Math.max(0, +e.target.value) })} style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldFlightNumber")}><input value={pattern.returnRef} onChange={e => setPattern({ ...pattern, returnRef: e.target.value.toUpperCase() })} placeholder="auto" style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldReturnAfterDays")}><input type="number" min={0} value={pattern.returnDayOffset} onChange={e => setPattern({ ...pattern, returnDayOffset: Math.max(0, +e.target.value) })} style={inputStyle} /></FieldSm>
                   </div>
-                  <div style={{ fontSize: 10, color: C.faint, marginTop: -4 }}>0 = same day (typical out-and-back turnaround). Use 1+ for layovers — e.g. 1 means the aircraft returns the day after each outbound date.</div>
+                  <div style={{ fontSize: 10, color: C.faint, marginTop: -4 }}>{t("returnOffsetNote")}</div>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <FieldSm label="Departure (UTC)"><input type="time" value={pattern.returnDep} onChange={e => setPattern({ ...pattern, returnDep: e.target.value })} style={inputStyle} /></FieldSm>
-                    <FieldSm label="Arrival (UTC)"><input type="time" value={pattern.returnArr} onChange={e => setPattern({ ...pattern, returnArr: e.target.value })} style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldDepartureUtc")}><input type="time" value={pattern.returnDep} onChange={e => setPattern({ ...pattern, returnDep: e.target.value })} style={inputStyle} /></FieldSm>
+                    <FieldSm label={t("fieldArrivalUtc")}><input type="time" value={pattern.returnArr} onChange={e => setPattern({ ...pattern, returnArr: e.target.value })} style={inputStyle} /></FieldSm>
                   </div>
                 </>
               )}
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={generate} disabled={pattern.daysOfWeek.length === 0} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview dates</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+              <button onClick={generate} disabled={pattern.daysOfWeek.length === 0} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("previewDates")}</button>
             </div>
           </>
         )}
 
         {preview && !output && (
           <>
-            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Review, then generate the slot request before anything is written to the schedule.</div>
+            <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("reviewSlotRequestNote")}</div>
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Leg</th><th style={{ padding: "6px 8px" }}>Flight</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Status</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("thDate")}</th><th style={{ padding: "6px 8px" }}>{t("thLeg")}</th><th style={{ padding: "6px 8px" }}>{t("thFlight")}</th><th style={{ padding: "6px 8px" }}>{t("thRoute")}</th><th style={{ padding: "6px 8px" }}>{t("thStatus")}</th>
                 </tr></thead>
                 <tbody>
                   {preview.map((r, i) => (
                     <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                       <td style={{ padding: "6px 8px" }}><input type="checkbox" checked={r.include} onChange={e => setPreview(rs => rs.map((x, xi) => xi === i ? { ...x, include: e.target.checked } : x))} /></td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO }}>{iso(r.date)} <span style={{ color: C.faint }}>{DOW[r.date.getUTCDay()]}</span></td>
-                      <td style={{ padding: "6px 8px", color: C.muted }}>{r.leg}</td>
+                      <td style={{ padding: "6px 8px", color: C.muted }}>{r.leg === "Outbound" ? t("legOutbound") : t("legReturn")}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO }}>{r.ref}</td>
                       <td style={{ padding: "6px 8px", fontFamily: MONO, fontSize: 11 }}>{r.origin}→{r.destination} {r.depTime}–{r.arrTime}</td>
                       <td style={{ padding: "6px 8px" }}><Badge color={statusColor[r.status]}>{r.status.toUpperCase()}</Badge>{r.detail && <div style={{ fontSize: 10, color: C.faint, marginTop: 2 }}>{r.detail}</div>}</td>
@@ -3570,9 +3594,10 @@ function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
               </table>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} of {preview.length} rows selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("rowsSelected", okCount, preview.length)}</span>
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button onClick={() => setPreview(null)} style={miniBtn}>Back</button>
+                <button onClick={() => setPreview(null)} style={miniBtn}>{t("back")}</button>
+                {/* Arrival/Departure + Generate SCR feed the slot-request message — left in English per instruction. */}
                 <button onClick={() => setScrRole("destination")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "destination" ? C.amber : "transparent", color: scrRole === "destination" ? ON_ACCENT : C.text, borderColor: scrRole === "destination" ? C.amber : C.border }}>Arrival</button>
                 <button onClick={() => setScrRole("origin")} style={{ ...miniBtn, padding: "6px 10px", fontSize: 11, background: scrRole === "origin" ? C.amber : "transparent", color: scrRole === "origin" ? ON_ACCENT : C.text, borderColor: scrRole === "origin" ? C.amber : C.border }}>Departure</button>
                 <button onClick={generateSCR} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, boxShadow: okCount ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Generate SCR</button>
@@ -3609,6 +3634,7 @@ function RotationGenModal({ resources, flights, onClose, onCommit, onLogScr }) {
 // ---------- bulk retime (whole season or a filtered subset) ----------
 // ---------- bulk delete ----------
 function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) {
+  const { t } = useLanguage();
   const [filter, setFilter] = useState({ from: iso(today), to: iso(addDays(today, 180)), resourceId: "all", originContains: "", destContains: "" });
   const [matches, setMatches] = useState(null);
   const [excluded, setExcluded] = useState(new Set());
@@ -3630,28 +3656,28 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk delete flights</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Filter to the flights you want gone, review exactly what's affected, then commit. This can't be undone.</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkDeleteTitle")}</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("bulkDeleteDescription")}</div>
 
         {!matches && (
           <>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-              <FieldSm label="From"><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
-              <FieldSm label="To"><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldFrom")}><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldTo")}><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-              <FieldSm label="Aircraft">
+              <FieldSm label={t("fieldAircraft")}>
                 <select value={filter.resourceId} onChange={e => setFilter({ ...filter, resourceId: e.target.value })} style={inputStyle}>
-                  <option value="all">All aircraft</option>
+                  <option value="all">{t("allAircraft")}</option>
                   {resources.map(r => <option key={r.id} value={r.id}>{r.code}</option>)}
                 </select>
               </FieldSm>
-              <FieldSm label="Origin contains"><input value={filter.originContains} onChange={e => setFilter({ ...filter, originContains: e.target.value })} style={inputStyle} /></FieldSm>
-              <FieldSm label="Dest. contains"><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldOriginContains")}><input value={filter.originContains} onChange={e => setFilter({ ...filter, originContains: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldDestContains")}><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
             </div>
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={preview} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+              <button onClick={preview} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("preview")}</button>
             </div>
           </>
         )}
@@ -3661,7 +3687,7 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Ref</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Date</th><th style={{ padding: "6px 8px" }}>Active allotments</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("thRef")}</th><th style={{ padding: "6px 8px" }}>{t("thRoute")}</th><th style={{ padding: "6px 8px" }}>{t("thDate")}</th><th style={{ padding: "6px 8px" }}>{t("thActiveAllotments")}</th>
                 </tr></thead>
                 <tbody>
                   {matches.map(f => {
@@ -3676,18 +3702,18 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
                       </tr>
                     );
                   })}
-                  {matches.length === 0 && <tr><td colSpan={5} style={{ padding: 12, textAlign: "center", color: C.faint }}>No flights matched that filter.</td></tr>}
+                  {matches.length === 0 && <tr><td colSpan={5} style={{ padding: 12, textAlign: "center", color: C.faint }}>{t("noFlightsMatchedFilter")}</td></tr>}
                 </tbody>
               </table>
             </div>
             {activeAllotmentCount > 0 && (
-              <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>{activeAllotmentCount} active allotment(s) across the selected flights will be deleted too.</div>
+              <div style={{ fontSize: 12, color: C.red, marginBottom: 10 }}>{t("activeAllotmentsWillBeDeleted", activeAllotmentCount)}</div>
             )}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{included.length} of {matches.length} flights selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("flightsOfSelected", included.length, matches.length)}</span>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setMatches(null)} style={miniBtn}>Back</button>
-                <button onClick={() => onCommit(included.map(f => f.id))} disabled={included.length === 0} style={{ ...miniBtn, background: included.length ? C.red : C.faint, color: ON_ACCENT, borderColor: included.length ? C.red : C.faint, fontWeight: 600 }}>Delete {included.length}</button>
+                <button onClick={() => setMatches(null)} style={miniBtn}>{t("back")}</button>
+                <button onClick={() => onCommit(included.map(f => f.id))} disabled={included.length === 0} style={{ ...miniBtn, background: included.length ? C.red : C.faint, color: ON_ACCENT, borderColor: included.length ? C.red : C.faint, fontWeight: 600 }}>{t("deleteCountBtn", included.length)}</button>
               </div>
             </div>
           </>
@@ -3698,6 +3724,7 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
 }
 
 function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
+  const { t } = useLanguage();
   const [filter, setFilter] = useState({ from: iso(today), to: iso(addDays(today, 180)), resourceId: "all", originContains: "", destContains: "" });
   const [change, setChange] = useState({ dayShift: 0, timeMode: "shift", minuteShift: 60, newDepTime: "" });
   const [matches, setMatches] = useState(null);
@@ -3728,48 +3755,48 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk retime</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>Shift dates and/or times across a whole season (or any filtered set) in one go. Nothing changes until you commit below.</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkRetimeTitle")}</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("bulkRetimeDescription")}</div>
 
         {!matches && (
           <>
-            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>Which flights</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>{t("whichFlights")}</div>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-              <FieldSm label="From"><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
-              <FieldSm label="To"><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
-              <div style={{ display: "flex", alignItems: "flex-end" }}><button onClick={useCurrentSeason} style={miniBtn}>This season ({iataSeasonFor(today)})</button></div>
+              <FieldSm label={t("fieldFrom")}><input type="date" value={filter.from} onChange={e => setFilter({ ...filter, from: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldTo")}><input type="date" value={filter.to} onChange={e => setFilter({ ...filter, to: e.target.value })} style={inputStyle} /></FieldSm>
+              <div style={{ display: "flex", alignItems: "flex-end" }}><button onClick={useCurrentSeason} style={miniBtn}>{t("thisSeason", iataSeasonFor(today))}</button></div>
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-              <FieldSm label="Aircraft">
+              <FieldSm label={t("fieldAircraft")}>
                 <select value={filter.resourceId} onChange={e => setFilter({ ...filter, resourceId: e.target.value })} style={inputStyle}>
-                  <option value="all">All aircraft</option>
+                  <option value="all">{t("allAircraft")}</option>
                   {resources.map(r => <option key={r.id} value={r.id}>{r.code}</option>)}
                 </select>
               </FieldSm>
-              <FieldSm label="Origin contains"><input value={filter.originContains} onChange={e => setFilter({ ...filter, originContains: e.target.value })} style={inputStyle} /></FieldSm>
-              <FieldSm label="Dest. contains"><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldOriginContains")}><input value={filter.originContains} onChange={e => setFilter({ ...filter, originContains: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldDestContains")}><input value={filter.destContains} onChange={e => setFilter({ ...filter, destContains: e.target.value })} style={inputStyle} /></FieldSm>
             </div>
 
-            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>What changes</div>
+            <div style={{ fontSize: 11, color: C.faint, fontWeight: 600, marginBottom: 6 }}>{t("whatChanges")}</div>
             <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-              <FieldSm label="Shift date by (days)"><input type="number" value={change.dayShift} onChange={e => setChange({ ...change, dayShift: +e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label={t("fieldShiftDateByDays")}><input type="number" value={change.dayShift} onChange={e => setChange({ ...change, dayShift: +e.target.value })} style={inputStyle} /></FieldSm>
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 4, alignItems: "flex-end" }}>
-              <FieldSm label="Time change">
+              <FieldSm label={t("fieldTimeChange")}>
                 <select value={change.timeMode} onChange={e => setChange({ ...change, timeMode: e.target.value })} style={inputStyle}>
-                  <option value="none">No time change</option>
-                  <option value="shift">Shift by minutes (e.g. clock change)</option>
-                  <option value="set">Set new departure time</option>
+                  <option value="none">{t("timeChangeNone")}</option>
+                  <option value="shift">{t("timeChangeShift")}</option>
+                  <option value="set">{t("timeChangeSet")}</option>
                 </select>
               </FieldSm>
-              {change.timeMode === "shift" && <FieldSm label="Minutes (+/-)"><input type="number" value={change.minuteShift} onChange={e => setChange({ ...change, minuteShift: +e.target.value })} style={inputStyle} /></FieldSm>}
-              {change.timeMode === "set" && <FieldSm label="New departure (UTC)"><input type="time" value={change.newDepTime} onChange={e => setChange({ ...change, newDepTime: e.target.value })} style={inputStyle} /></FieldSm>}
+              {change.timeMode === "shift" && <FieldSm label={t("fieldMinutesShift")}><input type="number" value={change.minuteShift} onChange={e => setChange({ ...change, minuteShift: +e.target.value })} style={inputStyle} /></FieldSm>}
+              {change.timeMode === "set" && <FieldSm label={t("fieldNewDepartureUtc")}><input type="time" value={change.newDepTime} onChange={e => setChange({ ...change, newDepTime: e.target.value })} style={inputStyle} /></FieldSm>}
             </div>
-            <div style={{ fontSize: 10, color: C.faint, marginBottom: 12 }}>Arrival time moves with departure so each flight's duration stays the same.</div>
+            <div style={{ fontSize: 10, color: C.faint, marginBottom: 12 }}>{t("arrivalMovesWithDeparture")}</div>
 
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={preview} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+              <button onClick={preview} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("preview")}</button>
             </div>
           </>
         )}
@@ -3779,7 +3806,7 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12, maxHeight: 320, overflowY: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left", position: "sticky", top: 0 }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Ref</th><th style={{ padding: "6px 8px" }}>Route</th><th style={{ padding: "6px 8px" }}>Current</th><th style={{ padding: "6px 8px" }}>New</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("thRef")}</th><th style={{ padding: "6px 8px" }}>{t("thRoute")}</th><th style={{ padding: "6px 8px" }}>{t("thCurrent")}</th><th style={{ padding: "6px 8px" }}>{t("thNew")}</th>
                 </tr></thead>
                 <tbody>
                   {matches.map(f => {
@@ -3805,15 +3832,15 @@ function BulkRetimeModal({ resources, flights, onClose, onCommit }) {
                       </tr>
                     );
                   })}
-                  {matches.length === 0 && <tr><td colSpan={5} style={{ padding: 12, textAlign: "center", color: C.faint }}>No flights matched that filter.</td></tr>}
+                  {matches.length === 0 && <tr><td colSpan={5} style={{ padding: 12, textAlign: "center", color: C.faint }}>{t("noFlightsMatchedFilter")}</td></tr>}
                 </tbody>
               </table>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{included.length} of {matches.length} flights selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("flightsOfSelected", included.length, matches.length)}</span>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setMatches(null)} style={miniBtn}>Back</button>
-                <button onClick={() => onCommit(included, change)} disabled={included.length === 0} style={{ ...miniBtn, background: included.length ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: included.length ? C.amber : C.faint, fontWeight: 600 }}>Apply to {included.length}</button>
+                <button onClick={() => setMatches(null)} style={miniBtn}>{t("back")}</button>
+                <button onClick={() => onCommit(included, change)} disabled={included.length === 0} style={{ ...miniBtn, background: included.length ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: included.length ? C.amber : C.faint, fontWeight: 600 }}>{t("applyToCountBtn", included.length)}</button>
               </div>
             </div>
           </>
@@ -4333,14 +4360,18 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole, onLogScr
 }
 
 // ---------- reports: schedule / revenue / allotments / utilization / issues / SCR archive, as a PDF ----------
-const REPORT_SECTIONS = [
-  ["schedule", "Schedule (flights)"], ["revenue", "Revenue"], ["allotments", "Tour operator allotments"],
-  ["utilization", "Fleet utilization"], ["issues", "Schedule issues"], ["scr", "SCR message archive"],
-];
+const REPORT_SECTION_KEYS = ["schedule", "revenue", "allotments", "utilization", "issues", "scr"];
+function reportSectionsFor(t) {
+  return [
+    ["schedule", t("reportSectionSchedule")], ["revenue", t("reportSectionRevenue")], ["allotments", t("reportSectionAllotments")],
+    ["utilization", t("reportSectionUtilization")], ["issues", t("reportSectionIssues")], ["scr", t("reportSectionScrArchive")],
+  ];
+}
 function ReportsModal({ onClose, pushToast }) {
+  const { t } = useLanguage();
   const [startDate, setStartDate] = useState(iso(today));
   const [endDate, setEndDate] = useState(iso(addDays(today, 30)));
-  const [sections, setSections] = useState(() => new Set(REPORT_SECTIONS.map(([k]) => k)));
+  const [sections, setSections] = useState(() => new Set(REPORT_SECTION_KEYS));
   const [generating, setGenerating] = useState(false);
   const [lastPdf, setLastPdf] = useState(null); // { base64, filename } — kept so Email can reuse it without regenerating
   const [emailTo, setEmailTo] = useState("");
@@ -4369,7 +4400,7 @@ function ReportsModal({ onClose, pushToast }) {
   }
 
   async function handleDownload() {
-    if (sections.size === 0) { pushToast("Pick at least one section first", "warn"); return; }
+    if (sections.size === 0) { pushToast(t("pickSectionFirst"), "warn"); return; }
     setGenerating(true);
     try {
       const { blob, base64, filename } = await callGenerate();
@@ -4386,8 +4417,8 @@ function ReportsModal({ onClose, pushToast }) {
   }
 
   async function handleEmail() {
-    if (!emailTo.trim()) { pushToast("Enter a recipient email first", "warn"); return; }
-    if (sections.size === 0) { pushToast("Pick at least one section first", "warn"); return; }
+    if (!emailTo.trim()) { pushToast(t("enterRecipientFirst"), "warn"); return; }
+    if (sections.size === 0) { pushToast(t("pickSectionFirst"), "warn"); return; }
     setSending(true);
     try {
       const pdf = lastPdf || await callGenerate().then(r => { setLastPdf({ base64: r.base64, filename: r.filename }); return r; });
@@ -4402,7 +4433,7 @@ function ReportsModal({ onClose, pushToast }) {
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || `Send failed (${res.status})`);
-      pushToast(`Report emailed to ${emailTo.trim()}`, "ok");
+      pushToast(t("reportEmailedTo", emailTo.trim()), "ok");
     } catch (e) {
       pushToast(e.message, "warn");
     } finally {
@@ -4413,17 +4444,17 @@ function ReportsModal({ onClose, pushToast }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 22, width: 440, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>Reports</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 16 }}>Pick a date range and whichever sections you need — one combined PDF, download or email it directly.</div>
+        <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{t("reportsTitle")}</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 16 }}>{t("reportsDescription")}</div>
 
         <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-          <FieldSm label="From"><input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={inputStyle} /></FieldSm>
-          <FieldSm label="To"><input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldFrom")}><input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldTo")}><input type="date" value={endDate} min={startDate} onChange={e => setEndDate(e.target.value)} style={inputStyle} /></FieldSm>
         </div>
 
-        <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Sections</div>
+        <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>{t("sectionsLabel")}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-          {REPORT_SECTIONS.map(([key, label]) => (
+          {reportSectionsFor(t).map(([key, label]) => (
             <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
               <input type="checkbox" checked={sections.has(key)} onChange={() => toggleSection(key)} />
               {label}
@@ -4432,21 +4463,21 @@ function ReportsModal({ onClose, pushToast }) {
         </div>
 
         <button onClick={handleDownload} disabled={generating} style={{ ...miniBtn, width: "100%", background: generating ? C.faint : GRADIENT_PRIMARY, boxShadow: generating ? "none" : GLOW_PRIMARY, color: ON_ACCENT, borderColor: generating ? C.faint : C.amber, fontWeight: 600, marginBottom: 14 }}>
-          {generating ? "Generating…" : "Download PDF"}
+          {generating ? t("generating") : t("downloadPdf")}
         </button>
 
         <div style={{ borderTop: `1px solid ${C.borderSoft}`, paddingTop: 14 }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>Or email it directly</div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, marginBottom: 6 }}>{t("orEmailDirectly")}</div>
           <div style={{ display: "flex", gap: 6 }}>
             <input value={emailTo} onChange={e => setEmailTo(e.target.value)} placeholder="coordinator@example.com" style={{ ...inputStyle, flex: 1 }} />
             <button onClick={handleEmail} disabled={sending} style={{ ...miniBtn, background: sending ? C.faint : C.green, color: "#fff", borderColor: sending ? C.faint : C.green, fontWeight: 600, whiteSpace: "nowrap" }}>
-              {sending ? "Sending…" : "Send"}
+              {sending ? t("sending") : t("sendBtn")}
             </button>
           </div>
         </div>
 
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Close</button>
+          <button onClick={onClose} style={miniBtn}>{t("close")}</button>
         </div>
       </div>
     </div>
@@ -4454,6 +4485,7 @@ function ReportsModal({ onClose, pushToast }) {
 }
 
 function OperatorsPanel({ operators, setOperators, flights, allotments, perms, onAddOperator, onBulkImportOperators, onDeleteOperator, onAddAllotment, onReleaseAllotments }) {
+  const { t } = useLanguage();
   const [expanded, setExpanded] = useState(null); // { id, panel: "seats" | "rates" | "release" }
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddOperator, setShowAddOperator] = useState(false);
@@ -4482,14 +4514,14 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
     <div style={{ padding: 16 }}>
       {perms.editContracts && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginBottom: 10 }}>
-          <button onClick={() => setShowBulkOperators(true)} style={miniBtn}>Bulk import operators</button>
-          <button onClick={() => setShowAddOperator(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New operator</button>
+          <button onClick={() => setShowBulkOperators(true)} style={miniBtn}>{t("bulkImportOperators")}</button>
+          <button onClick={() => setShowAddOperator(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("newOperator")}</button>
         </div>
       )}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
-            <th style={th}>Tour operator</th><th style={th}>Default rate</th><th style={th}>Allotment type</th><th style={th}>Status</th><th style={th}>Seats</th><th style={th}>Value</th><th style={th}></th>
+            <th style={th}>{t("thOperator")}</th><th style={th}>{t("thDefaultRate")}</th><th style={th}>{t("thAllotmentType")}</th><th style={th}>{t("thStatus")}</th><th style={th}>{t("thSeats")}</th><th style={th}>{t("thValue")}</th><th style={th}></th>
           </tr>
         </thead>
         <tbody>
@@ -4509,25 +4541,25 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   <td style={td}>
                     {perms.editContracts
                       ? <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                          <input type="number" value={o.defaultRate ?? ""} placeholder="none" onChange={e => updateDefaultRate(o.id, e.target.value === "" ? null : +e.target.value)} style={{ ...inputStyle, width: 80 }} />
-                          {o.defaultRate != null && <button onClick={() => updateDefaultRate(o.id, null)} title="Clear default rate — every allotment for this operator will then need its own explicit price" style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red }}>×</button>}
+                          <input type="number" value={o.defaultRate ?? ""} placeholder={t("none")} onChange={e => updateDefaultRate(o.id, e.target.value === "" ? null : +e.target.value)} style={{ ...inputStyle, width: 80 }} />
+                          {o.defaultRate != null && <button onClick={() => updateDefaultRate(o.id, null)} title={t("clearDefaultRateTitle")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red }}>×</button>}
                         </div>
-                      : <span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>none</span>}</span>}
+                      : <span style={{ fontFamily: MONO }}>{o.defaultRate != null ? `$${o.defaultRate}` : <span style={{ color: C.faint }}>{t("none")}</span>}</span>}
                   </td>
-                  <td style={td}><Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType.toUpperCase()}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge></td>
+                  <td style={td}><Badge color={o.allotmentType === "option" ? C.amber : C.cyan}>{o.allotmentType === "option" ? t("allotmentTypeOption") : t("allotmentTypeFirm")}{o.optionReleaseDays ? ` · ${o.optionReleaseDays}d` : ""}</Badge></td>
                   <td style={td}><Badge color={o.status === "active" ? C.green : C.red}>{o.status.replace("_", " ").toUpperCase()}</Badge></td>
                   <td style={{ ...td, fontFamily: MONO }}>{totalSeats}</td>
                   <td style={{ ...td, fontFamily: MONO, color: C.green, fontWeight: 600 }}>${totalValue.toLocaleString()}</td>
                   <td style={td}>
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                      <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? "Hide" : "Allocate seats"}</button>
-                      <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? "Hide" : "View seats"}</button>
-                      {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? "Hide" : "Release seats"}</button>}
-                      {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>}
+                      <button onClick={() => toggle(o.id, "rates")} style={miniBtn}>{isRates ? t("hide") : t("allocateSeatsBtn")}</button>
+                      <button onClick={() => toggle(o.id, "seats")} style={miniBtn}>{isSeats ? t("hide") : t("viewSeatsBtn")}</button>
+                      {perms.editAllotments && opAllotments.length > 0 && <button onClick={() => toggle(o.id, "release")} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{isRelease ? t("hide") : t("releaseSeatsRowBtn")}</button>}
+                      {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
-                          <button onClick={() => { onDeleteOperator(o.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm</button>
-                          <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
+                          <button onClick={() => { onDeleteOperator(o.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>{t("confirm")}</button>
+                          <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>{t("cancel")}</button>
                         </>
                       )}
                     </div>
@@ -4536,14 +4568,14 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                 {isRates && (
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-                      Allocate seats directly against specific flights for {o.name} — search by flight number or route (e.g. "CIT-HRI"), pick one or several matching dates, set seats and price, then Add. This creates real allotments, the same ones the Schedule board and this operator's "View seats" below both show — editing a flight's allotment either place updates both. If {o.name} already has seats on a picked flight, this tops up that allocation at its existing price instead of the price typed below — allocated seats can never be reduced or repriced, only added to.
+                      {t("allocateSeatsExplain", o.name)}
                     </div>
                     {perms.editContracts && (
                       <div>
-                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder="Flight number or route (e.g. AD-AA)…" style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
+                        <input value={flightRateSearch} onChange={e => { setFlightRateSearch(e.target.value); setFlightRateSelected(new Set()); }} placeholder={t("flightRouteSearchPlaceholder")} style={{ ...inputStyle, width: 220, marginBottom: 6 }} />
                         {flightRateSearch.trim().length >= 2 && (
                           <div style={{ maxHeight: 160, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
-                            {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>No flights match "{flightRateSearch}".</div>}
+                            {flightMatches.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noFlightsMatchQuery", flightRateSearch)}</div>}
                             {flightMatches.map(f => (
                               <label key={f.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, cursor: "pointer", borderBottom: `1px solid ${C.borderSoft}` }}>
                                 <input type="checkbox" checked={flightRateSelected.has(f.id)} onChange={() => setFlightRateSelected(prev => { const next = new Set(prev); next.has(f.id) ? next.delete(f.id) : next.add(f.id); return next; })} />
@@ -4553,16 +4585,16 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                               </label>
                             ))}
                             {flightMatches.length > 0 && (
-                              <button onClick={() => setFlightRateSelected(new Set(flightMatches.map(f => f.id)))} style={{ ...miniBtn, margin: 6, fontSize: 10.5, padding: "3px 8px" }}>Select all {flightMatches.length}</button>
+                              <button onClick={() => setFlightRateSelected(new Set(flightMatches.map(f => f.id)))} style={{ ...miniBtn, margin: 6, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", flightMatches.length)}</button>
                             )}
                           </div>
                         )}
                         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                          <FieldSm label="Seats"><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
-                          <FieldSm label="Price / seat ($)"><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                          <FieldSm label={t("fieldSeats")}><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
+                          <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
                           <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
                             style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
-                            Add{flightRateSelected.size ? ` (${flightRateSelected.size})` : ""}
+                            {t("addCount", flightRateSelected.size)}
                           </button>
                         </div>
                       </div>
@@ -4573,11 +4605,11 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                       {Object.entries(byDest).map(([dest, n]) => <Badge key={dest} color={C.cyan} bg={C.cyanSoft}>{dest}: {n}</Badge>)}
-                      {Object.keys(byDest).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>No active allotments.</span>}
+                      {Object.keys(byDest).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>{t("noActiveAllotments2")}</span>}
                     </div>
-                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>All active allotments for {o.name} — one consolidated view instead of a separate tab per flight:</div>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("allActiveAllotmentsFor", o.name)}</div>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No active allotments.</div>}
+                      {opAllotments.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{t("noActiveAllotments2")}</div>}
                       {opAllotments.map(a => {
                         const fl = flights.find(f => f.id === a.flightId);
                         return <div key={a.id} style={{ display: "flex", gap: 14, fontSize: 12, fontFamily: MONO, color: C.text }}>
@@ -4595,10 +4627,10 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                   return (
                   <tr><td colSpan={7} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-                      Release unsold seats for {o.name} back to inventory — pick the flight(s), set how many seats to give back on each (the full amount by default, or less for a partial release), confirm, and those seats become available to allocate to anyone again. This is separate from the no-reduction rule above: it's a deliberate hand-back, not a quiet edit.
+                      {t("releaseExplain", o.name)}
                     </div>
                     <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 8 }}>
-                      {opAllotments.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>No active allotments to release.</div>}
+                      {opAllotments.length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noActiveAllotmentsToRelease")}</div>}
                       {opAllotments.map(a => {
                         const fl = flights.find(f => f.id === a.flightId);
                         const selected = releaseSelected.has(a.id);
@@ -4611,29 +4643,29 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, o
                             <span style={{ fontWeight: 700, cursor: "pointer" }} onClick={() => setReleaseSelected(prev => { const next = new Map(prev); selected ? next.delete(a.id) : next.set(a.id, a.seatsAllocated); return next; })}>{fl?.ref}</span>
                             <span style={{ color: C.muted }}>{iso(fl?.start)}</span>
                             <span style={{ color: C.muted }}>{fl?.origin}→{fl?.destination}</span>
-                            <span style={{ color: C.faint }}>of {a.seatsAllocated} @ ${a.pricePerSeat}</span>
+                            <span style={{ color: C.faint }}>{t("ofSeatsAt", a.seatsAllocated, a.pricePerSeat)}</span>
                             <input type="number" min={1} max={a.seatsAllocated} value={qty} disabled={!selected}
                               onChange={e => { const n = Math.min(a.seatsAllocated, Math.max(1, +e.target.value || 1)); setReleaseSelected(prev => new Map(prev).set(a.id, n)); }}
                               style={{ ...inputStyle, width: 52, padding: "2px 5px", marginLeft: "auto", opacity: selected ? 1 : 0.4 }} />
-                            <span style={{ color: C.faint }}>release</span>
+                            <span style={{ color: C.faint }}>{t("releaseWord")}</span>
                           </div>
                         );
                       })}
                     </div>
                     {opAllotments.length > 0 && (
                       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <button onClick={() => setReleaseSelected(new Map(opAllotments.map(a => [a.id, a.seatsAllocated])))} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>Select all {opAllotments.length}</button>
-                        {releaseSelected.size > 0 && <button onClick={() => { setReleaseSelected(new Map()); setConfirmRelease(false); }} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>Clear</button>}
-                        <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{releaseSelected.size > 0 ? `${releaseSeatTotal} seats across ${releaseSelected.size} flight(s)` : ""}</span>
+                        <button onClick={() => setReleaseSelected(new Map(opAllotments.map(a => [a.id, a.seatsAllocated])))} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("selectAllN", opAllotments.length)}</button>
+                        {releaseSelected.size > 0 && <button onClick={() => { setReleaseSelected(new Map()); setConfirmRelease(false); }} style={{ ...miniBtn, fontSize: 10.5, padding: "3px 8px" }}>{t("clear")}</button>}
+                        <span style={{ fontSize: 11, color: C.muted, marginLeft: "auto" }}>{releaseSelected.size > 0 ? t("releaseSummary", releaseSeatTotal, releaseSelected.size) : ""}</span>
                         {!confirmRelease ? (
                           <button disabled={releaseSelected.size === 0} onClick={() => setConfirmRelease(true)}
-                            style={{ ...miniBtn, color: releaseSelected.size ? C.red : C.faint, borderColor: releaseSelected.size ? C.red : C.faint }}>Release…</button>
+                            style={{ ...miniBtn, color: releaseSelected.size ? C.red : C.faint, borderColor: releaseSelected.size ? C.red : C.faint }}>{t("releaseEllipsis")}</button>
                         ) : (
                           <>
-                            <span style={{ fontSize: 11, color: C.red }}>Give back {releaseSeatTotal} seats for good?</span>
+                            <span style={{ fontSize: 11, color: C.red }}>{t("giveBackForGood", releaseSeatTotal)}</span>
                             <button onClick={() => { onReleaseAllotments([...releaseSelected.entries()].map(([id, qty]) => ({ id, qty }))); setReleaseSelected(new Map()); setConfirmRelease(false); }}
-                              style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>Confirm release</button>
-                            <button onClick={() => setConfirmRelease(false)} style={miniBtn}>Cancel</button>
+                              style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red, fontWeight: 600 }}>{t("confirmRelease2")}</button>
+                            <button onClick={() => setConfirmRelease(false)} style={miniBtn}>{t("cancel")}</button>
                           </>
                         )}
                       </div>
@@ -4656,39 +4688,40 @@ const td = { padding: "8px 10px" };
 
 // ---------- tour operator create / bulk import ----------
 function AddOperatorModal({ onClose, onCreate }) {
+  const { t } = useLanguage();
   const [form, setForm] = useState({ name: "", country: "", defaultRate: 100, ratesByDestination: {}, allotmentType: "fixed", optionReleaseDays: 14, status: "active" });
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 380, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>New tour operator</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("newTourOperator")}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <FieldSm label="Name"><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={inputStyle} /></FieldSm>
-          <FieldSm label="Country"><input value={form.country} onChange={e => setForm({ ...form, country: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldName")}><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldCountry")}><input value={form.country} onChange={e => setForm({ ...form, country: e.target.value })} style={inputStyle} /></FieldSm>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <FieldSm label="Default rate / seat ($)"><input type="number" value={form.defaultRate} onChange={e => setForm({ ...form, defaultRate: +e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="Allotment type">
+            <FieldSm label={t("fieldDefaultRatePerSeat")}><input type="number" value={form.defaultRate} onChange={e => setForm({ ...form, defaultRate: +e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("thAllotmentType")}>
               <select value={form.allotmentType} onChange={e => setForm({ ...form, allotmentType: e.target.value })} style={inputStyle}>
-                <option value="fixed">Fixed</option>
-                <option value="option">Option</option>
+                <option value="fixed">{t("fixed")}</option>
+                <option value="option">{t("option")}</option>
               </select>
             </FieldSm>
           </div>
           {form.allotmentType === "option" && (
-            <FieldSm label="Option release (days before)"><input type="number" value={form.optionReleaseDays} onChange={e => setForm({ ...form, optionReleaseDays: +e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("optionReleaseDaysBefore")}><input type="number" value={form.optionReleaseDays} onChange={e => setForm({ ...form, optionReleaseDays: +e.target.value })} style={inputStyle} /></FieldSm>
           )}
-          <FieldSm label="Status">
+          <FieldSm label={t("status")}>
             <select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} style={inputStyle}>
-              <option value="active">Active</option>
-              <option value="on_hold">On hold</option>
-              <option value="blacklisted">Blacklisted</option>
+              <option value="active">{t("active")}</option>
+              <option value="on_hold">{t("onHold")}</option>
+              <option value="blacklisted">{t("blacklisted")}</option>
             </select>
           </FieldSm>
-          <div style={{ fontSize: 10.5, color: C.faint }}>Per-destination rates can be added afterward from the "Rates" panel on this operator's row.</div>
+          <div style={{ fontSize: 10.5, color: C.faint }}>{t("perDestNote")}</div>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Cancel</button>
+          <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
           <button disabled={!form.name.trim()} onClick={() => onCreate({ ...form, optionReleaseDays: form.allotmentType === "option" ? form.optionReleaseDays : null })}
-            style={{ ...miniBtn, background: form.name.trim() ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: form.name.trim() ? C.amber : C.faint, fontWeight: 600 }}>Create</button>
+            style={{ ...miniBtn, background: form.name.trim() ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: form.name.trim() ? C.amber : C.faint, fontWeight: 600 }}>{t("create")}</button>
         </div>
       </div>
     </div>
@@ -4704,6 +4737,7 @@ STEPPE VOYAGES,KZ,,112,option,10,active
 STEPPE VOYAGES,KZ,ALA,120,,,`;
 
 function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
+  const { t } = useLanguage();
   const [raw, setRaw] = useState(SAMPLE_OPERATOR_PASTE);
   const [rows, setRows] = useState(null);
 
@@ -4747,14 +4781,14 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 640, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Bulk import tour operators</div>
-        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>One row per operator sets the default rate (leave destination blank); add one more row per operator for each destination-specific rate. Nothing is written until you commit below.</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkImportOperatorsTitle")}</div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>{t("bulkImportOperatorsExplain")}</div>
         {!rows && (
           <>
             <textarea value={raw} onChange={e => setRaw(e.target.value)} rows={7} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
-              <button onClick={onClose} style={miniBtn}>Cancel</button>
-              <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Preview</button>
+              <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+              <button onClick={parse} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("preview")}</button>
             </div>
           </>
         )}
@@ -4763,7 +4797,7 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", marginBottom: 12 }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ background: C.panel2, color: C.muted, textAlign: "left" }}>
-                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>Name</th><th style={{ padding: "6px 8px" }}>Country</th><th style={{ padding: "6px 8px" }}>Default</th><th style={{ padding: "6px 8px" }}>Dest. rates</th><th style={{ padding: "6px 8px" }}>Status</th>
+                  <th style={{ padding: "6px 8px" }}></th><th style={{ padding: "6px 8px" }}>{t("colName")}</th><th style={{ padding: "6px 8px" }}>{t("colCountry")}</th><th style={{ padding: "6px 8px" }}>{t("colDefault")}</th><th style={{ padding: "6px 8px" }}>{t("colDestRates")}</th><th style={{ padding: "6px 8px" }}>{t("status")}</th>
                 </tr></thead>
                 <tbody>
                   {rows.map((r, i) => (
@@ -4780,10 +4814,10 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
               </table>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11.5, color: C.muted }}>{okCount} of {rows.length} rows selected</span>
+              <span style={{ fontSize: 11.5, color: C.muted }}>{t("rowsSelected", okCount, rows.length)}</span>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setRows(null)} style={miniBtn}>Back</button>
-                <button onClick={() => onCommit(rows.filter(r => r.include))} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>Import {okCount}</button>
+                <button onClick={() => setRows(null)} style={miniBtn}>{t("back")}</button>
+                <button onClick={() => onCommit(rows.filter(r => r.include))} disabled={okCount === 0} style={{ ...miniBtn, background: okCount ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: okCount ? C.amber : C.faint, fontWeight: 600 }}>{t("importN", okCount)}</button>
               </div>
             </div>
           </>
@@ -4794,52 +4828,57 @@ function BulkImportOperatorsModal({ existingNames, onClose, onCommit }) {
 }
 
 // ---------- team / users (management only) ----------
-const ROLE_OPTIONS = [
-  ["commercial", "Commercial staff"],
-  ["tour_operator_liaison", "Tour operator liaison"],
-  ["ops_coordinator", "Schedule coordinator (ops)"],
-  ["management", "Charter dept management"],
-];
+const ROLE_LABEL_KEY = { ops_coordinator: "roleOpsCoordinator", commercial: "roleCommercial", tour_operator_liaison: "roleLiaison", management: "roleManagement" };
+function roleLabel(role, t) { return t(ROLE_LABEL_KEY[role] || "role"); }
+function roleOptionsFor(t) {
+  return [
+    ["commercial", t("roleCommercial")],
+    ["tour_operator_liaison", t("roleLiaison")],
+    ["ops_coordinator", t("roleOpsCoordinator")],
+    ["management", t("roleManagement")],
+  ];
+}
 
 function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDeleteUser, onResetPassword, pushToast }) {
+  const { t } = useLanguage();
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontSize: 12.5, color: C.muted }}>Roles here are what actually gate permissions everywhere else in the app — not a display label.</div>
-        <button onClick={() => setShowAdd(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ Add teammate</button>
+        <div style={{ fontSize: 12.5, color: C.muted }}>{t("rolesGateNote")}</div>
+        <button onClick={() => setShowAdd(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("addTeammate")}</button>
       </div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
           <tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
-            <th style={th}>Name</th><th style={th}>Email</th><th style={th}>Role</th><th style={th}></th>
+            <th style={th}>{t("thName")}</th><th style={th}>{t("thEmail")}</th><th style={th}>{t("thRole")}</th><th style={th}></th>
           </tr>
         </thead>
         <tbody>
           {profiles.map(p => (
             <tr key={p.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-              <td style={td}>{p.name}{p.id === currentUserId && <span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>(you)</span>}</td>
+              <td style={td}>{p.name}{p.id === currentUserId && <span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{t("youSuffix")}</span>}</td>
               <td style={{ ...td, fontFamily: MONO, fontSize: 12 }}>{p.email}</td>
               <td style={td}>
                 <select value={p.role} onChange={e => onUpdateRole(p.id, e.target.value)} disabled={p.id === currentUserId} style={{ ...inputStyle, width: 200 }}>
-                  {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  {roleOptionsFor(t).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
               </td>
               <td style={td}>
                 <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", alignItems: "center" }}>
                   <button onClick={async () => {
                     const tempPassword = await onResetPassword(p.id);
-                    if (tempPassword) pushToast(`New temp password for ${p.email}: ${tempPassword} (copy it now — this won't be shown again)`, "ok", true);
-                  }} style={{ ...miniBtn, fontSize: 10.5 }}>Reset password</button>
+                    if (tempPassword) pushToast(t("newTempPasswordToast", p.email, tempPassword), "ok", true);
+                  }} style={{ ...miniBtn, fontSize: 10.5 }}>{t("resetPasswordBtn")}</button>
                   {p.id === currentUserId
-                    ? <span style={{ fontSize: 10.5, color: C.faint }}>Ask another manager to change your own role</span>
+                    ? <span style={{ fontSize: 10.5, color: C.faint }}>{t("askAnotherManager")}</span>
                     : (confirmDeleteId === p.id
                         ? <>
-                            <button onClick={() => { onDeleteUser(p.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm delete</button>
-                            <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
+                            <button onClick={() => { onDeleteUser(p.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>{t("confirmDeleteBtn")}</button>
+                            <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>{t("cancel")}</button>
                           </>
-                        : <button onClick={() => setConfirmDeleteId(p.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Delete</button>)}
+                        : <button onClick={() => setConfirmDeleteId(p.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>)}
                 </div>
               </td>
             </tr>
@@ -4848,7 +4887,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
       </table>
       {showAdd && <AddUserModal onClose={() => setShowAdd(false)} onCreate={async draft => {
         const tempPassword = await onCreateUser(draft);
-        if (tempPassword) pushToast(`${draft.email} created — temp password: ${tempPassword} (copy it now — this won't be shown again)`, "ok", true);
+        if (tempPassword) pushToast(t("createdUserToast", draft.email, tempPassword), "ok", true);
         setShowAdd(false);
       }} />}
     </div>
@@ -4856,25 +4895,26 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
 }
 
 function AddUserModal({ onClose, onCreate }) {
+  const { t } = useLanguage();
   const [form, setForm] = useState({ name: "", email: "", role: "commercial" });
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 360, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Add a teammate</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("addTeammateTitle")}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <FieldSm label="Name"><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={inputStyle} /></FieldSm>
-          <FieldSm label="Email"><input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} style={inputStyle} /></FieldSm>
-          <FieldSm label="Role">
+          <FieldSm label={t("fieldName")}><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldEmail")}><input type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldRole")}>
             <select value={form.role} onChange={e => setForm({ ...form, role: e.target.value })} style={inputStyle}>
-              {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              {roleOptionsFor(t).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
           </FieldSm>
-          <div style={{ fontSize: 10.5, color: C.faint }}>Creates the login directly with a temporary password (no email needs to be configured) — you'll see it once after creating, to relay to them yourself.</div>
+          <div style={{ fontSize: 10.5, color: C.faint }}>{t("createLoginNote")}</div>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Cancel</button>
+          <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
           <button disabled={!form.email.trim()} onClick={() => onCreate(form)}
-            style={{ ...miniBtn, background: form.email.trim() ? C.amber : C.faint, color: ON_ACCENT, borderColor: form.email.trim() ? C.amber : C.faint, fontWeight: 600 }}>Create</button>
+            style={{ ...miniBtn, background: form.email.trim() ? C.amber : C.faint, color: ON_ACCENT, borderColor: form.email.trim() ? C.amber : C.faint, fontWeight: 600 }}>{t("create")}</button>
         </div>
       </div>
     </div>
@@ -4944,6 +4984,7 @@ async function fetchWorldwideStationLatLng() {
   return null;
 }
 function RouteMap({ flights }) {
+  const { t } = useLanguage();
   const [mounted, setMounted] = useState(false);
   const [deckLib, setDeckLib] = useState(null);
   const [countriesGeoJson, setCountriesGeoJson] = useState(null);
@@ -4998,9 +5039,9 @@ function RouteMap({ flights }) {
   return (
     <div style={card}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontSize: 14, fontWeight: 600 }}>Route map</div>
+        <div style={{ fontSize: 14, fontWeight: 600 }}>{t("routeMap")}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 10.5, color: C.green, fontWeight: 600 }}>
-          <span style={{ width: 6, height: 6, borderRadius: 99, background: C.green, display: "inline-block", animation: "pulseDot 1.6s infinite" }} /> LIVE
+          <span style={{ width: 6, height: 6, borderRadius: 99, background: C.green, display: "inline-block", animation: "pulseDot 1.6s infinite" }} /> {t("live")}
         </div>
       </div>
       {mounted && deckLib ? (
@@ -5010,21 +5051,22 @@ function RouteMap({ flights }) {
         </div>
       ) : <div style={{ width: "100%", height: 380, borderRadius: 10, background: C.panel2 }} />}
       <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10.5, color: C.muted, flexWrap: "wrap" }}>
-        <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 2, background: C.amber, display: "inline-block" }} /> Scheduled route</span>
-        <span>{routes.length} active route{routes.length === 1 ? "" : "s"} · {stations.length} stations</span>
-        {unknownStations.length > 0 && <span style={{ color: C.faint }}>Not yet plotted: {unknownStations.join(", ")} (no IATA match in the worldwide airport list)</span>}
+        <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 8, height: 2, background: C.amber, display: "inline-block" }} /> {t("scheduledRoute")}</span>
+        <span>{t("activeRoutesStations", routes.length, stations.length)}</span>
+        {unknownStations.length > 0 && <span style={{ color: C.faint }}>{t("notYetPlotted", unknownStations.join(", "))}</span>}
       </div>
     </div>
   );
 }
 
 function TasksWidget({ tasks, onAddTask, onToggleTask }) {
+  const { t: translate } = useLanguage();
   const [draft, setDraft] = useState("");
   return (
     <div style={card}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>Tasks</div>
-        <span style={{ fontSize: 11, color: C.faint }}>{tasks.filter(t => !t.done).length} open</span>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>{translate("tasksTitle")}</div>
+        <span style={{ fontSize: 11, color: C.faint }}>{translate("openCount", tasks.filter(t => !t.done).length)}</span>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
         {tasks.map(t => (
@@ -5034,12 +5076,12 @@ function TasksWidget({ tasks, onAddTask, onToggleTask }) {
             <span style={{ fontSize: 10.5, color: C.faint }}>{t.due_label}</span>
           </label>
         ))}
-        {tasks.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No tasks yet.</div>}
+        {tasks.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{translate("noTasksYet")}</div>}
       </div>
       <div style={{ display: "flex", gap: 6 }}>
-        <input value={draft} onChange={e => setDraft(e.target.value)} placeholder="Add a task…" style={{ ...inputStyle, fontSize: 12 }}
+        <input value={draft} onChange={e => setDraft(e.target.value)} placeholder={translate("addTaskPlaceholder")} style={{ ...inputStyle, fontSize: 12 }}
           onKeyDown={e => { if (e.key === "Enter" && draft.trim()) { onAddTask(draft.trim()); setDraft(""); } }} />
-        <button onClick={() => { if (draft.trim()) { onAddTask(draft.trim()); setDraft(""); } }} style={miniBtn}>Add</button>
+        <button onClick={() => { if (draft.trim()) { onAddTask(draft.trim()); setDraft(""); } }} style={miniBtn}>{translate("add")}</button>
       </div>
     </div>
   );
@@ -5047,6 +5089,7 @@ function TasksWidget({ tasks, onAddTask, onToggleTask }) {
 
 // ---------- dashboard ----------
 function Dashboard({ flights, allotments, resources, operators, flightInventory, perms, tasks, onAddTask, onToggleTask, notifications, setTab, setSelectedFlightId, onOpenReports }) {
+  const { t } = useLanguage();
   const invs = flights.map(f => ({ f, inv: flightInventory(f.id) }));
   const totalRevenue = invs.reduce((s, x) => s + x.inv.revenue, 0);
   const totalSeatsSold = invs.reduce((s, x) => s + x.inv.allocated, 0);
@@ -5056,23 +5099,23 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
   const [flightTableTab, setFlightTableTab] = useState("upcoming");
   const upcoming = [...flights].filter(f => f.start >= today).sort((a, b) => a.start - b.start).slice(0, 8);
   const recent = [...flights].filter(f => f.start < today).sort((a, b) => b.start - a.start).slice(0, 8);
-  const STATUS_PILL = { tentative: { bg: C.panel2, color: C.muted, label: "Scheduled" }, confirmed: { bg: C.cyanSoft, color: C.cyan, label: "Confirmed" }, operating: { bg: C.greenSoft, color: C.green, label: "Operating" }, cancelled: { bg: C.redSoft, color: C.red, label: "Cancelled" } };
+  const STATUS_PILL = { tentative: { bg: C.panel2, color: C.muted, label: t("statusScheduled") }, confirmed: { bg: C.cyanSoft, color: C.cyan, label: t("statusConfirmed") }, operating: { bg: C.greenSoft, color: C.green, label: t("statusOperating") }, cancelled: { bg: C.redSoft, color: C.red, label: t("statusCancelled") } };
 
   return (
     <div style={{ padding: 20 }}>
       <div style={{ background: `linear-gradient(120deg, ${SIDEBAR.bg}, #1B2C4D)`, borderRadius: 16, padding: "26px 30px", color: SIDEBAR.text, marginBottom: 18, position: "relative", overflow: "hidden", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
         <div>
-          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>Charter Operations</div>
-          <div style={{ fontSize: 13, color: SIDEBAR.muted }}>Plan · Coordinate · Deliver</div>
+          <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 6 }}>{t("charterOperations")}</div>
+          <div style={{ fontSize: 13, color: SIDEBAR.muted }}>{t("planCoordinateDeliver")}</div>
         </div>
-        <button onClick={onOpenReports} style={{ background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>Reports</button>
+        <button onClick={onOpenReports} style={{ background: "rgba(255,255,255,0.12)", border: "1px solid rgba(255,255,255,0.25)", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{t("reports")}</button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginBottom: 18 }}>
-        <KpiCard icon={<IconCalendar />} color={ACCENT.blue} label="Total flights" value={flights.length} sub="On the board" />
-        <KpiCard icon={<IconUsers />} color={ACCENT.violet} label="Seats sold" value={totalSeatsSold.toLocaleString()} sub="Active + confirmed" />
-        <KpiCard icon={<IconGauge />} color={ACCENT.teal} label="Load factor" value={`${loadFactor}%`} sub="Sold ÷ capacity" />
-        <KpiCard icon={<IconBuilding />} color={ACCENT.green} label="Tour operators" value={activeOperators} sub="Active" />
+        <KpiCard icon={<IconCalendar />} color={ACCENT.blue} label={t("kpiTotalFlights")} value={flights.length} sub={t("kpiOnTheBoard")} />
+        <KpiCard icon={<IconUsers />} color={ACCENT.violet} label={t("kpiSeatsSold")} value={totalSeatsSold.toLocaleString()} sub={t("kpiActiveConfirmed")} />
+        <KpiCard icon={<IconGauge />} color={ACCENT.teal} label={t("kpiLoadFactor")} value={`${loadFactor}%`} sub={t("kpiSoldCapacity")} />
+        <KpiCard icon={<IconBuilding />} color={ACCENT.green} label={t("kpiTourOperators")} value={activeOperators} sub={t("kpiActive")} />
       </div>
 
       <RouteMap flights={flights} />
@@ -5081,18 +5124,18 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
         <div>
           <div style={{ ...card, marginBottom: 16 }}>
             <div style={{ fontFamily: MONO, fontSize: 20, color: C.amber, marginBottom: 4 }}>${totalRevenue.toLocaleString()}</div>
-            <div style={cardTitle}>Revenue on board</div>
+            <div style={cardTitle}>{t("revenueOnBoard")}</div>
           </div>
           <div style={card}>
             <div style={{ display: "flex", gap: 4, marginBottom: 12 }}>
-              {[["upcoming", "Upcoming flights"], ["recent", "Recent flights"], ["aircraft", "Aircraft status"]].map(([k, l]) => (
+              {[["upcoming", t("tabUpcomingFlights")], ["recent", t("tabRecentFlights")], ["aircraft", t("tabAircraftStatus")]].map(([k, l]) => (
                 <button key={k} onClick={() => setFlightTableTab(k)} style={{ ...miniBtn, background: flightTableTab === k ? C.amberSoft : "transparent", color: flightTableTab === k ? C.amber : C.muted, borderColor: flightTableTab === k ? C.amber : C.border, fontSize: 11.5 }}>{l}</button>
               ))}
             </div>
             {(flightTableTab === "upcoming" || flightTableTab === "recent") && (
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, fontWeight: 600 }}>
-                  <th style={th}>Date</th><th style={th}>Flight</th><th style={th}>Route</th><th style={th}>Aircraft</th><th style={th}>Status</th>
+                  <th style={th}>{t("thDate")}</th><th style={th}>{t("thFlight")}</th><th style={th}>{t("thRoute")}</th><th style={th}>{t("thAircraft")}</th><th style={th}>{t("status")}</th>
                 </tr></thead>
                 <tbody>
                   {(flightTableTab === "upcoming" ? upcoming : recent).map(f => {
@@ -5108,14 +5151,14 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
                       </tr>
                     );
                   })}
-                  {(flightTableTab === "upcoming" ? upcoming : recent).length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.faint }}>Nothing here.</td></tr>}
+                  {(flightTableTab === "upcoming" ? upcoming : recent).length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.faint }}>{t("nothingHere")}</td></tr>}
                 </tbody>
               </table>
             )}
             {flightTableTab === "aircraft" && (
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, fontWeight: 600 }}><th style={th}>Aircraft</th><th style={th}>Variant</th><th style={th}>Status</th></tr></thead>
-                <tbody>{resources.map(r => <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}><td style={{ ...td, fontFamily: MONO }}>{r.code}</td><td style={td}>{r.variant}</td><td style={td}><Badge color={C.green} bg={C.greenSoft}>ACTIVE</Badge></td></tr>)}</tbody>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 10.5, fontWeight: 600 }}><th style={th}>{t("thAircraft")}</th><th style={th}>{t("thVariant")}</th><th style={th}>{t("status")}</th></tr></thead>
+                <tbody>{resources.map(r => <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}><td style={{ ...td, fontFamily: MONO }}>{r.code}</td><td style={td}>{r.variant}</td><td style={td}><Badge color={C.green} bg={C.greenSoft}>{t("statusActive")}</Badge></td></tr>)}</tbody>
               </table>
             )}
           </div>
@@ -5123,15 +5166,15 @@ function Dashboard({ flights, allotments, resources, operators, flightInventory,
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <TasksWidget tasks={tasks} onAddTask={onAddTask} onToggleTask={onToggleTask} />
           <div style={card}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Recent notifications</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{t("recentNotifications")}</div>
             <div style={{ margin: "0 -16px" }}>
               {notifications.slice(0, 5).map(n => <NotificationRow key={n.id} n={n} />)}
-              {notifications.length === 0 && <div style={{ padding: "10px 16px", fontSize: 12, color: C.faint }}>Actions across the app will show up here.</div>}
+              {notifications.length === 0 && <div style={{ padding: "10px 16px", fontSize: 12, color: C.faint }}>{t("notificationsWillShow")}</div>}
             </div>
           </div>
         </div>
       </div>
-      {perms.reports !== "all" && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 14 }}>Showing scope: {perms.reports}. Management sees fleet-wide financials.</div>}
+      {perms.reports !== "all" && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 14 }}>{t("showingScope", perms.reports)}</div>}
     </div>
   );
 }
@@ -5150,6 +5193,7 @@ const cardTitle = { fontSize: 11.5, color: C.muted, fontWeight: 600, marginBotto
 
 // ---------- Aircraft (fleet management) ----------
 function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResource, onDeleteResource, maintenanceBlocks, onAddMaintenanceBlock, onDeleteMaintenanceBlock }) {
+  const { t } = useLanguage();
   const [showAdd, setShowAdd] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [showAddMaint, setShowAddMaint] = useState(false);
@@ -5157,13 +5201,13 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
     <div style={{ padding: 20 }}>
       {perms.editFlight && (
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-          <button onClick={() => setShowAdd(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ Add aircraft</button>
+          <button onClick={() => setShowAdd(true)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("addAircraft")}</button>
         </div>
       )}
       <div style={{ ...card, padding: 0, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, background: C.panel2 }}>
-            <th style={th}>Registration</th><th style={th}>Variant</th><th style={th}>Capacity</th><th style={th}>Flights on board</th><th style={th}></th>
+            <th style={th}>{t("thRegistration")}</th><th style={th}>{t("thVariant")}</th><th style={th}>{t("thCapacity")}</th><th style={th}>{t("thFlightsOnBoard")}</th><th style={th}></th>
           </tr></thead>
           <tbody>
             {resources.map(r => (
@@ -5173,10 +5217,10 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
                 <td style={td}>{perms.editFlight ? <input type="number" value={r.capacity} onChange={e => onUpdateResource(r.id, { capacity: +e.target.value })} style={{ ...inputStyle, width: 80 }} /> : r.capacity}</td>
                 <td style={td}>{flights.filter(f => f.resourceId === r.id).length}</td>
                 <td style={td}>
-                  {perms.editFlight && confirmDeleteId !== r.id && <button onClick={() => setConfirmDeleteId(r.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove</button>}
+                  {perms.editFlight && confirmDeleteId !== r.id && <button onClick={() => setConfirmDeleteId(r.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("removeBtn")}</button>}
                   {perms.editFlight && confirmDeleteId === r.id && <div style={{ display: "flex", gap: 6 }}>
-                    <button onClick={() => { onDeleteResource(r.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>Confirm</button>
-                    <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>Cancel</button>
+                    <button onClick={() => { onDeleteResource(r.id); setConfirmDeleteId(null); }} style={{ ...miniBtn, background: C.red, color: ON_ACCENT, borderColor: C.red }}>{t("confirm")}</button>
+                    <button onClick={() => setConfirmDeleteId(null)} style={miniBtn}>{t("cancel")}</button>
                   </div>}
                 </td>
               </tr>
@@ -5186,13 +5230,13 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24, marginBottom: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 600 }}>Maintenance schedule</div>
-        {perms.editFlight && <button onClick={() => setShowAddMaint(true)} style={{ ...miniBtn, fontWeight: 600 }}>+ Add block</button>}
+        <div style={{ fontSize: 13, fontWeight: 600 }}>{t("maintenanceSchedule")}</div>
+        {perms.editFlight && <button onClick={() => setShowAddMaint(true)} style={{ ...miniBtn, fontWeight: 600 }}>{t("addBlock")}</button>}
       </div>
       <div style={{ ...card, padding: 0, overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, background: C.panel2 }}>
-            <th style={th}>Aircraft</th><th style={th}>From</th><th style={th}>To</th><th style={th}>Reason</th><th style={th}></th>
+            <th style={th}>{t("thAircraftCol")}</th><th style={th}>{t("thFrom")}</th><th style={th}>{t("thTo")}</th><th style={th}>{t("thReason")}</th><th style={th}></th>
           </tr></thead>
           <tbody>
             {[...maintenanceBlocks].sort((a, b) => a.start - b.start).map(m => {
@@ -5204,11 +5248,11 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
                   <td style={{ ...td, fontFamily: MONO }}>{iso(m.start)}</td>
                   <td style={{ ...td, fontFamily: MONO }}>{iso(m.end)}</td>
                   <td style={td}>{m.reason || "—"}</td>
-                  <td style={td}>{perms.editFlight && <button onClick={() => onDeleteMaintenanceBlock(m.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>Remove</button>}</td>
+                  <td style={td}>{perms.editFlight && <button onClick={() => onDeleteMaintenanceBlock(m.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("removeBtn")}</button>}</td>
                 </tr>
               );
             })}
-            {maintenanceBlocks.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.faint, padding: 20 }}>No maintenance blocks scheduled. Aircraft here are treated as available every day.</td></tr>}
+            {maintenanceBlocks.length === 0 && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: C.faint, padding: 20 }}>{t("noMaintenanceBlocks")}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -5274,47 +5318,49 @@ function SlotsPanel({ flights, slotRequests, onJumpToFlight }) {
   );
 }
 function AddMaintenanceModal({ resources, onClose, onCreate }) {
+  const { t } = useLanguage();
   const [form, setForm] = useState({ resourceId: resources[0]?.id, startDate: iso(addDays(today, 1)), endDate: iso(addDays(today, 3)), reason: "" });
   const valid = form.resourceId && form.startDate && form.endDate && form.startDate <= form.endDate;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 380, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Add maintenance block</div>
-        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>This aircraft is treated as unavailable for the whole span, inclusive of both dates — the scheduling engine and conflict checks respect it.</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{t("addMaintenanceBlockTitle")}</div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 14 }}>{t("addMaintenanceBlockSubtitle")}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <FieldSm label="Aircraft">
+          <FieldSm label={t("thAircraftCol")}>
             <select value={form.resourceId} onChange={e => setForm({ ...form, resourceId: e.target.value })} style={inputStyle}>
               {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.variant}</option>)}
             </select>
           </FieldSm>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <FieldSm label="From"><input type="date" value={form.startDate} onChange={e => setForm({ ...form, startDate: e.target.value })} style={inputStyle} /></FieldSm>
-            <FieldSm label="To"><input type="date" value={form.endDate} onChange={e => setForm({ ...form, endDate: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("thFrom")}><input type="date" value={form.startDate} onChange={e => setForm({ ...form, startDate: e.target.value })} style={inputStyle} /></FieldSm>
+            <FieldSm label={t("thTo")}><input type="date" value={form.endDate} onChange={e => setForm({ ...form, endDate: e.target.value })} style={inputStyle} /></FieldSm>
           </div>
-          <FieldSm label="Reason (optional)"><input value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} placeholder="C-check, AOG repair, …" style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldReasonOptional")}><input value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} placeholder="C-check, AOG repair, …" style={inputStyle} /></FieldSm>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Cancel</button>
-          <button disabled={!valid} onClick={() => onCreate(form.resourceId, new Date(form.startDate), addDays(new Date(form.endDate), 1), form.reason)} style={{ ...miniBtn, background: valid ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: valid ? C.amber : C.faint, fontWeight: 600 }}>Add block</button>
+          <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+          <button disabled={!valid} onClick={() => onCreate(form.resourceId, new Date(form.startDate), addDays(new Date(form.endDate), 1), form.reason)} style={{ ...miniBtn, background: valid ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: valid ? C.amber : C.faint, fontWeight: 600 }}>{t("addBlockBtn")}</button>
         </div>
       </div>
     </div>
   );
 }
 function AddAircraftModal({ onClose, onCreate }) {
+  const { t } = useLanguage();
   const [form, setForm] = useState({ code: "", variant: "", capacity: 189 });
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 340, maxWidth: "92vw" }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Add aircraft</div>
+        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>{t("addAircraftTitle")}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <FieldSm label="Registration"><input value={form.code} onChange={e => setForm({ ...form, code: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
-          <FieldSm label="Variant"><input value={form.variant} onChange={e => setForm({ ...form, variant: e.target.value })} style={inputStyle} /></FieldSm>
-          <FieldSm label="Capacity"><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldRegistration")}><input value={form.code} onChange={e => setForm({ ...form, code: e.target.value.toUpperCase() })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("thVariant")}><input value={form.variant} onChange={e => setForm({ ...form, variant: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label={t("fieldCapacity")}><input type="number" value={form.capacity} onChange={e => setForm({ ...form, capacity: +e.target.value })} style={inputStyle} /></FieldSm>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
-          <button onClick={onClose} style={miniBtn}>Cancel</button>
-          <button disabled={!form.code.trim()} onClick={() => onCreate(form)} style={{ ...miniBtn, background: form.code.trim() ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Add</button>
+          <button onClick={onClose} style={miniBtn}>{t("cancel")}</button>
+          <button disabled={!form.code.trim()} onClick={() => onCreate(form)} style={{ ...miniBtn, background: form.code.trim() ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{t("add")}</button>
         </div>
       </div>
     </div>
