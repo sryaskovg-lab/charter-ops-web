@@ -273,6 +273,12 @@ function mapDraftChange(d) { return { id: d.id, flightId: d.flight_id, changeTyp
 // draft_changes above. A request's patch holds whichever operator-level fields were proposed
 // (defaultRate, allotmentType, optionReleaseDays, ratesByDestination merge), same shape
 // setOperators already knows how to apply.
+// Contract-derived operator fields from a contracts row (used to refresh operators after a
+// server-side patch or a realtime change without touching name/country/status).
+function contractFieldsFromRow(c) {
+  const m = mapOperator({}, c);
+  return { contractId: m.contractId, defaultRate: m.defaultRate, ratesByDestination: m.ratesByDestination, allotmentType: m.allotmentType, optionReleaseDays: m.optionReleaseDays };
+}
 function mapContractChangeRequest(r) { return { id: r.id, operatorId: r.tour_operator_id, patch: r.patch || {}, summary: r.summary, requestedBy: r.requested_by, requestedAt: new Date(r.requested_at) }; }
 // Airport slot coordination — one row per movement (departure/arrival), kept structurally
 // separate from ATFM/CTOT below so the two are never conflated into one status field.
@@ -798,6 +804,15 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         const { data } = await supabase.from("atfm_records").select("*");
         setAtfmRecords((data || []).map(mapAtfmRecord));
       })
+      .on("postgres_changes", { event: "*", schema: "public", table: "contract_change_requests" }, async () => {
+        const { data } = await supabase.from("contract_change_requests").select("*").order("requested_at");
+        setContractChangeRequests((data || []).map(mapContractChangeRequest));
+      })
+      .on("postgres_changes", { event: "*", schema: "public", table: "contracts" }, async () => {
+        const { data } = await supabase.from("contracts").select("*");
+        const byOp = new Map((data || []).map(c => [c.tour_operator_id, c]));
+        setOperatorsRaw(ops => ops.map(o => byOp.has(o.id) ? { ...o, ...contractFieldsFromRow(byOp.get(o.id)) } : o));
+      })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [loaded]);
@@ -1182,12 +1197,24 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     pushToast(`Sent for management approval: ${summary}`, "ok");
     return true;
   }
+  // Contract/rate patches are DELTAS ({ ratesSet, ratesRemove, defaultRate, allotmentType,
+  // optionReleaseDays }) merged server-side in one atomic statement (apply_contract_patch), so
+  // two pending changes on the same operator compose and concurrent edits don't overwrite each
+  // other's keys. Management only (enforced in the database too).
+  async function applyContractPatch(operatorId, patch, summary) {
+    const { data, error } = await supabase.rpc("apply_contract_patch", { p_operator_id: operatorId, p_patch: patch });
+    if (error) { pushToast(`Rate update failed: ${error.message}`, "warn"); return false; }
+    setOperatorsRaw(ops => ops.map(o => o.id === operatorId ? { ...o, ...contractFieldsFromRow(data) } : o));
+    if (summary) pushToast(summary, "ok");
+    return true;
+  }
   async function approveContractChange(requestId) {
     const r = contractChangeRequests.find(x => x.id === requestId);
     if (!r) return;
-    setOperators(ops => ops.map(o => o.id === r.operatorId ? { ...o, ...r.patch } : o));
-    const { error } = await supabase.from("contract_change_requests").delete().eq("id", requestId);
-    if (!error) setContractChangeRequests(cc => cc.filter(x => x.id !== requestId));
+    const { data, error } = await supabase.rpc("approve_contract_change", { p_request_id: requestId });
+    if (error) { pushToast(`Could not approve: ${error.message}`, "warn"); return; }
+    setOperatorsRaw(ops => ops.map(o => o.id === r.operatorId ? { ...o, ...contractFieldsFromRow(data) } : o));
+    setContractChangeRequests(cc => cc.filter(x => x.id !== requestId));
     pushToast(`Approved: ${r.summary}`, "ok");
   }
   async function discardContractChange(requestId) {
@@ -1283,13 +1310,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       }
     }
 
-    let ratesFilled = 0;
+    let ratesFilled = 0, ratesSkipped = 0;
     for (const { op, rates } of contractFills.values()) {
-      const newRates = { ...op.ratesByDestination, ...rates };
-      const { error } = await supabase.from("contracts").update({ rates_by_destination: newRates }).eq("id", op.contractId);
-      if (error) { pushToast(`Could not save ${op.name}'s new destination rate(s): ${error.message}`, "warn"); continue; }
-      setOperatorsRaw(ops => ops.map(o => o.id === op.id ? { ...o, ratesByDestination: newRates } : o));
-      ratesFilled += Object.keys(rates).length;
+      // Saving rates to the contract is a management action (sign-off enforced in the DB);
+      // for anyone else the allotments are still priced from the import, but the rate card is left alone.
+      if (!perms.approveContracts) { ratesSkipped += Object.keys(rates).length; continue; }
+      const ok = await applyContractPatch(op.id, { ratesSet: rates });
+      if (ok) ratesFilled += Object.keys(rates).length;
     }
 
     const inserted = [];
@@ -1315,6 +1342,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (inserted.length) parts.push(`${inserted.length} new allocation${inserted.length === 1 ? "" : "s"}`);
     if (toppedUp) parts.push(`${toppedUp} topped up`);
     if (ratesFilled) parts.push(`${ratesFilled} destination rate${ratesFilled === 1 ? "" : "s"} saved`);
+    if (ratesSkipped) parts.push(`${ratesSkipped} new rate${ratesSkipped === 1 ? "" : "s"} not saved to rate card (needs management)`);
     if (skipped) parts.push(`${skipped} skipped`);
     pushToast(parts.length ? `Import complete: ${parts.join(", ")}` : "Nothing to import", parts.length ? "ok" : "warn");
     pushNotification("Tour-operator allotments imported", parts.join(", ") || "Nothing imported", "allotment");
@@ -1721,7 +1749,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms} contractChangeRequests={contractChangeRequests}
         onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} onRepriceAllotmentsBulk={repriceAllotmentsBulk} onPatchAllotment={patchAllotment}
-        onQueueContractChange={queueContractChange} onApproveContractChange={approveContractChange} onDiscardContractChange={discardContractChange} />}
+        onQueueContractChange={queueContractChange} onApplyContractPatch={applyContractPatch} onApproveContractChange={approveContractChange} onDiscardContractChange={discardContractChange} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -4813,7 +4841,7 @@ function InlinePropose({ label, initial, confirmLabel, onPropose }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, contractChangeRequests, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment, onRepriceAllotmentsBulk, onPatchAllotment, onQueueContractChange, onApproveContractChange, onDiscardContractChange }) {
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, contractChangeRequests, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment, onRepriceAllotmentsBulk, onPatchAllotment, onQueueContractChange, onApplyContractPatch, onApproveContractChange, onDiscardContractChange }) {
   const { t } = useLanguage();
   // expanded.tab: "overview" | "contract" | "allocations" — one operator, one tab, at a time.
   const [expanded, setExpanded] = useState(null); // { id, tab }
@@ -4843,8 +4871,10 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   // Management applies a contract/rate patch immediately, same as always. Anyone else with
   // editContracts (the liaison role) can still propose the same patch, but it's queued for
   // management sign-off instead of written straight to the operator record.
+  // patch is a DELTA ({ ratesSet, ratesRemove, defaultRate, allotmentType, optionReleaseDays }),
+  // never a whole rate map, so it composes with other pending/concurrent changes.
   function proposeOrApply(o, patch, summary) {
-    if (perms.approveContracts) setOperators(ops => ops.map(o2 => o2.id === o.id ? { ...o2, ...patch } : o2));
+    if (perms.approveContracts) onApplyContractPatch(o.id, patch);
     else if (perms.editContracts) onQueueContractChange(o.id, patch, summary);
   }
   function saveContractDraft(o) {
@@ -4857,15 +4887,12 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
     setExpanded(null); setContractDraft(null);
   }
   function setRouteRate(o, route, price) {
-    const next = { ...o.ratesByDestination, [route]: price };
     const label = isRtKey(route) ? `${route.slice(RT_PREFIX.length)} ${t("tripRoundtrip").toLowerCase()}` : route;
-    proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, label, price));
+    proposeOrApply(o, { ratesSet: { [route]: price } }, t("proposeRouteRateSummary", o.name, label, price));
   }
   function removeRouteRate(o, route) {
-    const next = { ...o.ratesByDestination };
-    delete next[route];
     const label = isRtKey(route) ? `${route.slice(RT_PREFIX.length)} ${t("tripRoundtrip").toLowerCase()}` : route;
-    proposeOrApply(o, { ratesByDestination: next }, t("proposeRemoveRouteRateSummary", o.name, label));
+    proposeOrApply(o, { ratesRemove: [route] }, t("proposeRemoveRouteRateSummary", o.name, label));
   }
   function toggle(id, tab) {
     setExpanded(e => (e && e.id === id && e.tab === tab) ? null : { id, tab });
@@ -5076,8 +5103,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                       <FieldSm label={newRouteTrip === "roundtrip" ? t("fieldPricePerSeatRoundtrip") : t("fieldPricePerSeat")}><input type="number" min={0} value={newRoutePrice} onChange={e => setNewRoutePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
                       <button disabled={expandRouteSegments(newRouteCode).length === 0 || !newRoutePrice} onClick={() => {
                         const keys = expandRouteSegments(newRouteCode).map(k => newRouteTrip === "roundtrip" ? RT_PREFIX + k : k);
-                        const next = { ...o.ratesByDestination, ...Object.fromEntries(keys.map(k => [k, +newRoutePrice])) };
-                        proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, newRouteTrip === "roundtrip" ? `${newRouteCode} ${t("tripRoundtrip").toLowerCase()}` : newRouteCode, +newRoutePrice));
+                        proposeOrApply(o, { ratesSet: Object.fromEntries(keys.map(k => [k, +newRoutePrice])) }, t("proposeRouteRateSummary", o.name, newRouteTrip === "roundtrip" ? `${newRouteCode} ${t("tripRoundtrip").toLowerCase()}` : newRouteCode, +newRoutePrice));
                         setNewRouteCode(""); setNewRoutePrice("");
                       }} style={{ ...miniBtn, background: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? C.amber : C.faint, fontWeight: 600 }}>{perms.approveContracts ? t("add") : t("proposeBtn")}</button>
                     </div>
