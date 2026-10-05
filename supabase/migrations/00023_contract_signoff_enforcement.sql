@@ -7,9 +7,9 @@
 --  3. contracts joins the realtime publication so open boards see approved rate changes live.
 
 create or replace function public.apply_contract_patch(p_operator_id uuid, p_patch jsonb)
-returns public.contracts
+returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare r public.contracts;
+declare r record;
 begin
   if coalesce(public.current_role_name(), '') <> 'management' then
     raise exception 'Only management can change contract terms' using errcode = '42501';
@@ -23,15 +23,15 @@ begin
     default_allotment_type = case when p_patch ? 'allotmentType' then p_patch->>'allotmentType' else c.default_allotment_type end,
     default_option_release_days = case when p_patch ? 'optionReleaseDays' then (p_patch->>'optionReleaseDays')::int else c.default_option_release_days end
   where c.tour_operator_id = p_operator_id
-  returning * into r;
+  returning c.* into r;
   if r.id is null then raise exception 'No contract for operator %', p_operator_id; end if;
-  return r;
+  return to_jsonb(r);
 end $$;
 
 create or replace function public.approve_contract_change(p_request_id uuid)
-returns public.contracts
+returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare req public.contract_change_requests; r public.contracts;
+declare req record; r jsonb;
 begin
   if coalesce(public.current_role_name(), '') <> 'management' then
     raise exception 'Only management can approve contract changes' using errcode = '42501';
