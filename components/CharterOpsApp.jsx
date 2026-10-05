@@ -182,7 +182,7 @@ function ghostFlightFromPatch(current, patch) {
     arrivalAt: combineArrivalDateTime(start, arrTime),
   };
 }
-function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
+function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, tripType: a.trip_type || "one_way", optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
 function mapOperator(o, contract) {
   return {
     id: o.id, name: o.name, country: o.country, status: o.status,
@@ -209,8 +209,20 @@ function expandRouteSegments(routeStr) {
   for (let i = 0; i + 1 < codes.length; i++) keys.push(routeKeyFor(codes[i], codes[i + 1]));
   return keys;
 }
-function rateFor(op, origin, destination) {
+// Roundtrip rates live in the same rate card under an "RT:" prefix (no schema change): the value
+// is the FULL roundtrip $/seat for the route, and applies to either direction of it (RT:ALA-PQC
+// covers ALA-PQC and PQC-ALA). Allotments are per flight leg, so a roundtrip seat is priced at
+// half the roundtrip rate on each leg. Without a roundtrip rate for the route, a roundtrip seat
+// falls back to the one-way rate on each leg.
+const RT_PREFIX = "RT:";
+function rtKeyFor(origin, destination) { return `${RT_PREFIX}${origin}-${destination}`; }
+function isRtKey(key) { return key.startsWith(RT_PREFIX); }
+function rateFor(op, origin, destination, tripType = "one_way") {
   if (!op) return 0;
+  if (tripType === "roundtrip") {
+    const rt = op.ratesByDestination?.[rtKeyFor(origin, destination)] ?? op.ratesByDestination?.[rtKeyFor(destination, origin)];
+    if (rt != null) return rt / 2;
+  }
   const byRoute = op.ratesByDestination?.[routeKeyFor(origin, destination)];
   if (byRoute != null) return byRoute;
   const byDest = op.ratesByDestination?.[destination];
@@ -979,7 +991,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     else pushToast(`${f.ref} reassigned to ${resources.find(r => r.id === newResourceId)?.code} — date and time unchanged`, "ok");
   }
 
-  async function addAllotment(flightId, operatorId, seats, priceOverride, allotmentTypeOverride) {
+  async function addAllotment(flightId, operatorId, seats, priceOverride, allotmentTypeOverride, tripType = "one_way") {
     const op = operators.find(o => o.id === operatorId);
     const flight = flights.find(f => f.id === flightId);
     // Business rule: once an operator has seats allocated on a flight (or across a series),
@@ -996,7 +1008,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       pushNotification("Seats added", `+${seats} seats · ${op.name} · ${flight?.ref || ""}`, "allotment");
       return;
     }
-    const price = priceOverride ?? rateFor(op, flight?.origin, flight?.destination);
+    const price = priceOverride ?? rateFor(op, flight?.origin, flight?.destination, tripType);
     // Allotment type is chosen by staff at the moment of allocation — it defaults to the
     // operator's standing contract type but is overridable per allotment, and stays editable
     // afterward via patchAllotment.
@@ -1004,13 +1016,14 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     const optionReleaseAt = allotmentType === "option" ? addDays(today, op.optionReleaseDays || 14) : null;
     const { data, error } = await supabase.from("allotments").insert({
       flight_id: flightId, tour_operator_id: operatorId, contract_id: op.contractId,
-      seats_allocated: seats, price_per_seat: price, allotment_type: allotmentType,
+      seats_allocated: seats, price_per_seat: price, allotment_type: allotmentType, trip_type: tripType,
       option_release_at: optionReleaseAt ? optionReleaseAt.toISOString() : null,
     }).select().single();
     if (error) { pushToast(`Could not allocate seats: ${error.message}`, "warn"); return; }
     setAllotmentsRaw(as => [...as, mapAllotment(data)]);
-    const destRate = rateFor(op, flight?.origin, flight?.destination);
-    const priceNote = price !== destRate ? ` at $${price}/seat (${op.name}'s rate to ${flight?.destination} is $${destRate})` : ` at $${price}/seat`;
+    const destRate = rateFor(op, flight?.origin, flight?.destination, tripType);
+    const tripNote = tripType === "roundtrip" ? " (roundtrip, per leg)" : "";
+    const priceNote = price !== destRate ? ` at $${price}/seat${tripNote} (${op.name}'s rate to ${flight?.destination} is $${destRate})` : ` at $${price}/seat${tripNote}`;
     pushToast(`Allocated ${seats} seats to ${op.name}${priceNote}`, "ok");
     pushNotification("Seats allocated", `${seats} seats · ${op.name} · ${flight?.ref || ""}`, "allotment");
   }
@@ -1677,7 +1690,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               onAddSlotCorrespondence={addSlotCorrespondence}
               onSaveAtfmRecord={patch => saveAtfmRecord(selectedFlight.id, patch)}
               onUpdateFlight={patch => updateFlight(selectedFlight.id, patch)}
-              onAddAllotment={(opId, seats, price, allotmentType) => addAllotment(selectedFlight.id, opId, seats, price, allotmentType)}
+              onAddAllotment={(opId, seats, price, allotmentType, tripType) => addAllotment(selectedFlight.id, opId, seats, price, allotmentType, tripType)}
               onPatchAllotment={patchAllotment} onRemoveAllotment={removeAllotment} onRepriceAllotment={repriceAllotment}
               onOpenSCR={role => openSCR([selectedFlight], role)}
               onDeleteFlight={deleteFlight}
@@ -2544,6 +2557,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
   const [addingSeats, setAddingSeats] = useState(20);
   const [addingPrice, setAddingPrice] = useState(rateFor(operators[0], flight.origin, flight.destination));
   const [addingType, setAddingType] = useState(operators[0].allotmentType === "option" ? "option" : "fixed");
+  const [addingTrip, setAddingTrip] = useState("one_way");
   const [draftDep, setDraftDep] = useState(flight.depTime || "");
   const [draftArr, setDraftArr] = useState(flight.arrTime || "");
   const [repricingId, setRepricingId] = useState(null);
@@ -2690,6 +2704,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
                 ) : (
                   <>
                     <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                    {a.tripType === "roundtrip" && <Badge color={C.cyan}>{t("tripRoundtripLeg")}</Badge>}
                     {!released && perms.editContracts && (
                       <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("changePriceBtn")}</button>
                     )}
@@ -2711,7 +2726,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
         <div style={{ border: `1px dashed ${C.border}`, borderRadius: 10, padding: 8 }}>
           <div style={{ fontSize: 11, color: C.muted, marginBottom: 6 }}>{t("addAllotment")}</div>
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <select value={addingOp} onChange={e => { const newOp = operators.find(o => o.id === e.target.value); setAddingOp(e.target.value); setAddingPrice(rateFor(newOp, flight.origin, flight.destination)); setAddingType(newOp?.allotmentType === "option" ? "option" : "fixed"); }} style={{ ...inputStyle, flex: 1 }}>
+            <select value={addingOp} onChange={e => { const newOp = operators.find(o => o.id === e.target.value); setAddingOp(e.target.value); setAddingPrice(rateFor(newOp, flight.origin, flight.destination, addingTrip)); setAddingType(newOp?.allotmentType === "option" ? "option" : "fixed"); }} style={{ ...inputStyle, flex: 1 }}>
               {operators.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
             </select>
             <input type="number" value={addingSeats} onChange={e => setAddingSeats(+e.target.value)} title={t("seatsTitle")} style={{ ...inputStyle, width: 60 }} />
@@ -2721,12 +2736,16 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
               <option value="fixed">{t("allotmentTypeFirm")}</option>
               <option value="option">{t("allotmentTypeOption")}</option>
             </select>
+            <select value={addingTrip} onChange={e => { setAddingTrip(e.target.value); setAddingPrice(rateFor(operators.find(o => o.id === addingOp), flight.origin, flight.destination, e.target.value)); }} title={t("tripTypeTitle")} style={{ ...inputStyle, flex: 1 }}>
+              <option value="one_way">{t("tripOneWay")}</option>
+              <option value="roundtrip">{t("tripRoundtrip")}</option>
+            </select>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span style={{ fontSize: 11, color: C.muted, whiteSpace: "nowrap" }}>{t("pricePerSeatThisFlight")}</span>
             <span style={{ fontSize: 11, color: C.faint }}>$</span>
             <input type="number" value={addingPrice} onChange={e => setAddingPrice(+e.target.value)} title={t("pricePerSeatTitle")} style={{ ...inputStyle, width: 70 }} />
-            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice, addingType)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>{t("add")}</button>
+            <button onClick={() => onAddAllotment(addingOp, addingSeats, addingPrice, addingType, addingTrip)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, boxShadow: GLOW_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600, marginLeft: "auto" }}>{t("add")}</button>
           </div>
           <div style={{ fontSize: 10, color: C.faint, marginTop: 4 }}>{t("defaultsToRate", operators.find(o => o.id === addingOp)?.name, flight.destination)}</div>
         </div>
@@ -4787,6 +4806,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   const [flightRateSeats, setFlightRateSeats] = useState(10);
   const [flightRatePrice, setFlightRatePrice] = useState("");
   const [flightRateType, setFlightRateType] = useState("fixed");
+  const [flightRateTrip, setFlightRateTrip] = useState("one_way");
+  const [newRouteTrip, setNewRouteTrip] = useState("one_way");
   const [releaseSelected, setReleaseSelected] = useState(() => new Map()); // id -> qty to release
   const [confirmRelease, setConfirmRelease] = useState(false);
   const [repricingId, setRepricingId] = useState(null);
@@ -4815,12 +4836,14 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   }
   function setRouteRate(o, route, price) {
     const next = { ...o.ratesByDestination, [route]: price };
-    proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, route, price));
+    const label = isRtKey(route) ? `${route.slice(RT_PREFIX.length)} ${t("tripRoundtrip").toLowerCase()}` : route;
+    proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, label, price));
   }
   function removeRouteRate(o, route) {
     const next = { ...o.ratesByDestination };
     delete next[route];
-    proposeOrApply(o, { ratesByDestination: next }, t("proposeRemoveRouteRateSummary", o.name, route));
+    const label = isRtKey(route) ? `${route.slice(RT_PREFIX.length)} ${t("tripRoundtrip").toLowerCase()}` : route;
+    proposeOrApply(o, { ratesByDestination: next }, t("proposeRemoveRouteRateSummary", o.name, label));
   }
   function toggle(id, tab) {
     setExpanded(e => (e && e.id === id && e.tab === tab) ? null : { id, tab });
@@ -4831,9 +4854,11 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
     : [];
   function createAllotmentsFromSearch(operatorId) {
-    const price = +flightRatePrice;
-    if (!price || flightRateSelected.size === 0) return;
-    flightRateSelected.forEach(flightId => onAddAllotment(flightId, operatorId, flightRateSeats, price, flightRateType));
+    // Blank price = use the operator's rate card for each picked flight's route and trip type
+    // (addAllotment resolves it per flight); a typed price overrides it for all of them.
+    const price = +flightRatePrice || undefined;
+    if (flightRateSelected.size === 0) return;
+    flightRateSelected.forEach(flightId => onAddAllotment(flightId, operatorId, flightRateSeats, price, flightRateType, flightRateTrip));
     setFlightRateSelected(new Set());
     setFlightRateSearch("");
     setFlightRatePrice("");
@@ -4967,7 +4992,8 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                       {Object.keys(o.ratesByDestination || {}).length === 0 && <div style={{ padding: 8, fontSize: 11.5, color: C.faint }}>{t("noRouteRatesYet")}</div>}
                       {Object.entries(o.ratesByDestination || {}).sort(([a], [b]) => a.localeCompare(b)).map(([route, price]) => (
                         <div key={route} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", fontSize: 12, fontFamily: MONO, borderBottom: `1px solid ${C.borderSoft}` }}>
-                          <span style={{ width: 90, fontWeight: 700 }}>{route}</span>
+                          <span style={{ width: 90, fontWeight: 700 }}>{isRtKey(route) ? route.slice(RT_PREFIX.length) : route}</span>
+                          <span style={{ width: 70 }}>{isRtKey(route) ? <Badge color={C.cyan}>{t("tripRoundtrip")}</Badge> : <Badge color={C.muted}>{t("tripOneWay")}</Badge>}</span>
                           {editingRoute === route ? (
                             <>
                               <input type="number" min={0} autoFocus value={editingRouteValue} onChange={e => setEditingRouteValue(e.target.value)} style={{ ...inputStyle, width: 90 }} />
@@ -4976,7 +5002,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                             </>
                           ) : (
                             <>
-                              <span>${price}</span>
+                              <span>${price}{isRtKey(route) && <span style={{ color: C.faint }}> {t("perLegShare", price / 2)}</span>}</span>
                               <button onClick={() => { setEditingRoute(route); setEditingRouteValue(price); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("changePriceBtn")}</button>
                               <button onClick={() => removeRouteRate(o, route)} title={t("removeRouteRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
                             </>
@@ -4989,15 +5015,21 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                         <input value={newRouteCode} onChange={e => setNewRouteCode(e.target.value.toUpperCase())} placeholder={t("routeCodePlaceholder")} list={`route-options-${o.id}`} style={{ ...inputStyle, width: 130 }} />
                         <datalist id={`route-options-${o.id}`}>{routesWithFlights.map(r => <option key={r} value={r} />)}</datalist>
                       </FieldSm>
-                      <FieldSm label={t("fieldPricePerSeat")}><input type="number" min={0} value={newRoutePrice} onChange={e => setNewRoutePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                      <FieldSm label={t("tripTypeLabel")}>
+                        <select value={newRouteTrip} onChange={e => setNewRouteTrip(e.target.value)} style={{ ...inputStyle, width: 100 }}>
+                          <option value="one_way">{t("tripOneWay")}</option>
+                          <option value="roundtrip">{t("tripRoundtrip")}</option>
+                        </select>
+                      </FieldSm>
+                      <FieldSm label={newRouteTrip === "roundtrip" ? t("fieldPricePerSeatRoundtrip") : t("fieldPricePerSeat")}><input type="number" min={0} value={newRoutePrice} onChange={e => setNewRoutePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
                       <button disabled={expandRouteSegments(newRouteCode).length === 0 || !newRoutePrice} onClick={() => {
-                        const keys = expandRouteSegments(newRouteCode);
+                        const keys = expandRouteSegments(newRouteCode).map(k => newRouteTrip === "roundtrip" ? RT_PREFIX + k : k);
                         const next = { ...o.ratesByDestination, ...Object.fromEntries(keys.map(k => [k, +newRoutePrice])) };
-                        proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, newRouteCode, +newRoutePrice));
+                        proposeOrApply(o, { ratesByDestination: next }, t("proposeRouteRateSummary", o.name, newRouteTrip === "roundtrip" ? `${newRouteCode} ${t("tripRoundtrip").toLowerCase()}` : newRouteCode, +newRoutePrice));
                         setNewRouteCode(""); setNewRoutePrice("");
                       }} style={{ ...miniBtn, background: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: (expandRouteSegments(newRouteCode).length && newRoutePrice) ? C.amber : C.faint, fontWeight: 600 }}>{perms.approveContracts ? t("add") : t("proposeBtn")}</button>
                     </div>
-                    <div style={{ fontSize: 10, color: C.faint, marginTop: 6 }}>{t("techStopRouteHint")}</div>
+                    <div style={{ fontSize: 10, color: C.faint, marginTop: 6 }}>{t("techStopRouteHint")} {t("roundtripRateHint")}</div>
                   </td></tr>
                 )}
                 {isAllocations && (
@@ -5032,15 +5064,21 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                             )}
                             <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                               <FieldSm label={t("fieldSeats")}><input type="number" min={1} value={flightRateSeats} onChange={e => setFlightRateSeats(Math.max(1, +e.target.value))} style={{ ...inputStyle, width: 70 }} /></FieldSm>
-                              <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 90 }} /></FieldSm>
+                              <FieldSm label={t("fieldPricePerSeat")}><input type="number" value={flightRatePrice} placeholder={t("fromRateCardPlaceholder")} onChange={e => setFlightRatePrice(e.target.value)} style={{ ...inputStyle, width: 110 }} /></FieldSm>
                               <FieldSm label={t("thAllotmentType")}>
                                 <select value={flightRateType} onChange={e => setFlightRateType(e.target.value)} style={{ ...inputStyle, width: 100 }}>
                                   <option value="fixed">{t("allotmentTypeFirm")}</option>
                                   <option value="option">{t("allotmentTypeOption")}</option>
                                 </select>
                               </FieldSm>
-                              <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0 || !flightRatePrice}
-                                style={{ ...miniBtn, background: (flightRateSelected.size && flightRatePrice) ? GRADIENT_PRIMARY : C.faint, boxShadow: (flightRateSelected.size && flightRatePrice) ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: (flightRateSelected.size && flightRatePrice) ? C.amber : C.faint, fontWeight: 600 }}>
+                              <FieldSm label={t("tripTypeLabel")}>
+                                <select value={flightRateTrip} onChange={e => setFlightRateTrip(e.target.value)} title={t("tripTypeTitle")} style={{ ...inputStyle, width: 100 }}>
+                                  <option value="one_way">{t("tripOneWay")}</option>
+                                  <option value="roundtrip">{t("tripRoundtrip")}</option>
+                                </select>
+                              </FieldSm>
+                              <button onClick={() => createAllotmentsFromSearch(o.id)} disabled={flightRateSelected.size === 0}
+                                style={{ ...miniBtn, background: flightRateSelected.size ? GRADIENT_PRIMARY : C.faint, boxShadow: flightRateSelected.size ? GLOW_PRIMARY : "none", color: ON_ACCENT, borderColor: flightRateSelected.size ? C.amber : C.faint, fontWeight: 600 }}>
                                 {t("addCount", flightRateSelected.size)}
                               </button>
                             </div>
@@ -5068,6 +5106,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                               ) : (
                                 <>
                                   <span>{a.seatsAllocated} seats @ ${a.pricePerSeat}</span>
+                                  {a.tripType === "roundtrip" && <Badge color={C.cyan}>{t("tripRoundtripLeg")}</Badge>}
                                   {perms.editContracts && (
                                     <button onClick={() => { setRepricingId(a.id); setRepricingValue(a.pricePerSeat); }} title={t("changePriceTitle")} style={{ ...miniBtn, padding: "1px 6px", fontSize: 9.5 }}>{t("changePriceBtn")}</button>
                                   )}
