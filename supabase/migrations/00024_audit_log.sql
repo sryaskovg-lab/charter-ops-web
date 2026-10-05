@@ -92,8 +92,35 @@ create trigger change_requests_audit_ins after insert on public.contract_change_
 create trigger change_requests_audit_del after delete on public.contract_change_requests
   for each row execute function public.audit_change_request();
 
+-- If 00023 was first applied from an older copy of the file, these two functions return the
+-- contracts row type instead of jsonb; Postgres can't change a return type in place, so drop
+-- and recreate both (apply_contract_patch first, since approve_contract_change calls it).
+drop function if exists public.approve_contract_change(uuid);
+drop function if exists public.apply_contract_patch(uuid, jsonb);
+create function public.apply_contract_patch(p_operator_id uuid, p_patch jsonb)
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare r record;
+begin
+  if coalesce(public.current_role_name(), '') <> 'management' then
+    raise exception 'Only management can change contract terms' using errcode = '42501';
+  end if;
+  update public.contracts c set
+    rates_by_destination =
+      (coalesce(c.rates_by_destination, '{}'::jsonb)
+        - array(select jsonb_array_elements_text(coalesce(p_patch->'ratesRemove', '[]'::jsonb))))
+      || coalesce(p_patch->'ratesSet', '{}'::jsonb),
+    rate_per_seat = case when p_patch ? 'defaultRate' then (p_patch->>'defaultRate')::numeric else c.rate_per_seat end,
+    default_allotment_type = case when p_patch ? 'allotmentType' then p_patch->>'allotmentType' else c.default_allotment_type end,
+    default_option_release_days = case when p_patch ? 'optionReleaseDays' then (p_patch->>'optionReleaseDays')::int else c.default_option_release_days end
+  where c.tour_operator_id = p_operator_id
+  returning c.* into r;
+  if r.id is null then raise exception 'No contract for operator %', p_operator_id; end if;
+  return to_jsonb(r);
+end $$;
+
 -- approve_contract_change flags the delete as an approval (transaction-local)
-create or replace function public.approve_contract_change(p_request_id uuid)
+create function public.approve_contract_change(p_request_id uuid)
 returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare req record; r jsonb;
@@ -123,3 +150,9 @@ create policy contract_change_requests_insert on public.contract_change_requests
 drop policy if exists contract_change_requests_delete on public.contract_change_requests;
 create policy contract_change_requests_delete on public.contract_change_requests for delete to authenticated
   using (public.current_role_name() = 'management' or requested_by = (select auth.uid()));
+
+-- drop removed the grants; restore them (same as 00023)
+revoke all on function public.apply_contract_patch(uuid, jsonb) from public, anon;
+revoke all on function public.approve_contract_change(uuid) from public, anon;
+grant execute on function public.apply_contract_patch(uuid, jsonb) to authenticated;
+grant execute on function public.approve_contract_change(uuid) to authenticated;
