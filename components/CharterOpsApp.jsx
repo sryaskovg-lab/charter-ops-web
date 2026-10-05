@@ -4867,6 +4867,41 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   const [editingRoute, setEditingRoute] = useState(null); // route key currently being edited
   const [editingRouteValue, setEditingRouteValue] = useState("");
   const [contractDraft, setContractDraft] = useState(null); // { defaultRate, allotmentType, optionReleaseDays }
+  // History tab: rows come from audit_log, which only database triggers write.
+  const [history, setHistory] = useState({}); // operatorId -> { rows } | { error } | { loading }
+  async function loadHistory(opId) {
+    setHistory(h => ({ ...h, [opId]: { loading: true } }));
+    const { data, error } = await supabase.from("audit_log").select("*").eq("tour_operator_id", opId).order("at", { ascending: false }).limit(500);
+    setHistory(h => ({ ...h, [opId]: error ? { error: error.message } : { rows: data || [] } }));
+  }
+  // Collapse the per-row reprice entries of one bulk "Apply to allocations" into a single line.
+  function describeHistory(rows) {
+    const out = [];
+    for (const r of rows) {
+      const d = r.details || {};
+      const who = r.actor_name || t("auditSystem");
+      const label = k => isRtKey(k) ? `${k.slice(RT_PREFIX.length)} ${t("tripRoundtrip").toLowerCase()}` : k;
+      let text, group = null;
+      if (r.kind === "rate_set") text = t("auditRateSet", label(d.key), d.old, d.new);
+      else if (r.kind === "rate_removed") text = t("auditRateRemoved", label(d.key), d.old);
+      else if (r.kind === "default_rate") text = t("auditDefaultRate", d.old, d.new);
+      else if (r.kind === "allotment_type") text = t("auditAllotmentType", d.old, d.new);
+      else if (r.kind === "option_days") text = t("auditOptionDays", d.old, d.new);
+      else if (r.kind === "change_requested") text = t("auditRequested", d.summary);
+      else if (r.kind === "change_approved") text = t("auditApproved", d.summary);
+      else if (r.kind === "change_discarded") text = t("auditDiscarded", d.summary);
+      else if (r.kind === "allotment_reprice") {
+        const prev = out[out.length - 1];
+        const sameBatch = prev && prev.group && prev.group.actor === r.actor && prev.group.old === d.old && prev.group.new === d.new && Math.abs(new Date(prev.at) - new Date(r.at)) < 10000;
+        if (sameBatch) { prev.group.count++; prev.group.seats += d.seats || 0; prev.text = t("auditRepriceMany", prev.group.count, prev.group.seats, d.old, d.new); continue; }
+        const f = flights.find(x => x.id === d.flight_id);
+        group = { actor: r.actor, old: d.old, new: d.new, count: 1, seats: d.seats || 0, flightRef: f ? `${f.ref} ${iso(f.start)}` : null };
+        text = t("auditRepriceOne", group.flightRef || "allotment", d.old, d.new);
+      } else text = r.kind;
+      out.push({ id: r.id, at: r.at, who, text, group });
+    }
+    return out;
+  }
 
   // Management applies a contract/rate patch immediately, same as always. Anyone else with
   // editContracts (the liaison role) can still propose the same patch, but it's queued for
@@ -4898,6 +4933,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
     setExpanded(e => (e && e.id === id && e.tab === tab) ? null : { id, tab });
     setReleaseSelected(new Map()); setConfirmRelease(false); setNewRouteCode(""); setNewRoutePrice(""); setEditingRoute(null);
     setAllocView("seats"); setContractDraft(null);
+    if (tab === "history" && !(expanded && expanded.id === id && expanded.tab === "history")) loadHistory(id);
   }
   const flightMatches = flightRateSearch.trim().length >= 2
     ? flights.filter(f => f.ref.toLowerCase().includes(flightRateSearch.toLowerCase()) || `${f.origin}-${f.destination}`.toLowerCase().includes(flightRateSearch.toLowerCase())).slice(0, 30)
@@ -4978,6 +5014,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
             const isOverview = expanded?.id === o.id && expanded.tab === "overview";
             const isContract = expanded?.id === o.id && expanded.tab === "contract";
             const isAllocations = expanded?.id === o.id && expanded.tab === "allocations";
+            const isHistory = expanded?.id === o.id && expanded.tab === "history";
             const routesWithFlights = [...new Set(flights.map(f => routeKeyFor(f.origin, f.destination)))].filter(r => !(o.ratesByDestination || {})[r]).sort();
             const draft = isContract ? (contractDraft || { defaultRate: o.defaultRate, allotmentType: o.allotmentType, optionReleaseDays: o.optionReleaseDays }) : null;
             return (
@@ -5000,6 +5037,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                       <button onClick={() => toggle(o.id, "overview")} style={miniBtn}>{isOverview ? t("hide") : t("overviewTabBtn")}</button>
                       {perms.editContracts && <button onClick={() => toggle(o.id, "contract")} style={miniBtn}>{isContract ? t("hide") : t("contractTabBtn")}</button>}
                       <button onClick={() => toggle(o.id, "allocations")} style={miniBtn}>{isAllocations ? t("hide") : t("allocationsTabBtn")}</button>
+                      <button onClick={() => toggle(o.id, "history")} style={miniBtn}>{isHistory ? t("hide") : t("historyTabBtn")}</button>
                       {perms.editContracts && confirmDeleteId !== o.id && <button onClick={() => setConfirmDeleteId(o.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("delete")}</button>}
                       {perms.editContracts && confirmDeleteId === o.id && (
                         <>
@@ -5028,6 +5066,27 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                     )}
                   </td></tr>
                 )}
+                {isHistory && (() => {
+                  const h = history[o.id] || { loading: true };
+                  const entries = h.rows ? describeHistory(h.rows) : [];
+                  return (
+                    <tr><td colSpan={8} style={{ padding: "8px 10px 14px", background: C.panel2 }}>
+                      <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 8 }}>{t("historyRecorded")}</div>
+                      {h.loading && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyLoading")}</div>}
+                      {h.error && <div style={{ fontSize: 11.5, color: C.red }}>{t("historyLoadError", h.error)}</div>}
+                      {h.rows && entries.length === 0 && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyEmpty")}</div>}
+                      <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                        {entries.map(e => (
+                          <div key={e.id} style={{ display: "flex", gap: 10, padding: "5px 0", borderBottom: `1px solid ${C.border}`, fontSize: 11.5 }}>
+                            <span style={{ fontFamily: MONO, color: C.faint, whiteSpace: "nowrap" }}>{new Date(e.at).toLocaleString()}</span>
+                            <span style={{ color: C.muted, whiteSpace: "nowrap" }}>{e.who}</span>
+                            <span style={{ flex: 1 }}>{e.text}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </td></tr>
+                  );
+                })()}
                 {isContract && draft && (
                   <tr><td colSpan={8} style={{ padding: "6px 10px 14px", background: C.panel2 }}>
                     <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
