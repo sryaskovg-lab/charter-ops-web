@@ -1084,6 +1084,27 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     pushNotification("Allotment repriced", `${op?.name || "Operator"} · $${current.pricePerSeat} → $${newPrice}/seat`, "allotment");
   }
 
+  // Bulk counterpart of repriceAllotment, used by the rate card's "Apply to allocations" action:
+  // sets one new per-leg price on a batch of already-allocated seats. Same deliberate-override
+  // rule as repriceAllotment — only ever called from an explicit, confirmed click, never as a
+  // side effect of editing a rate. Chunked at 150 ids for PostgREST's URL-length limit.
+  async function repriceAllotmentsBulk(ids, newPrice) {
+    if (!ids.length || !(newPrice > 0)) return;
+    let done = 0, failed = 0;
+    for (let i = 0; i < ids.length; i += 150) {
+      const chunk = ids.slice(i, i + 150);
+      const { error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).in("id", chunk);
+      if (error) { failed += chunk.length; continue; }
+      const chunkSet = new Set(chunk);
+      setAllotmentsRaw(as => as.map(a => chunkSet.has(a.id) ? { ...a, pricePerSeat: newPrice } : a));
+      done += chunk.length;
+    }
+    if (done) {
+      pushToast(`Repriced ${done} allotment${done === 1 ? "" : "s"} to $${newPrice}/seat${failed ? ` — ${failed} failed` : ""}`, failed ? "warn" : "ok");
+      pushNotification("Allotments repriced", `${done} allotment${done === 1 ? "" : "s"} → $${newPrice}/seat`, "allotment");
+    } else pushToast("Could not reprice allotments", "warn");
+  }
+
   async function removeAllotment(id) {
     // Same rule again: removing an allotment with seats on it is a reduction to zero, which
     // isn't allowed once seats are allocated. Only a genuinely empty row could ever be removed.
@@ -1699,7 +1720,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         </div>
       )}
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms} contractChangeRequests={contractChangeRequests}
-        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} onPatchAllotment={patchAllotment}
+        onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} onRepriceAllotmentsBulk={repriceAllotmentsBulk} onPatchAllotment={patchAllotment}
         onQueueContractChange={queueContractChange} onApproveContractChange={approveContractChange} onDiscardContractChange={discardContractChange} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
@@ -4792,7 +4813,7 @@ function InlinePropose({ label, initial, confirmLabel, onPropose }) {
   );
 }
 
-function OperatorsPanel({ operators, setOperators, flights, allotments, perms, contractChangeRequests, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment, onPatchAllotment, onQueueContractChange, onApproveContractChange, onDiscardContractChange }) {
+function OperatorsPanel({ operators, setOperators, flights, allotments, perms, contractChangeRequests, onAddOperator, onBulkImportOperators, onBulkImportAllotments, onDeleteOperator, onAddAllotment, onReleaseAllotments, onRepriceAllotment, onRepriceAllotmentsBulk, onPatchAllotment, onQueueContractChange, onApproveContractChange, onDiscardContractChange }) {
   const { t } = useLanguage();
   // expanded.tab: "overview" | "contract" | "allocations" — one operator, one tab, at a time.
   const [expanded, setExpanded] = useState(null); // { id, tab }
@@ -4814,6 +4835,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   const [repricingValue, setRepricingValue] = useState("");
   const [newRouteCode, setNewRouteCode] = useState("");
   const [newRoutePrice, setNewRoutePrice] = useState("");
+  const [applyingRoute, setApplyingRoute] = useState(null); // rate-card key awaiting "apply to allocations" confirm
   const [editingRoute, setEditingRoute] = useState(null); // route key currently being edited
   const [editingRouteValue, setEditingRouteValue] = useState("");
   const [contractDraft, setContractDraft] = useState(null); // { defaultRate, allotmentType, optionReleaseDays }
@@ -4865,6 +4887,22 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
   }
   const now = new Date();
   const soonCutoff = addDays(now, 10);
+  // Which already-allocated seats a rate-card entry would reprice: future flights only, same
+  // route (either direction for a roundtrip rate) and same trip type, and not already at the
+  // target per-leg price. Legacy destination-only keys are skipped — too ambiguous to match safely.
+  function allocationsForRate(opAllotments, key, price) {
+    const rt = isRtKey(key);
+    const base = rt ? key.slice(RT_PREFIX.length) : key;
+    const target = rt ? price / 2 : price;
+    if (!base.includes("-")) return { target, list: [] };
+    const list = opAllotments.filter(a => {
+      const f = flights.find(fl => fl.id === a.flightId);
+      if (!f || f.start < now || (a.tripType === "roundtrip") !== rt || a.pricePerSeat === target) return false;
+      const route = `${f.origin}-${f.destination}`;
+      return route === base || (rt && `${f.destination}-${f.origin}` === base);
+    });
+    return { target, list };
+  }
 
   return (
     <div style={{ padding: 16 }}>
@@ -5004,6 +5042,20 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                             <>
                               <span>${price}{isRtKey(route) && <span style={{ color: C.faint }}> {t("perLegShare", price / 2)}</span>}</span>
                               <button onClick={() => { setEditingRoute(route); setEditingRouteValue(price); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("changePriceBtn")}</button>
+                              {perms.approveContracts && (() => {
+                                const { target, list } = allocationsForRate(opAllotments, route, price);
+                                if (list.length === 0) return null;
+                                const seatTotal = list.reduce((s, a) => s + a.seatsAllocated, 0);
+                                return applyingRoute === route ? (
+                                  <>
+                                    <span style={{ color: C.amber, fontSize: 11 }}>{t("applyConfirmText", list.length, seatTotal, target)}</span>
+                                    <button onClick={() => { onRepriceAllotmentsBulk(list.map(a => a.id), target); setApplyingRoute(null); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                                    <button onClick={() => setApplyingRoute(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
+                                  </>
+                                ) : (
+                                  <button onClick={() => setApplyingRoute(route)} title={t("applyToAllocationsTitle")} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, color: C.amber, borderColor: C.amber }}>{t("applyToAllocationsBtn", list.length)}</button>
+                                );
+                              })()}
                               <button onClick={() => removeRouteRate(o, route)} title={t("removeRouteRate")} style={{ ...miniBtn, padding: "3px 7px", fontSize: 10, color: C.red, borderColor: C.red, marginLeft: "auto" }}>×</button>
                             </>
                           )}
