@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { computeScheduleIssues } from "../../../../lib/scheduling-utils";
 import ReportDocument from "./ReportDocument.jsx";
+import { fetchAllPages } from "../../../../lib/fetchAllPages";
 
 function iso(d) { return new Date(d).toISOString().slice(0, 10); }
 
@@ -26,12 +27,12 @@ export async function POST(request) {
     const endISO = new Date(endDate + "T23:59:59Z").toISOString();
 
     const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }] = await Promise.all([
-      supabase.from("flights").select("*").gte("scheduled_departure", startISO).lte("scheduled_departure", endISO).order("scheduled_departure"),
+      fetchAllPages(() => supabase.from("flights").select("*").gte("scheduled_departure", startISO).lte("scheduled_departure", endISO).order("scheduled_departure").order("id")),
       supabase.from("resources").select("*"),
       supabase.from("tour_operators").select("*"),
-      supabase.from("allotments").select("*"),
+      fetchAllPages(() => supabase.from("allotments").select("*").order("id")),
       supabase.from("scr_log").select("*").gte("created_at", startISO).lte("created_at", endISO).order("created_at"),
-      supabase.from("slot_requests").select("*"),
+      fetchAllPages(() => supabase.from("slot_requests").select("*").order("id")),
     ]);
 
     const flightList = flights || [];

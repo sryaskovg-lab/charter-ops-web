@@ -2,6 +2,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
+import { fetchAllPages } from "../lib/fetchAllPages";
 import * as XLSX from "xlsx";
 import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
@@ -233,10 +234,10 @@ function rateFor(op, origin, destination, tripType = "one_way") {
 async function fetchAll() {
   const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }, { data: contractChangeRequests }] = await Promise.all([
     supabase.from("resources").select("*").order("code"),
-    supabase.from("flights").select("*").order("scheduled_departure"),
+    fetchAllPages(() => supabase.from("flights").select("*").order("scheduled_departure").order("id")),
     supabase.from("tour_operators").select("*").order("name"),
     supabase.from("contracts").select("*"),
-    supabase.from("allotments").select("*"),
+    fetchAllPages(() => supabase.from("allotments").select("*").order("id")),
     supabase.from("station_timezones").select("*"),
     supabase.from("profiles").select("*").order("name"),
     supabase.from("tasks").select("*").order("created_at"),
@@ -244,9 +245,9 @@ async function fetchAll() {
     supabase.from("maintenance_blocks").select("*").order("start_at"),
     supabase.from("acknowledged_issues").select("*"),
     supabase.from("draft_changes").select("*").order("created_at"),
-    supabase.from("slot_requests").select("*"),
-    supabase.from("slot_correspondence").select("*").order("created_at"),
-    supabase.from("atfm_records").select("*"),
+    fetchAllPages(() => supabase.from("slot_requests").select("*").order("id")),
+    fetchAllPages(() => supabase.from("slot_correspondence").select("*").order("created_at").order("id")),
+    fetchAllPages(() => supabase.from("atfm_records").select("*").order("id")),
     supabase.from("contract_change_requests").select("*").order("requested_at"),
   ]);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
@@ -501,8 +502,9 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // nobody else's history is reachable even if they knew the ids.
   useEffect(() => {
     (async () => {
-      const { data } = await supabase.from("chat_messages").select("role, content").order("created_at");
-      setChatMessages((data || []).map(m => ({ role: m.role, content: m.content })));
+      // newest 200 (an unbounded oldest-first load would hit the 1000-row cap and drop the NEWEST), shown oldest-first
+      const { data } = await supabase.from("chat_messages").select("role, content").order("created_at", { ascending: false }).limit(200);
+      setChatMessages((data || []).reverse().map(m => ({ role: m.role, content: m.content })));
       setChatLoaded(true);
     })();
   }, []);
@@ -785,24 +787,24 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     const channel = supabase
       .channel("schedule-sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "flights" }, async () => {
-        const { data } = await supabase.from("flights").select("*").order("scheduled_departure");
-        setFlightsRaw((data || []).map(mapFlight));
+        const { data, error } = await fetchAllPages(() => supabase.from("flights").select("*").order("scheduled_departure").order("id"));
+        if (!error) setFlightsRaw(data.map(mapFlight));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "allotments" }, async () => {
-        const { data } = await supabase.from("allotments").select("*");
-        setAllotmentsRaw((data || []).map(mapAllotment));
+        const { data, error } = await fetchAllPages(() => supabase.from("allotments").select("*").order("id"));
+        if (!error) setAllotmentsRaw(data.map(mapAllotment));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "slot_requests" }, async () => {
-        const { data } = await supabase.from("slot_requests").select("*");
-        setSlotRequests((data || []).map(mapSlotRequest));
+        const { data, error } = await fetchAllPages(() => supabase.from("slot_requests").select("*").order("id"));
+        if (!error) setSlotRequests(data.map(mapSlotRequest));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "slot_correspondence" }, async () => {
-        const { data } = await supabase.from("slot_correspondence").select("*").order("created_at");
-        setSlotCorrespondence((data || []).map(mapSlotCorrespondence));
+        const { data, error } = await fetchAllPages(() => supabase.from("slot_correspondence").select("*").order("created_at").order("id"));
+        if (!error) setSlotCorrespondence(data.map(mapSlotCorrespondence));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "atfm_records" }, async () => {
-        const { data } = await supabase.from("atfm_records").select("*");
-        setAtfmRecords((data || []).map(mapAtfmRecord));
+        const { data, error } = await fetchAllPages(() => supabase.from("atfm_records").select("*").order("id"));
+        if (!error) setAtfmRecords(data.map(mapAtfmRecord));
       })
       .on("postgres_changes", { event: "*", schema: "public", table: "contract_change_requests" }, async () => {
         const { data } = await supabase.from("contract_change_requests").select("*").order("requested_at");

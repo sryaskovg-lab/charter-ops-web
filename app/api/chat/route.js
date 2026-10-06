@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { createClient } from "@supabase/supabase-js";
+import { fetchAllPages } from "../../../lib/fetchAllPages";
 
 // Deliberately narrow, read-only tools — the bot can look things up, it can never write
 // anything. Each one maps to a real Supabase query, not a guess.
@@ -55,7 +56,7 @@ async function runTool(supabase, name, input) {
     return { flights: rows.map(r => ({ ref: r.ref, origin: r.origin, destination: r.destination, departure_utc: r.scheduled_departure, arrival_utc: r.scheduled_arrival, status: r.status, capacity: r.capacity, aircraft: r.resources?.code })) };
   }
   if (name === "get_allotment_summary") {
-    const { data: allotments, error } = await supabase.from("allotments").select("seats_allocated, price_per_seat, status, tour_operators(name), flights(destination)");
+    const { data: allotments, error } = await fetchAllPages(() => supabase.from("allotments").select("seats_allocated, price_per_seat, status, tour_operators(name), flights(destination)").order("id"));
     if (error) return { error: error.message };
     let rows = (allotments || []).filter(a => a.status !== "cancelled" && a.status !== "released");
     if (input.operator_name) rows = rows.filter(a => a.tour_operators?.name?.toLowerCase().includes(input.operator_name.toLowerCase()));
@@ -72,7 +73,7 @@ async function runTool(supabase, name, input) {
   if (name === "get_fleet_status") {
     const { data: resources, error } = await supabase.from("resources").select("id, code, variant, capacity");
     if (error) return { error: error.message };
-    const { data: flights } = await supabase.from("flights").select("resource_id");
+    const { data: flights } = await fetchAllPages(() => supabase.from("flights").select("resource_id").order("id"));
     const counts = {};
     (flights || []).forEach(f => { counts[f.resource_id] = (counts[f.resource_id] || 0) + 1; });
     return { fleet: (resources || []).map(r => ({ code: r.code, variant: r.variant, capacity: r.capacity, flights_on_board: counts[r.id] || 0 })) };
