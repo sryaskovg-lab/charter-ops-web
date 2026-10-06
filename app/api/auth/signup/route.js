@@ -2,9 +2,8 @@ import { getSupabaseAdmin } from "../../../../lib/supabaseAdmin";
 
 // POST /api/auth/signup  { name, email, password }
 // Public — no auth required, this IS how someone gets their first login. Deliberately does
-// NOT accept a role from the request: every self-signup lands as 'commercial' (the least
-// privileged role, via the handle_new_user trigger's default), no matter what the client
-// sends. Management promotes people afterward from the Team tab (or, for the very first
+// NOT accept a role from the request: every self-signup lands as 'pending' (no access to
+// any data, via the handle_new_user trigger), no matter what the client sends. Management promotes people afterward from the Team tab (or, for the very first
 // account ever, via one SQL statement — see README).
 //
 // email_confirm: true skips Supabase's email-confirmation step entirely, so the account is
@@ -24,7 +23,7 @@ export async function POST(request) {
   const { data, error } = await supabaseAdmin.auth.admin.createUser({
     email, password, email_confirm: true,
     user_metadata: { name: name || email },
-    // role intentionally omitted — handle_new_user defaults new profiles to 'commercial'
+    // role intentionally omitted — handle_new_user always creates profiles as 'pending'
   });
 
   if (error) {

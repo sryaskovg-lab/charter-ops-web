@@ -100,7 +100,8 @@ async function resolveUnknownStations(codes, onResolved) {
   const toResolve = [...codes].filter(c => c && !STATION_TZ[c] && DYNAMIC_TZ[c] === undefined && !TZ_LOOKUP_PENDING.has(c));
   for (const code of toResolve) {
     TZ_LOOKUP_PENDING.add(code);
-    fetch(`/api/timezone?code=${code}`)
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => fetch(`/api/timezone?code=${code}`, { headers: { Authorization: `Bearer ${session?.access_token}` } }))
       .then(r => r.json())
       .then(data => { DYNAMIC_TZ[code] = data.tz || false; })
       .catch(() => { DYNAMIC_TZ[code] = false; })
@@ -139,6 +140,7 @@ const STATUS_STYLE = {
 // contract_change_request for management to approve or discard -- the system's own sign-off
 // step, mirroring how Draft Mode queues schedule edits for review.
 const ROLES = {
+  pending: { label: "Pending approval", editFlight: false, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, reports: "none" },
   ops_coordinator: { label: "Schedule coordinator (ops)", editFlight: true, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, reports: "utilization" },
   commercial: { label: "Commercial staff", editFlight: false, editAllotments: true, editContracts: false, approveContracts: false, manageUsers: false, reports: "pipeline" },
   tour_operator_liaison: { label: "Tour operator liaison", editFlight: false, editAllotments: true, editContracts: true, approveContracts: false, manageUsers: false, reports: "portfolio" },
@@ -394,7 +396,22 @@ function IconMenu() { return <svg width="18" height="18" viewBox="0 0 24 24" fil
 function IconSlot() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l4 2" /></svg>; }
 
 export default function CharterOpsApp(props) {
-  return <LanguageProvider><CharterOpsAppInner {...props} /></LanguageProvider>;
+  return <LanguageProvider>{props.profile?.role === "pending" ? <PendingApproval {...props} /> : <CharterOpsAppInner {...props} />}</LanguageProvider>;
+}
+
+// New accounts have no access to any data until management promotes them (enforced by the
+// database, not just this screen).
+function PendingApproval({ profile, onSignOut }) {
+  const { t } = useLanguage();
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, color: C.text, padding: 24 }}>
+      <div style={{ maxWidth: 420, textAlign: "center" }}>
+        <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 10 }}>{t("pendingTitle")}</div>
+        <div style={{ fontSize: 13.5, color: C.muted, marginBottom: 18 }}>{t("pendingBody", profile.email || profile.name)}</div>
+        <button onClick={onSignOut} style={{ padding: "8px 16px", borderRadius: 8, border: `1px solid ${C.border}`, background: C.panel, color: C.text, cursor: "pointer" }}>{t("signOut")}</button>
+      </div>
+    </div>
+  );
 }
 function CharterOpsAppInner({ profile, onSignOut }) {
   const { t, lang, setLang } = useLanguage();
@@ -4418,8 +4435,9 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole, onLogScr
     if (!emailTo.trim() || !output) return;
     setSendingEmail(true);
     try {
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/email/send", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({ to: emailTo.trim(), subject: `SCR — ${header.clearanceAirport || "slot request"}`, text: output }),
       });
       const body = await res.json();
@@ -4742,9 +4760,10 @@ function ReportsModal({ onClose, pushToast }) {
     setSending(true);
     try {
       const pdf = lastPdf || await callGenerate().then(r => { setLastPdf({ base64: r.base64, filename: r.filename }); return r; });
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/email/send", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` },
         body: JSON.stringify({
           to: emailTo.trim(), subject: `Charter Ops report — ${startDate} to ${endDate}`,
           text: `Attached: the Charter Ops report for ${startDate} to ${endDate}.`,
@@ -5745,10 +5764,11 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
 }
 
 // ---------- team / users (management only) ----------
-const ROLE_LABEL_KEY = { ops_coordinator: "roleOpsCoordinator", commercial: "roleCommercial", tour_operator_liaison: "roleLiaison", management: "roleManagement" };
+const ROLE_LABEL_KEY = { pending: "rolePending", ops_coordinator: "roleOpsCoordinator", commercial: "roleCommercial", tour_operator_liaison: "roleLiaison", management: "roleManagement" };
 function roleLabel(role, t) { return t(ROLE_LABEL_KEY[role] || "role"); }
 function roleOptionsFor(t) {
   return [
+    ["pending", t("rolePending")],
     ["commercial", t("roleCommercial")],
     ["tour_operator_liaison", t("roleLiaison")],
     ["ops_coordinator", t("roleOpsCoordinator")],

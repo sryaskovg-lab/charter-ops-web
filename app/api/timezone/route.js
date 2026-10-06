@@ -1,4 +1,5 @@
-import { supabaseAdmin } from "../../../lib/supabaseAdmin";
+import { getSupabaseAdmin } from "../../../lib/supabaseAdmin";
+import { requireActiveUser } from "../../../lib/serverAuth";
 
 // GET /api/timezone?code=AYT -> { code, tz } | { code, tz: null, error }
 //
@@ -7,6 +8,9 @@ import { supabaseAdmin } from "../../../lib/supabaseAdmin";
 // Checks the `station_timezones` cache first so a given airport is looked up
 // against APIFreaks at most once, ever, across every user of this deployment.
 export async function GET(request) {
+  const who = await requireActiveUser(request);
+  if (who instanceof Response) return who;
+  const supabaseAdmin = getSupabaseAdmin();
   const code = new URL(request.url).searchParams.get("code")?.toUpperCase();
   if (!code || !/^[A-Z]{3}$/.test(code)) {
     return Response.json({ error: "Provide a 3-letter IATA code as ?code=" }, { status: 400 });

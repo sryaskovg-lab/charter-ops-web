@@ -35,9 +35,14 @@ export async function POST(request) {
     const tempPassword = crypto.randomBytes(9).toString("base64").replace(/[+/=]/g, "x");
     const { data, error } = await supabaseAdmin.auth.admin.createUser({
       email, password: tempPassword, email_confirm: true,
-      user_metadata: { name: name || email, role },
+      user_metadata: { name: name || email },
     });
     if (error) return Response.json({ error: error.message }, { status: 400 });
+
+    // The signup trigger always creates profiles as 'pending' (it ignores any role in user
+    // metadata, so nobody can self-assign one); the role management chose is applied here.
+    const { error: roleErr } = await supabaseAdmin.from("profiles").update({ role }).eq("id", data.user.id);
+    if (roleErr) return Response.json({ error: `User created but role could not be set: ${roleErr.message}` }, { status: 500 });
 
     return Response.json({ userId: data.user.id, tempPassword });
   } catch (err) {

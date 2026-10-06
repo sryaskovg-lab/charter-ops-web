@@ -1,4 +1,5 @@
 import { Resend } from "resend";
+import { requireActiveUser } from "../../../../lib/serverAuth";
 
 // Generic send endpoint reused by both "send SCR to coordinator" and "email PDF report" — the
 // caller decides content; this route only handles actually dispatching it. Attachment content
@@ -6,17 +7,26 @@ import { Resend } from "resend";
 // SCR is plain text with no attachment).
 export async function POST(request) {
   try {
+    // Only signed-in, approved staff may send mail from the company address.
+    const who = await requireActiveUser(request);
+    if (who instanceof Response) return who;
+
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey) return Response.json({ error: "RESEND_API_KEY is not set for this deployment. Add it in Vercel → Settings → Environment Variables, then redeploy." }, { status: 500 });
 
     const { to, subject, text, fromName, attachmentBase64, attachmentFilename } = await request.json();
     if (!to || !subject || !text) return Response.json({ error: "to, subject, and text are required." }, { status: 400 });
 
+    const recipients = Array.isArray(to) ? to : [to];
+    if (recipients.length > 10 || !recipients.every(r => typeof r === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r.trim()))) {
+      return Response.json({ error: "Provide up to 10 valid recipient email addresses." }, { status: 400 });
+    }
+
     const resend = new Resend(apiKey);
     const fromAddress = process.env.RESEND_FROM_ADDRESS || "onboarding@resend.dev"; // test-only default — set RESEND_FROM_ADDRESS to a verified domain address for real production sends
     const { data, error } = await resend.emails.send({
       from: fromName ? `${fromName} <${fromAddress}>` : fromAddress,
-      to: Array.isArray(to) ? to : [to],
+      to: recipients.map(r => r.trim()),
       subject,
       text,
       ...(attachmentBase64 ? { attachments: [{ filename: attachmentFilename || "attachment.pdf", content: attachmentBase64 }] } : {}),
