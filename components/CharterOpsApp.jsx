@@ -234,7 +234,7 @@ function rateFor(op, origin, destination, tripType = "one_way") {
 }
 
 async function fetchAll() {
-  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }, { data: contractChangeRequests }] = await Promise.all([
+  const results = await Promise.all([
     supabase.from("resources").select("*").order("code"),
     fetchAllPages(() => supabase.from("flights").select("*").order("scheduled_departure").order("id")),
     supabase.from("tour_operators").select("*").order("name"),
@@ -252,6 +252,11 @@ async function fetchAll() {
     fetchAllPages(() => supabase.from("atfm_records").select("*").order("id")),
     supabase.from("contract_change_requests").select("*").order("requested_at"),
   ]);
+  const [{ data: resources }, { data: flights }, { data: operators }, { data: contracts }, { data: allotments }, { data: tzCache }, { data: profiles }, { data: tasks }, { data: notifications }, { data: maintenanceBlocks }, { data: ackIssues }, { data: draftChanges }, { data: slotRequests }, { data: slotCorrespondence }, { data: atfmRecords }, { data: contractChangeRequests }] = results;
+  // A failed query used to look exactly like an empty table. Report which ones failed so the
+  // app can say so instead of silently showing a blank board.
+  const TABLES = ["resources", "flights", "tour operators", "contracts", "allotments", "station timezones", "profiles", "tasks", "notifications", "maintenance", "acknowledged issues", "draft changes", "slot requests", "slot correspondence", "ATFM records", "contract change requests"];
+  const loadErrors = results.map((r, i) => r.error ? `${TABLES[i]} (${r.error.message})` : null).filter(Boolean);
   (tzCache || []).forEach(row => { DYNAMIC_TZ[row.code] = row.tz; });
   const contractByOperator = Object.fromEntries((contracts || []).map(c => [c.tour_operator_id, c]));
   return {
@@ -269,6 +274,7 @@ async function fetchAll() {
     slotCorrespondence: (slotCorrespondence || []).map(mapSlotCorrespondence),
     atfmRecords: (atfmRecords || []).map(mapAtfmRecord),
     contractChangeRequests: (contractChangeRequests || []).map(mapContractChangeRequest),
+    loadErrors,
   };
 }
 function mapDraftChange(d) { return { id: d.id, flightId: d.flight_id, changeType: d.change_type, patch: d.patch || {}, summary: d.summary, createdBy: d.created_by, createdAt: new Date(d.created_at) }; }
@@ -722,9 +728,11 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return true;
   }
 
+  // Returns true only if the change was really applied and the draft cleared; on any failure the
+  // draft stays in the queue (so nothing is lost) and the reason has already been toasted.
   async function approveDraftChange(draftId) {
     const d = draftChanges.find(x => x.id === draftId);
-    if (!d) return;
+    if (!d) return false;
     if (d.changeType === "create") {
       const p = d.patch;
       const startDate = new Date(p.start);
@@ -733,20 +741,24 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         ref, resource_id: p.resourceId, origin: p.origin, destination: p.destination,
         scheduled_departure: (combineDateAndTime(startDate, p.depTime) || startDate).toISOString(),
         scheduled_arrival: combineArrivalDateTime(combineDateAndTime(startDate, p.depTime) || startDate, p.arrTime)?.toISOString() ?? null,
-        capacity: p.capacity, status: "tentative", color: p.color || null,
+        capacity: p.capacity, status: "tentative", color: p.color || null, leg_type: p.legType || "revenue",
       }).select().single();
-      if (error) { pushToast(`Could not apply draft: ${error.message}`, "warn"); return; }
+      if (error) { pushToast(`Could not apply draft: ${error.message}`, "warn"); return false; }
       setFlightsRaw(fl => [...fl, mapFlight(data)]);
     } else if (d.changeType === "delete") {
-      await deleteFlight(d.flightId, { bypassDraft: true });
+      const ok = await deleteFlight(d.flightId, { bypassDraft: true });
+      if (ok !== true) { pushToast(`Draft kept in the queue (not applied): ${d.summary}`, "warn"); return false; }
     } else {
       const patch = { ...d.patch };
       if (patch.start) patch.start = new Date(patch.start); // drafts store dates as ISO strings (JSON has no Date type) — convert back before applying
-      await updateFlight(d.flightId, patch, { bypassDraft: true, silent: true });
+      const res = await updateFlight(d.flightId, patch, { bypassDraft: true, silent: true });
+      if (res !== "ok") { pushToast(`Draft kept in the queue (not applied): ${d.summary}`, "warn"); return false; }
     }
     const { error: delError } = await supabase.from("draft_changes").delete().eq("id", draftId);
-    if (!delError) setDraftChanges(dc => dc.filter(x => x.id !== draftId));
+    if (delError) { pushToast(`Applied, but the draft could not be cleared: ${delError.message}`, "warn"); return true; }
+    setDraftChanges(dc => dc.filter(x => x.id !== draftId));
     pushToast(`Applied: ${d.summary}`, "ok");
+    return true;
   }
   async function discardDraftChange(draftId) {
     const d = draftChanges.find(x => x.id === draftId);
@@ -755,7 +767,12 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     setDraftChanges(dc => dc.filter(x => x.id !== draftId));
     pushToast(`Discarded: ${d?.summary || "change"}`, "ok");
   }
-  async function approveAllDrafts() { for (const d of draftChanges) await approveDraftChange(d.id); }
+  async function approveAllDrafts() {
+    // Stops reporting per-item success as a blanket "done": tallies what really applied.
+    let applied = 0, kept = 0;
+    for (const d of [...draftChanges]) { if (await approveDraftChange(d.id)) applied++; else kept++; }
+    if (kept) pushToast(`${applied} draft change${applied === 1 ? "" : "s"} applied; ${kept} kept in the queue because they could not be applied`, "warn", true);
+  }
   async function discardAllDrafts() {
     const { error } = await supabase.from("draft_changes").delete().in("id", draftChanges.map(d => d.id));
     if (error) { pushToast(`Could not discard all: ${error.message}`, "warn"); return; }
@@ -776,8 +793,9 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges, slotRequests, slotCorrespondence, atfmRecords, contractChangeRequests } = await fetchAll();
+      const { resources, flights, operators, allotments, profiles, tasks, notifications, maintenanceBlocks, acknowledgedIssueIds, draftChanges, slotRequests, slotCorrespondence, atfmRecords, contractChangeRequests, loadErrors } = await fetchAll();
       if (cancelled) return;
+      if (loadErrors.length) pushToast(`Some data could not be loaded and may look empty: ${loadErrors.join("; ")}. Reload the page to retry.`, "warn", true);
       setResources(resources); setFlightsRaw(flights); setOperatorsRaw(operators); setAllotmentsRaw(allotments); setProfiles(profiles);
       setTasks(tasks); setNotifications(notifications); setMaintenanceBlocks(maintenanceBlocks); setAcknowledgedIssueIds(new Set(acknowledgedIssueIds));
       setDraftChanges(draftChanges);
@@ -801,6 +819,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // manual refresh.
   useEffect(() => {
     if (!loaded) return;
+    let wasDropped = false;
     const channel = supabase
       .channel("schedule-sync")
       .on("postgres_changes", { event: "*", schema: "public", table: "flights" }, async () => {
@@ -832,7 +851,23 @@ function CharterOpsAppInner({ profile, onSignOut }) {
         const byOp = new Map((data || []).map(c => [c.tour_operator_id, c]));
         setOperatorsRaw(ops => ops.map(o => byOp.has(o.id) ? { ...o, ...contractFieldsFromRow(byOp.get(o.id)) } : o));
       })
-      .subscribe();
+      .on("postgres_changes", { event: "*", schema: "public", table: "draft_changes" }, async () => {
+        const { data, error } = await supabase.from("draft_changes").select("*").order("created_at");
+        if (!error) setDraftChanges((data || []).map(mapDraftChange));
+      })
+      .subscribe(async (status) => {
+        // Events missed while the connection was down are gone for good, so after any drop and
+        // reconnect, reload everything once instead of trusting a now-stale local copy.
+        if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") { wasDropped = true; return; }
+        if (status === "SUBSCRIBED" && wasDropped) {
+          wasDropped = false;
+          const r = await fetchAll();
+          if (r.loadErrors.length) return;
+          setFlightsRaw(r.flights); setAllotmentsRaw(r.allotments); setDraftChanges(r.draftChanges);
+          setSlotRequests(r.slotRequests); setSlotCorrespondence(r.slotCorrespondence); setAtfmRecords(r.atfmRecords);
+          setOperatorsRaw(r.operators); setContractChangeRequests(r.contractChangeRequests);
+        }
+      });
     return () => { supabase.removeChannel(channel); };
   }, [loaded]);
 
@@ -900,8 +935,11 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       newArr = combineArrivalDateTime(newDep || patch.start || current.start, effectiveArrTime);
       dbPatch.scheduled_arrival = newArr?.toISOString() ?? null;
     }
-    const { error } = await supabase.from("flights").update(dbPatch).eq("id", flightId);
-    if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return; }
+    const { data: updatedRows, error } = await supabase.from("flights").update(dbPatch).eq("id", flightId).select("id");
+    if (error) { pushToast(`Update failed: ${error.message}`, "warn"); return "failed"; }
+    // PostgREST reports success even when zero rows matched (row deleted by someone else, or
+    // blocked by access rules) -- without this check the screen would show a change that was never saved.
+    if (!updatedRows || updatedRows.length === 0) { pushToast(`Not saved: ${current?.ref || "flight"} no longer exists or you don't have permission to change it`, "warn"); return "failed"; }
     if (newDep) await checkSlotMismatch(flightId, "departure", newDep);
     if (newArr !== null) await checkSlotMismatch(flightId, "arrival", newArr);
     // Mirror the ACTUAL resulting values into local state, not the raw patch — patch.start on
@@ -911,13 +949,14 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (newArr !== null || patch.arrTime !== undefined) localPatch.arrivalAt = newArr;
     if (newArr) localPatch.arrTime = hhmm(newArr.toISOString());
     setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, ...localPatch } : f));
-    if (colorOnly || opts?.silent) return;
+    if (colorOnly || opts?.silent) return "ok";
     const willBeCapacity = patch.capacity ?? before.capacity;
     if (before.allocated > willBeCapacity) {
       pushToast(`Schedule change on ${flights.find(f => f.id === flightId)?.ref}: now oversold by ${before.allocated - willBeCapacity} seats — allotments below reflect it live`, "warn");
     } else {
       pushToast(`Flight updated — all attached allotments now read the new values`, "ok");
     }
+    return "ok";
   }
 
   // allotments.flight_id has ON DELETE CASCADE, so deleting a flight row also removes its
@@ -932,12 +971,14 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       return;
     }
     const affected = allotments.filter(a => a.flightId === flightId && a.status !== "cancelled" && a.status !== "released").length;
-    const { error } = await supabase.from("flights").delete().eq("id", flightId);
-    if (error) { pushToast(`Could not delete flight: ${error.message}`, "warn"); return; }
+    const { data: deletedRows, error } = await supabase.from("flights").delete().eq("id", flightId).select("id");
+    if (error) { pushToast(`Could not delete flight: ${error.message}`, "warn"); return false; }
+    if (!deletedRows || deletedRows.length === 0) { pushToast(`Not deleted: ${flight?.ref || "flight"} no longer exists or you don't have permission`, "warn"); return false; }
     setFlightsRaw(fl => fl.filter(f => f.id !== flightId));
     setAllotmentsRaw(as => as.filter(a => a.flightId !== flightId));
     if (selectedFlightId === flightId) setSelectedFlightId(null);
     pushToast(`${flight?.ref || "Flight"} deleted${affected ? ` — ${affected} active allotment${affected === 1 ? "" : "s"} removed with it` : ""}`, affected ? "warn" : "ok");
+    return true;
   }
 
   async function duplicateFlight(flightId) {
@@ -948,7 +989,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (draftMode) {
       await queueDraftChange(null, "create", {
         resourceId: f.resourceId, origin: f.origin, destination: f.destination, ref: f.ref,
-        start: newStart.toISOString(), depTime: f.depTime, arrTime: f.arrTime, capacity: f.capacity, color: f.color,
+        start: newStart.toISOString(), depTime: f.depTime, arrTime: f.arrTime, capacity: f.capacity, color: f.color, legType: f.legType,
       }, `New flight: ${f.ref} duplicated to ${iso(newStart)}`);
       return;
     }
@@ -964,8 +1005,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   }
 
   async function setFlightColor(flightId, color) {
-    const { error } = await supabase.from("flights").update({ color }).eq("id", flightId);
-    if (error) { pushToast(`Could not update color: ${error.message}`, "warn"); return; }
+    const { data: rows, error } = await supabase.from("flights").update({ color }).eq("id", flightId).select("id");
+    if (error || !rows?.length) { pushToast(`Could not update color: ${error?.message || "not saved (no permission or flight removed)"}`, "warn"); return; }
     setFlightsRaw(fl => fl.map(f => f.id === flightId ? { ...f, color } : f));
   }
 
@@ -983,9 +1024,10 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     const deletedIds = [];
     let firstError = null;
     for (const chunk of chunks) {
-      const { error } = await supabase.from("flights").delete().in("id", chunk);
+      const { data: gone, error } = await supabase.from("flights").delete().in("id", chunk).select("id");
       if (error) { firstError = firstError || error; continue; }
-      deletedIds.push(...chunk);
+      deletedIds.push(...(gone || []).map(r => r.id));
+      if ((gone || []).length < chunk.length) firstError = firstError || { message: "some flights were already gone or you lack permission to delete them" };
     }
     if (deletedIds.length) {
       setFlightsRaw(fl => fl.filter(f => !deletedIds.includes(f.id)));
@@ -1019,7 +1061,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (newResourceId === f.resourceId) return; // dropped back on the same aircraft — nothing to do
     const conflict = checkConflict(newResourceId, f.start, flightId);
     const result = await updateFlight(flightId, { resourceId: newResourceId });
-    if (result === "drafted") return; // queueDraftChange already showed its own toast
+    if (result === "drafted" || result === "failed") return; // queueDraftChange / updateFlight already showed their own toast
     setSelectedFlightId(flightId);
     if (conflict) pushToast(`${f.ref} reassigned — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
     else pushToast(`${f.ref} reassigned to ${resources.find(r => r.id === newResourceId)?.code} — date and time unchanged`, "ok");
@@ -1387,8 +1429,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // Role changes go straight through RLS (the "profiles_update_by_management" policy only
   // lets a management-role caller update someone else's row) — no server route needed.
   async function updateUserRole(id, newRole) {
-    const { error } = await supabase.from("profiles").update({ role: newRole }).eq("id", id);
-    if (error) { pushToast(`Could not update role: ${error.message}`, "warn"); return; }
+    const { data: rows, error } = await supabase.from("profiles").update({ role: newRole }).eq("id", id).select("id");
+    if (error || !rows?.length) { pushToast(`Could not update role: ${error?.message || "not saved (only management can change roles)"}`, "warn"); return; }
     setProfiles(ps => ps.map(p => p.id === id ? { ...p, role: newRole } : p));
     pushToast("Role updated", "ok");
   }
@@ -1476,20 +1518,32 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // season changed its block times" case, not just one flight at a time. Sequential awaits
   // rather than Promise.all so we don't fire dozens of concurrent writes at once.
   async function bulkRetime(matches, change) {
+    let done = 0, failed = 0;
     for (const f of matches) {
       const patch = {};
       if (change.dayShift) patch.start = addDays(f.start, change.dayShift);
       if (change.timeMode === "shift" && change.minuteShift) {
-        if (f.depTime) patch.depTime = minutesToHHMM(timeToMinutes(f.depTime) + change.minuteShift);
+        if (f.depTime) {
+          // minutesToHHMM wraps modulo 24h, so a shift past midnight (22:00 + 3h) must also move the DATE,
+          // otherwise the flight lands ~21 hours EARLIER the same day.
+          const total = timeToMinutes(f.depTime) + change.minuteShift;
+          const carry = Math.floor(total / 1440);
+          patch.depTime = minutesToHHMM(total);
+          if (carry) patch.start = addDays(patch.start || f.start, carry);
+        }
         if (f.arrTime) patch.arrTime = minutesToHHMM(timeToMinutes(f.arrTime) + change.minuteShift);
       } else if (change.timeMode === "set" && change.newDepTime) {
         const durMin = (f.depTime && f.arrTime) ? ((timeToMinutes(f.arrTime) - timeToMinutes(f.depTime) + 1440) % 1440) : null;
         patch.depTime = change.newDepTime;
         if (durMin != null) patch.arrTime = minutesToHHMM(timeToMinutes(change.newDepTime) + durMin);
       }
-      if (Object.keys(patch).length) await updateFlight(f.id, patch, { silent: true });
+      if (Object.keys(patch).length) {
+        const res = await updateFlight(f.id, patch, { silent: true });
+        if (res === "failed") failed++; else if (res === "ok") done++;
+      }
     }
-    pushToast(`Retimed ${matches.length} flight${matches.length === 1 ? "" : "s"}`, "ok");
+    if (failed) pushToast(`Retimed ${done} flight${done === 1 ? "" : "s"}; ${failed} could not be saved`, "warn");
+    else pushToast(`Retimed ${done || matches.length} flight${(done || matches.length) === 1 ? "" : "s"}`, "ok");
     setShowBulkRetime(false);
   }
 
