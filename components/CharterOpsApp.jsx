@@ -1584,6 +1584,31 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return true;
   }
 
+  // Shared by the three bulk writers. Refuses without edit rights, drops rows the database
+  // would reject anyway (no capacity, arrival not after departure) and says how many, and
+  // inserts in chunks so one big import can't hit request-size limits. A failure partway
+  // keeps what already went in (and shows it) instead of pretending nothing happened.
+  async function insertFlightsChunked(inserts, label) {
+    if (!perms.editFlight) { pushToast("You don't have permission to add flights.", "warn"); return null; }
+    const bad = r => !(Number(r.capacity) > 0) || (r.scheduled_arrival && new Date(r.scheduled_arrival) <= new Date(r.scheduled_departure));
+    const valid = inserts.filter(r => !bad(r));
+    const skipped = inserts.length - valid.length;
+    if (valid.length === 0) { pushToast(`${label}: nothing to add — ${skipped} row${skipped === 1 ? "" : "s"} had no seat capacity or an arrival before departure.`, "warn"); return null; }
+    const added = [];
+    for (let i = 0; i < valid.length; i += 300) {
+      const { data, error } = await supabase.from("flights").insert(valid.slice(i, i + 300)).select();
+      if (error) {
+        if (added.length) setFlightsRaw(fl => [...fl, ...added]);
+        pushToast(`${label} failed after ${added.length} of ${valid.length} flights: ${error.message}${added.length ? " — those first flights were saved; check the board before retrying." : ""}`, "warn");
+        return null;
+      }
+      added.push(...(data || []).map(mapFlight));
+    }
+    setFlightsRaw(fl => [...fl, ...added]);
+    if (skipped) pushToast(`${skipped} row${skipped === 1 ? "" : "s"} skipped: no seat capacity or arrival before departure.`, "warn");
+    return added;
+  }
+
   async function commitBulkRows(rows) {
     const inserts = rows.map((r, i) => ({
       resource_id: r.resourceId, origin: r.origin, destination: r.destination,
@@ -1592,10 +1617,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       capacity: resources.find(res => res.id === r.resourceId)?.capacity,
       status: "tentative", ref: r.flightNo ? "DV" + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
     }));
-    const { data, error } = await supabase.from("flights").insert(inserts).select();
-    if (error) { pushToast(`Import failed: ${error.message}`, "warn"); return; }
-    const newFlights = (data || []).map(mapFlight);
-    setFlightsRaw(fl => [...fl, ...newFlights]);
+    const newFlights = await insertFlightsChunked(inserts, "Import");
+    if (!newFlights) return;
     const ferryCount = newFlights.filter(f => f.legType === "ferry").length;
     pushToast(`Imported ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"}${ferryCount ? ` (${ferryCount} ferry/positioning, excluded from inventory)` : ""}`, "ok");
     pushNotification("Schedule update", `${newFlights.length} flights imported`, "flight");
@@ -1609,10 +1632,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: pattern.capacity, status: "tentative", ref: r.ref,
     }));
-    const { data, error } = await supabase.from("flights").insert(inserts).select();
-    if (error) { pushToast(`Rotation commit failed: ${error.message}`, "warn"); return; }
-    const newFlights = (data || []).map(mapFlight);
-    setFlightsRaw(fl => [...fl, ...newFlights]);
+    const newFlights = await insertFlightsChunked(inserts, "Rotation commit");
+    if (!newFlights) return;
     pushToast(`Generated ${newFlights.length} flights from rotation pattern (${pattern.origin}⇄${pattern.destination})${pattern.includeReturn ? " — outbound + return" : ""}`, "ok");
     pushNotification("Rotation generated", `${newFlights.length} flights · ${pattern.origin}⇄${pattern.destination}`, "flight");
     setShowRotationGen(false);
@@ -1625,10 +1646,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: resources.find(res => res.id === r.resourceId)?.capacity, status: "tentative", ref: r.ref,
     }));
-    const { data, error } = await supabase.from("flights").insert(inserts).select();
-    if (error) { pushToast(`Scheduling engine commit failed: ${error.message}`, "warn"); return; }
-    const newFlights = (data || []).map(mapFlight);
-    setFlightsRaw(fl => [...fl, ...newFlights]);
+    const newFlights = await insertFlightsChunked(inserts, "Scheduling engine commit");
+    if (!newFlights) return;
     pushToast(`Scheduling engine added ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"} across the fleet`, "ok");
     pushNotification("Schedule generated", `${newFlights.length} flights via scheduling engine`, "flight");
     setShowSchedulingEngine(false);
@@ -1908,7 +1927,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
   const pendingCreates = draftChanges.filter(d => d.changeType === "create");
   const pendingUpdates = draftChanges.filter(d => d.changeType === "update");
   const [showIssues, setShowIssues] = useState(false);
-  const allIssues = useMemo(() => computeScheduleIssues(flights, resources, slotRequests), [flights, resources, slotRequests]);
+  const allIssues = useMemo(() => computeScheduleIssues(flights, resources, slotRequests, maintenanceBlocks || []), [flights, resources, slotRequests, maintenanceBlocks]);
   const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
   const acknowledgedIssuesList = allIssues.filter(i => acknowledgedIssueIds.has(i.id));
   const errorCount = activeIssues.filter(i => i.severity === "error").length;
@@ -2742,7 +2761,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
         </FieldRow>
         <FieldRow label={t("fieldCapacity")}>
           {perms.editFlight
-            ? <input type="number" value={flight.capacity} onChange={e => onUpdateFlight({ capacity: +e.target.value })} style={inputStyle} />
+            ? <CommitNumberInput value={flight.capacity} onCommit={n => onUpdateFlight({ capacity: n })} style={inputStyle} />
             : <span style={{ fontFamily: MONO, fontSize: 13 }}>{flight.capacity}</span>}
         </FieldRow>
         <FieldRow label={t("fieldBoxColor")}>
@@ -3142,6 +3161,20 @@ function AddFlightModal({ resources, prefill, onClose, onCreate, checkConflict, 
     </div>
   );
 }
+// Number input that only commits on blur/Enter (and only for a positive whole number), so typing
+// "180" doesn't fire a database write — and a flight-capacity check — for "1", "18", "180".
+function CommitNumberInput({ value, onCommit, style }) {
+  const [draft, setDraft] = useState(String(value ?? ""));
+  useEffect(() => { setDraft(String(value ?? "")); }, [value]);
+  function commit() {
+    const n = Math.round(Number(draft));
+    if (!Number.isFinite(n) || n <= 0) { setDraft(String(value ?? "")); return; }
+    if (n !== Number(value)) onCommit(n); else setDraft(String(value));
+  }
+  return <input type="number" min="1" value={draft} onChange={e => setDraft(e.target.value)} onBlur={commit}
+    onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") { setDraft(String(value ?? "")); e.currentTarget.blur(); } }} style={style} />;
+}
+
 function FieldSm({ label, children }) {
   return <div style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
     <label style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</label>
@@ -6316,7 +6349,7 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
               <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 600 }}>{r.code}</td>
                 <td style={td}>{perms.editFlight ? <input value={r.variant} onChange={e => onUpdateResource(r.id, { variant: e.target.value })} style={{ ...inputStyle, width: 160 }} /> : r.variant}</td>
-                <td style={td}>{perms.editFlight ? <input type="number" value={r.capacity} onChange={e => onUpdateResource(r.id, { capacity: +e.target.value })} style={{ ...inputStyle, width: 80 }} /> : r.capacity}</td>
+                <td style={td}>{perms.editFlight ? <CommitNumberInput value={r.capacity} onCommit={n => onUpdateResource(r.id, { capacity: n })} style={{ ...inputStyle, width: 80 }} /> : r.capacity}</td>
                 <td style={td}>{flights.filter(f => f.resourceId === r.id).length}</td>
                 <td style={td}>
                   {perms.editFlight && confirmDeleteId !== r.id && <button onClick={() => setConfirmDeleteId(r.id)} style={{ ...miniBtn, color: C.red, borderColor: C.red }}>{t("removeBtn")}</button>}

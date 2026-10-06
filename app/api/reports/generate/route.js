@@ -26,13 +26,14 @@ export async function POST(request) {
     const startISO = new Date(startDate + "T00:00:00Z").toISOString();
     const endISO = new Date(endDate + "T23:59:59Z").toISOString();
 
-    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }] = await Promise.all([
+    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }, { data: maintenanceRows }] = await Promise.all([
       fetchAllPages(() => supabase.from("flights").select("*").gte("scheduled_departure", startISO).lte("scheduled_departure", endISO).order("scheduled_departure").order("id")),
       supabase.from("resources").select("*"),
       supabase.from("tour_operators").select("*"),
       fetchAllPages(() => supabase.from("allotments").select("*").order("id")),
       supabase.from("scr_log").select("*").gte("created_at", startISO).lte("created_at", endISO).order("created_at"),
       fetchAllPages(() => supabase.from("slot_requests").select("*").order("id")),
+      supabase.from("maintenance_blocks").select("*"),
     ]);
 
     const flightList = flights || [];
@@ -69,7 +70,8 @@ export async function POST(request) {
     }));
     const mappedResources = (resources || []).map(r => ({ id: r.id, code: r.code, capacity: r.capacity }));
     const mappedSlotRequests = (slotRequests || []).filter(s => flightIds.has(s.flight_id)).map(s => ({ id: s.id, flightId: s.flight_id, movementType: s.movement_type, airport: s.airport, status: s.status }));
-    const issues = computeScheduleIssues(mappedFlights, mappedResources, mappedSlotRequests);
+    const mappedBlocks = (maintenanceRows || []).map(m => ({ id: m.id, resourceId: m.resource_id, start: new Date(m.start_at), end: new Date(m.end_at), reason: m.reason }));
+    const issues = computeScheduleIssues(mappedFlights, mappedResources, mappedSlotRequests, mappedBlocks);
 
     const pdfBuffer = await renderToBuffer(
       React.createElement(ReportDocument, {
