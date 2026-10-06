@@ -918,6 +918,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (patch.resourceId) dbPatch.resource_id = patch.resourceId;
     if (patch.capacity) dbPatch.capacity = patch.capacity;
     if ("color" in patch) dbPatch.color = patch.color;
+    if (patch.status) dbPatch.status = patch.status; // used by Cancel / Reinstate flight (and approved drafts that carry a status)
     // A drag passes just a new date at midnight via patch.start, with no explicit depTime — a
     // real bug (departure silently zeroing to 00:00 on every drag) came from writing that
     // straight into scheduled_departure. patch.start alone means "move to a different day,
@@ -963,6 +964,12 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // allotments in the database automatically — these functions just report how many active
   // ones were affected, and mirror that cleanup in local state so the UI updates immediately
   // rather than waiting on the next Realtime event.
+  // Slots that are still live with an airport (confirmed / offered / change required): deleting
+  // the flight cascades them away without anyone surrendering them.
+  function heldSlotsFor(flightIds) {
+    const ids = new Set(flightIds);
+    return slotRequests.filter(sr => ids.has(sr.flightId) && ["confirmed", "offered", "change_required"].includes(sr.status)).length;
+  }
   async function deleteFlight(flightId, opts) {
     if (!perms.editFlight) return;
     const flight = flights.find(f => f.id === flightId);
@@ -971,6 +978,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       return;
     }
     const affected = allotments.filter(a => a.flightId === flightId && a.status !== "cancelled" && a.status !== "released").length;
+    const held = heldSlotsFor([flightId]);
+    if (held > 0 && !window.confirm(`${flight?.ref || "This flight"} still holds ${held} confirmed/offered slot${held === 1 ? "" : "s"}. Deleting it erases the slot records, and the slot is NOT surrendered with the airport coordinator. Cancel the flight instead (keeps the record) unless you have already surrendered the slot.\n\nDelete anyway?`)) return false;
     const { data: deletedRows, error } = await supabase.from("flights").delete().eq("id", flightId).select("id");
     if (error) { pushToast(`Could not delete flight: ${error.message}`, "warn"); return false; }
     if (!deletedRows || deletedRows.length === 0) { pushToast(`Not deleted: ${flight?.ref || "flight"} no longer exists or you don't have permission`, "warn"); return false; }
@@ -1013,6 +1022,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   async function bulkDeleteFlights(flightIds) {
     if (!perms.editFlight || flightIds.length === 0) return;
     const affected = allotments.filter(a => flightIds.includes(a.flightId) && a.status !== "cancelled" && a.status !== "released").length;
+    const held = heldSlotsFor(flightIds);
+    if (held > 0 && !window.confirm(`${held} confirmed/offered slot${held === 1 ? "" : "s"} belong to the selected flights. Deleting the flights erases those slot records and does NOT surrender the slots with the airport coordinator.\n\nDelete anyway?`)) return;
     // PostgREST puts .in() values straight into the request URL (id=in.(uuid,uuid,...)), so a
     // large selection (a wide date range across a real schedule easily runs to hundreds of
     // flights) can push the URL past the host's length limit and come back as a bare "Bad
@@ -2765,6 +2776,17 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
       </div>
 
       {perms.editFlight && (
+        <div style={{ marginBottom: 10, borderTop: `1px solid ${C.borderSoft}`, paddingTop: 12 }}>
+          <button onClick={() => onUpdateFlight({ status: flight.status === "cancelled" ? "tentative" : "cancelled" })} style={{ ...miniBtn, width: "100%" }}>
+            {flight.status === "cancelled" ? t("reinstateFlight") : t("cancelFlight")}
+          </button>
+          <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>{t("cancelFlightHint")}</div>
+        </div>
+      )}
+
+      <FlightHistory flightId={flight.id} />
+
+      {perms.editFlight && (
         <div style={{ marginBottom: 14, borderTop: `1px solid ${C.borderSoft}`, paddingTop: 12 }}>
           {!confirmDelete ? (
             <button onClick={() => setConfirmDelete(true)} style={{ ...miniBtn, width: "100%", color: C.red, borderColor: C.red }}>{t("deleteThisFlight")}</button>
@@ -2774,6 +2796,9 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
                 {allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length > 0
                   ? t("deleteFlightWithAllotmentsWarn", allotments.filter(a => a.status !== "cancelled" && a.status !== "released").length)
                   : t("cantUndo")}
+                {slotRequests.some(sr => ["confirmed", "offered", "change_required"].includes(sr.status)) && (
+                  <div style={{ marginTop: 4 }}>{/* English-only by design (slot content) */}This flight holds a live airport slot. Deleting erases the slot record without surrendering it — consider Cancel flight instead.</div>
+                )}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <button onClick={() => setConfirmDelete(false)} style={{ ...miniBtn, flex: 1 }}>{t("cancel")}</button>
@@ -5817,6 +5842,91 @@ function BulkImportAllotmentsModal({ operators, flights, allotments, onClose, on
   );
 }
 
+// ---------- flight history (audit_log, written only by database triggers) ----------
+const fmtUtc = v => v ? new Date(v).toISOString().slice(0, 16).replace("T", " ") + "Z" : "—";
+function describeFlightEvent(r, t) {
+  const d = r.details || {};
+  if (r.kind === "flight_created") return t("fhCreated", d.ref, d.aircraft || "?", `${d.origin}-${d.destination}`, fmtUtc(d.departure));
+  if (r.kind === "flight_deleted") return t("fhDeleted", d.ref, d.aircraft || "?", `${d.origin}-${d.destination}`, fmtUtc(d.departure), d.active_allotments || 0, d.held_slots || 0);
+  if (r.kind === "flight_updated") {
+    const parts = Object.entries(d.changes || {}).map(([k, v]) => {
+      const f = (k === "departure" || k === "arrival") ? fmtUtc : (x => x ?? "—");
+      return `${t("fhField", k)}: ${f(v.old)} → ${f(v.new)}`;
+    });
+    return parts.join("; ");
+  }
+  return r.kind;
+}
+function FlightHistory({ flightId }) {
+  const { t } = useLanguage();
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState(null); // { rows } | { error }
+  async function toggleOpen() {
+    const next = !open; setOpen(next);
+    if (next) {
+      const { data, error } = await supabase.from("audit_log").select("*").eq("flight_id", flightId).order("at", { ascending: false }).limit(100);
+      setState(error ? { error: error.message } : { rows: data || [] });
+    }
+  }
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <button onClick={toggleOpen} style={{ ...miniBtn, width: "100%" }}>{open ? t("hide") : t("flightHistoryBtn")}</button>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          {!state && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyLoading")}</div>}
+          {state?.error && <div style={{ fontSize: 11.5, color: C.red }}>{t("historyLoadError", state.error)}</div>}
+          {state?.rows && state.rows.length === 0 && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyEmpty")}</div>}
+          {state?.rows?.map(r => (
+            <div key={r.id} style={{ padding: "5px 0", borderBottom: `1px solid ${C.borderSoft}`, fontSize: 11.5 }}>
+              <div style={{ color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>{new Date(r.at).toLocaleString()} · {r.actor_name || t("auditSystem")}</div>
+              <div>{describeFlightEvent(r, t)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// Management-only: recent flight activity across the whole schedule, including deleted flights
+// (whose own drawer no longer exists to show their history).
+function FlightActivityPanel() {
+  const { t } = useLanguage();
+  const [state, setState] = useState(null);
+  const [onlyDeleted, setOnlyDeleted] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let q = supabase.from("audit_log").select("*").not("flight_id", "is", null).order("at", { ascending: false }).limit(200);
+      if (onlyDeleted) q = q.eq("kind", "flight_deleted");
+      const { data, error } = await q;
+      if (!cancelled) setState(error ? { error: error.message } : { rows: data || [] });
+    })();
+    return () => { cancelled = true; };
+  }, [onlyDeleted]);
+  return (
+    <div style={{ marginTop: 28 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{t("flightActivityTitle")}</div>
+        <label style={{ fontSize: 11.5, color: C.muted, display: "flex", gap: 6, alignItems: "center" }}>
+          <input type="checkbox" checked={onlyDeleted} onChange={e => setOnlyDeleted(e.target.checked)} /> {t("flightActivityOnlyDeleted")}
+        </label>
+      </div>
+      {!state && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyLoading")}</div>}
+      {state?.error && <div style={{ fontSize: 11.5, color: C.red }}>{t("historyLoadError", state.error)}</div>}
+      {state?.rows && state.rows.length === 0 && <div style={{ fontSize: 11.5, color: C.faint }}>{t("historyEmpty")}</div>}
+      <div style={{ maxHeight: 360, overflowY: "auto" }}>
+        {state?.rows?.map(r => (
+          <div key={r.id} style={{ display: "flex", gap: 10, padding: "5px 0", borderBottom: `1px solid ${C.borderSoft}`, fontSize: 11.5 }}>
+            <span style={{ fontFamily: MONO, color: C.faint, whiteSpace: "nowrap" }}>{new Date(r.at).toLocaleString()}</span>
+            <span style={{ color: C.muted, whiteSpace: "nowrap" }}>{r.actor_name || t("auditSystem")}</span>
+            <span style={{ flex: 1, color: r.kind === "flight_deleted" ? C.red : C.text }}>{(r.details?.ref ? r.details.ref + " — " : "") + describeFlightEvent(r, t)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ---------- team / users (management only) ----------
 const ROLE_LABEL_KEY = { pending: "rolePending", ops_coordinator: "roleOpsCoordinator", commercial: "roleCommercial", tour_operator_liaison: "roleLiaison", management: "roleManagement" };
 function roleLabel(role, t) { return t(ROLE_LABEL_KEY[role] || "role"); }
@@ -5881,6 +5991,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
         if (tempPassword) pushToast(t("createdUserToast", draft.email, tempPassword), "ok", true);
         setShowAdd(false);
       }} />}
+      <FlightActivityPanel />
     </div>
   );
 }
