@@ -3,6 +3,9 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
+import {
+  normState, parseStates, buildRouteMap, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, permitReminders, DEFAULT_LEAD_DAYS,
+} from "../lib/permit-utils";
 import * as XLSX from "xlsx";
 import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
@@ -399,6 +402,7 @@ function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fil
 function IconChat({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>; }
 function IconX({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>; }
 function IconMenu() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>; }
+function IconPermit() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M9 14l2 2 4-4" /></svg>; }
 function IconSlot() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l4 2" /></svg>; }
 
 export default function CharterOpsApp(props) {
@@ -459,6 +463,11 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [draftChanges, setDraftChanges] = useState([]);
   const [contractChangeRequests, setContractChangeRequests] = useState([]);
   const [slotRequests, setSlotRequests] = useState([]);
+  // Overfly permits load separately from fetchAll on purpose: if the permit tables aren't there
+  // yet (migration not run) the rest of the app must keep working and the Permits tab explains why.
+  const [permitData, setPermitData] = useState({ loaded: false, error: null, permits: [], routes: [], states: [], docs: [], notes: [] });
+  const permitReloadTimer = useRef(null);
+  const reloadPermitData = useCallback(async () => { setPermitData(await fetchPermitData()); }, []);
   const [slotCorrespondence, setSlotCorrespondence] = useState([]);
   const [atfmRecords, setAtfmRecords] = useState([]);
   const [flights, setFlightsRaw] = useState([]);
@@ -805,6 +814,26 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     })();
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    reloadPermitData();
+    const ch = supabase.channel("permits-sync");
+    ["overfly_permits", "route_overfly_states", "overfly_states", "permit_documents", "permit_notes"].forEach(table => {
+      ch.on("postgres_changes", { event: "*", schema: "public", table }, () => {
+        clearTimeout(permitReloadTimer.current);
+        permitReloadTimer.current = setTimeout(reloadPermitData, 400);
+      });
+    });
+    ch.subscribe();
+    return () => { clearTimeout(permitReloadTimer.current); supabase.removeChannel(ch); };
+  }, [loaded, reloadPermitData]);
+  const permitRouteMap = useMemo(() => buildRouteMap(permitData.routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [permitData.routes]);
+  const permitIssues = useMemo(() => {
+    if (!permitData.loaded || permitData.error) return [];
+    const settings = new Map(permitData.states.map(x => [normState(x.state), x]));
+    return computePermitIssues(flights, permitRouteMap, permitData.permits, settings, iso(new Date()));
+  }, [flights, permitRouteMap, permitData]);
 
   // Any station code on the board that isn't in the static STATION_TZ list gets looked up via
   // /api/timezone (APIFreaks + Supabase cache) once, ever — not on every render, not per user.
@@ -1659,6 +1688,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     ["aircraft", t("nav_aircraft"), IconPlane],
     ["operators", t("nav_operators"), IconBuilding],
     ["slots", "Slots", IconSlot], // left in English on purpose — the Slots tab's own content (coordination statuses, SCR) is English-only, so an un-translated tab name is the honest signal
+    ["permits", "Permits", IconPermit], // English-only like Slots: authority/permit wording is used verbatim
     ...(perms.manageUsers ? [["team", t("nav_team"), IconUsers]] : []),
   ];
 
@@ -1829,7 +1859,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
-              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks}
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues}
               acknowledgedIssueIds={acknowledgedIssueIds} onAcknowledgeIssue={acknowledgeIssue} onUnacknowledgeIssue={unacknowledgeIssue}
               draftMode={draftMode} setDraftMode={setDraftMode} draftChanges={draftChanges} onApproveDraft={approveDraftChange} onDiscardDraft={discardDraftChange} onApproveAllDrafts={approveAllDrafts} onDiscardAllDrafts={discardAllDrafts} />
           </div>
@@ -1859,6 +1889,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
         maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
       {tab === "slots" && <SlotsPanel flights={flights} slotRequests={slotRequests} onJumpToFlight={id => { setSelectedFlightId(id); setTab("schedule"); }} />}
+      {tab === "permits" && <PermitsPanel permitData={permitData} flights={flights} resources={resources} perms={perms} onReload={reloadPermitData} onJumpToFlight={id => { setSelectedFlightId(id); setTab("schedule"); }} pushToast={pushToast} />}
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
@@ -1884,7 +1915,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -1927,7 +1958,10 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
   const pendingCreates = draftChanges.filter(d => d.changeType === "create");
   const pendingUpdates = draftChanges.filter(d => d.changeType === "update");
   const [showIssues, setShowIssues] = useState(false);
-  const allIssues = useMemo(() => computeScheduleIssues(flights, resources, slotRequests, maintenanceBlocks || []), [flights, resources, slotRequests, maintenanceBlocks]);
+  const allIssues = useMemo(() => {
+    const all = [...computeScheduleIssues(flights, resources, slotRequests, maintenanceBlocks || []), ...(permitIssues || [])];
+    return all.sort((a, b) => (a.severity === "error" ? 0 : 1) - (b.severity === "error" ? 0 : 1));
+  }, [flights, resources, slotRequests, maintenanceBlocks, permitIssues]);
   const activeIssues = allIssues.filter(i => !acknowledgedIssueIds.has(i.id));
   const acknowledgedIssuesList = allIssues.filter(i => acknowledgedIssueIds.has(i.id));
   const errorCount = activeIssues.filter(i => i.severity === "error").length;
@@ -6400,6 +6434,414 @@ function AircraftPanel({ resources, flights, perms, onAddResource, onUpdateResou
 
 // Cross-schedule triage view — every slot record in one filterable table, which is the thing
 // a coordinator actually lives in day to day rather than clicking into one flight at a time.
+// ---------- overfly permits ----------
+// English-only on purpose, like the Slots tab: regulatory/authority wording is used verbatim.
+const PERMIT_STATUS_META = {
+  draft: ["Draft", C.faint], submitted: ["Submitted", C.amber], approved: ["Approved", C.green],
+  rejected: ["Rejected", C.red], cancelled: ["Cancelled", C.faint], expired: ["Expired", C.red],
+};
+function mapPermit(r) {
+  return { id: r.id, state: r.state, status: r.status, validFrom: r.valid_from, validTo: r.valid_to, resourceIds: r.resource_ids || [],
+    permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at };
+}
+async function fetchPermitData() {
+  const results = await Promise.all([
+    supabase.from("overfly_permits").select("*").order("valid_from", { ascending: false }),
+    supabase.from("route_overfly_states").select("*").order("origin").order("destination"),
+    supabase.from("overfly_states").select("*").order("state"),
+    supabase.from("permit_documents").select("*").order("created_at"),
+    supabase.from("permit_notes").select("*").order("created_at"),
+  ]);
+  const err = results.find(r => r.error)?.error;
+  if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [] };
+  const [p, r, s, d, n] = results.map(x => x.data || []);
+  return { error: null, loaded: true, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note })), docs: d, notes: n };
+}
+function describePermitEvent(r) {
+  const d = r.details || {};
+  const ac = a => Array.isArray(a) ? (a.length ? a.join(", ") : "all aircraft") : "—";
+  if (r.kind === "permit_created") return `Created ${d.state} request (${d.status}) · ${d.valid_from || "?"} → ${d.valid_to || "?"} · ${ac(d.aircraft)}`;
+  if (r.kind === "permit_deleted") return `Deleted ${d.state} request (was ${d.status}${d.permit_number ? `, ${d.permit_number}` : ""})`;
+  if (r.kind === "permit_updated") return Object.entries(d.changes || {}).map(([k, v]) => `${k.replace("_", " ")}: ${k === "aircraft" ? ac(v.old) : (v.old ?? "—")} → ${k === "aircraft" ? ac(v.new) : (v.new ?? "—")}`).join("; ");
+  return r.kind;
+}
+const PERMIT_TRANSITIONS = {
+  draft: [["submitted", "Mark submitted"], ["cancelled", "Cancel"]],
+  submitted: [["approved", "Mark approved"], ["rejected", "Mark rejected"], ["draft", "Back to draft"], ["cancelled", "Cancel"]],
+  approved: [["cancelled", "Cancel permit"]],
+  rejected: [["submitted", "Resubmit"], ["draft", "Back to draft"]],
+  cancelled: [["draft", "Reopen as draft"]],
+};
+
+function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitData, onClose, onSaved, pushToast }) {
+  const isNew = !permit;
+  const [form, setForm] = useState(() => permit
+    ? { state: permit.state, validFrom: permit.validFrom || "", validTo: permit.validTo || "", resourceIds: permit.resourceIds, permitNumber: permit.permitNumber || "", authority: permit.authority || "", authorityRef: permit.authorityRef || "", notes: permit.notes || "" }
+    : { state: prefill?.state || "", validFrom: prefill?.validFrom || "", validTo: prefill?.validTo || "", resourceIds: prefill?.resourceIds || [], permitNumber: "", authority: "", authorityRef: "", notes: "" });
+  const [busy, setBusy] = useState(false);
+  const [noteText, setNoteText] = useState("");
+  const [history, setHistory] = useState(null);
+  const docs = permit ? permitData.docs.filter(d => d.permit_id === permit.id) : [];
+  const notes = permit ? permitData.notes.filter(n => n.permit_id === permit.id) : [];
+  const stateOk = normState(form.state).length > 0;
+  const datesOk = !form.validFrom || !form.validTo || form.validTo >= form.validFrom;
+  const toRow = () => ({ state: normState(form.state), valid_from: form.validFrom || null, valid_to: form.validTo || null, resource_ids: form.resourceIds,
+    permit_number: form.permitNumber.trim() || null, authority: form.authority.trim() || null, authority_ref: form.authorityRef.trim() || null, notes: form.notes.trim() || null });
+
+  useEffect(() => {
+    if (!permit) return;
+    let live = true;
+    supabase.from("audit_log").select("*").eq("permit_id", permit.id).order("at", { ascending: false }).limit(100)
+      .then(({ data, error }) => { if (live) setHistory(error ? { error: error.message } : { rows: data || [] }); });
+    return () => { live = false; };
+  }, [permit?.id, permitData.permits]);
+
+  async function save() {
+    if (!stateOk || !datesOk) return;
+    setBusy(true);
+    if (isNew) {
+      const { error } = await supabase.from("overfly_permits").insert({ ...toRow(), status: "draft" });
+      setBusy(false);
+      if (error) { pushToast(`Could not save the request: ${error.message}`, "warn"); return; }
+      pushToast(`${normState(form.state)} permit request created as a draft.`, "ok");
+      onSaved(); onClose();
+    } else {
+      const { data, error } = await supabase.from("overfly_permits").update(toRow()).eq("id", permit.id).select("id");
+      setBusy(false);
+      if (error || !data?.length) { pushToast(`Could not save: ${error?.message || "the request no longer exists or you don't have permission"}.`, "warn"); return; }
+      pushToast("Permit saved.", "ok");
+      onSaved();
+    }
+  }
+  async function moveTo(next) {
+    if (next === "approved" && (!form.validFrom || !form.validTo)) { pushToast("Enter the validity dates (from and to) before marking a permit approved.", "warn"); return; }
+    if (next === "approved" && !form.permitNumber.trim() && !window.confirm("No permit number entered. Mark approved anyway?")) return;
+    setBusy(true);
+    const patch = { ...toRow(), status: next };
+    if (next === "submitted") patch.submitted_at = new Date().toISOString();
+    if (next === "approved" || next === "rejected") patch.decided_at = new Date().toISOString();
+    const { data, error } = await supabase.from("overfly_permits").update(patch).eq("id", permit.id).select("id");
+    setBusy(false);
+    if (error || !data?.length) { pushToast(`Status not changed: ${error?.message || "no permission or request missing"}.`, "warn"); return; }
+    pushToast(`${normState(form.state)} request → ${PERMIT_STATUS_META[next][0].toLowerCase()}.`, "ok");
+    onSaved();
+  }
+  async function addNote() {
+    if (!noteText.trim()) return;
+    const { data: auth } = await supabase.auth.getUser();
+    const { error } = await supabase.from("permit_notes").insert({ permit_id: permit.id, body: noteText.trim(), created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+    if (error) { pushToast(`Note not saved: ${error.message}`, "warn"); return; }
+    setNoteText(""); onSaved();
+  }
+  async function upload(file) {
+    if (!file) return;
+    if (file.size > 15 * 1024 * 1024) { pushToast("File is over 15 MB.", "warn"); return; }
+    const path = `${permit.id}/${Date.now()}-${file.name.replace(/[^\w.\-]+/g, "_")}`;
+    const up = await supabase.storage.from("permit-docs").upload(path, file, { upsert: false });
+    if (up.error) { pushToast(`Upload failed: ${up.error.message}`, "warn"); return; }
+    const { error } = await supabase.from("permit_documents").insert({ permit_id: permit.id, path, file_name: file.name, size_bytes: file.size });
+    if (error) { await supabase.storage.from("permit-docs").remove([path]); pushToast(`Upload failed: ${error.message}`, "warn"); return; }
+    onSaved();
+  }
+  async function openDoc(d) {
+    const { data, error } = await supabase.storage.from("permit-docs").createSignedUrl(d.path, 120);
+    if (error || !data?.signedUrl) { pushToast(`Could not open the file: ${error?.message || "unknown error"}`, "warn"); return; }
+    window.open(data.signedUrl, "_blank", "noopener");
+  }
+  async function removeDoc(d) {
+    if (!window.confirm(`Delete ${d.file_name}?`)) return;
+    const { data, error } = await supabase.from("permit_documents").delete().eq("id", d.id).select("id");
+    if (error || !data?.length) { pushToast(`Could not delete: ${error?.message || "no permission"}`, "warn"); return; }
+    await supabase.storage.from("permit-docs").remove([d.path]);
+    onSaved();
+  }
+  async function deletePermit() {
+    if (!window.confirm(`Delete this ${permit.state} request? Its notes and document links are removed too (a history entry stays).`)) return;
+    const paths = docs.map(d => d.path);
+    const { data, error } = await supabase.from("overfly_permits").delete().eq("id", permit.id).select("id");
+    if (error || !data?.length) { pushToast(`Could not delete: ${error?.message || "no permission"}`, "warn"); return; }
+    if (paths.length) await supabase.storage.from("permit-docs").remove(paths);
+    onSaved(); onClose();
+  }
+  const toggleAc = id => setForm(f => ({ ...f, resourceIds: f.resourceIds.includes(id) ? f.resourceIds.filter(x => x !== id) : [...f.resourceIds, id] }));
+  const eff = permit ? effectiveStatus(permit, iso(new Date())) : "draft";
+  const lock = !canEdit;
+  const sec = { fontSize: 11, fontWeight: 600, color: C.muted, margin: "16px 0 6px" };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "90vh", overflow: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{isNew ? "New overfly permit request" : `Overfly permit · ${permit.state}`}</div>
+          {!isNew && <Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge>}
+          <button onClick={onClose} style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+          <FieldSm label="State (code or name)">
+            <input list="permit-known-states" disabled={lock} value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} style={inputStyle} placeholder="e.g. TM" />
+            <datalist id="permit-known-states">{knownStates.map(s => <option key={s} value={s} />)}</datalist>
+          </FieldSm>
+          <FieldSm label="Valid from"><input type="date" disabled={lock} value={form.validFrom} onChange={e => setForm({ ...form, validFrom: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label="Valid to"><input type="date" disabled={lock} value={form.validTo} onChange={e => setForm({ ...form, validTo: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label="Permit number"><input disabled={lock} value={form.permitNumber} onChange={e => setForm({ ...form, permitNumber: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label="Authority"><input disabled={lock} value={form.authority} onChange={e => setForm({ ...form, authority: e.target.value })} style={inputStyle} /></FieldSm>
+          <FieldSm label="Authority reference"><input disabled={lock} value={form.authorityRef} onChange={e => setForm({ ...form, authorityRef: e.target.value })} style={inputStyle} /></FieldSm>
+        </div>
+        {!datesOk && <div style={{ color: C.red, fontSize: 11.5, marginTop: 6 }}>"Valid to" is before "Valid from".</div>}
+        <div style={sec}>Aircraft covered {form.resourceIds.length === 0 && <span style={{ color: C.green, fontWeight: 500 }}>— all aircraft</span>}</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {resources.map(r => {
+            const on = form.resourceIds.includes(r.id);
+            return <button key={r.id} disabled={lock} onClick={() => toggleAc(r.id)} style={{ ...miniBtn, fontFamily: MONO, background: on ? C.amberSoft : C.panel, borderColor: on ? C.amber : C.border, color: on ? C.amber : C.muted }}>{r.code}</button>;
+          })}
+          {form.resourceIds.length > 0 && !lock && <button onClick={() => setForm({ ...form, resourceIds: [] })} style={miniBtn}>All aircraft</button>}
+        </div>
+        <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>Select none to cover every aircraft, including ones added later.</div>
+        <FieldSm label="Notes"><textarea disabled={lock} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical" }} /></FieldSm>
+
+        {canEdit && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 14, alignItems: "center" }}>
+            <button disabled={busy || !stateOk || !datesOk} onClick={save} style={{ ...miniBtn, background: stateOk && datesOk ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{isNew ? "Create draft" : "Save changes"}</button>
+            {!isNew && (PERMIT_TRANSITIONS[permit.status] || []).map(([to, label]) => (
+              <button key={to} disabled={busy || !stateOk || !datesOk} onClick={() => moveTo(to)} style={{ ...miniBtn, color: to === "rejected" || to === "cancelled" ? C.red : C.text }}>{label}</button>
+            ))}
+            {!isNew && <button onClick={deletePermit} style={{ ...miniBtn, marginLeft: "auto", color: C.red }}>Delete</button>}
+          </div>
+        )}
+        {!canEdit && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 12 }}>Read-only: only schedule coordinators and management can change permits.</div>}
+        {!isNew && permit.status === "approved" && eff === "approved" && <div style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Editing dates or aircraft on an approved permit changes which flights it covers immediately.</div>}
+
+        {!isNew && <>
+          <div style={sec}>Documents</div>
+          {docs.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No documents yet.</div>}
+          {docs.map(d => (
+            <div key={d.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, padding: "3px 0" }}>
+              <button onClick={() => openDoc(d)} style={{ ...miniBtn, border: "none", background: "none", color: C.amber, padding: 0, textDecoration: "underline" }}>{d.file_name}</button>
+              <span style={{ color: C.faint, fontSize: 11 }}>{d.size_bytes ? `${Math.max(1, Math.round(d.size_bytes / 1024))} KB` : ""}</span>
+              {canEdit && <button onClick={() => removeDoc(d)} style={{ ...miniBtn, marginLeft: "auto", color: C.red }}>Delete</button>}
+            </div>
+          ))}
+          {canEdit && <input type="file" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx,.eml,.msg,.txt" onChange={e => { upload(e.target.files?.[0]); e.target.value = ""; }} style={{ fontSize: 12, marginTop: 6 }} />}
+
+          <div style={sec}>Notes &amp; correspondence</div>
+          {notes.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No notes yet.</div>}
+          {notes.map(n => (
+            <div key={n.id} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "6px 0", fontSize: 12.5 }}>
+              <div style={{ color: C.faint, fontSize: 10.5 }}>{fmtUtc(n.created_at)} · {n.created_by_name || "—"}</div>
+              <div style={{ whiteSpace: "pre-wrap" }}>{n.body}</div>
+            </div>
+          ))}
+          {canEdit && <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+            <input value={noteText} onChange={e => setNoteText(e.target.value)} onKeyDown={e => { if (e.key === "Enter") addNote(); }} placeholder="Add a note (can't be edited afterwards)…" style={inputStyle} />
+            <button disabled={!noteText.trim()} onClick={addNote} style={miniBtn}>Add</button>
+          </div>}
+
+          <div style={sec}>History</div>
+          {!history && <div style={{ fontSize: 12, color: C.faint }}>Loading…</div>}
+          {history?.error && <div style={{ fontSize: 12, color: C.red }}>Could not load history: {history.error}</div>}
+          {history?.rows?.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No history recorded.</div>}
+          {history?.rows?.map(r => (
+            <div key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "5px 0", fontSize: 12 }}>
+              <span style={{ color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>{fmtUtc(r.at)} · {r.actor_name || "system"}</span>
+              <div>{describePermitEvent(r)}</div>
+            </div>
+          ))}
+        </>}
+      </div>
+    </div>
+  );
+}
+
+function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpToFlight, pushToast }) {
+  const [sub, setSub] = useState("requests");
+  const [statusFilter, setStatusFilter] = useState("active");
+  const [stateFilter, setStateFilter] = useState("");
+  const [modal, setModal] = useState(null); // { permit } | { prefill }
+  const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
+  const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
+  const todayStr = iso(new Date());
+  const canEdit = !!perms.editFlight;
+  const { permits, routes, states, error } = permitData;
+  const routeMap = useMemo(() => buildRouteMap(routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [routes]);
+  const settings = useMemo(() => new Map(states.map(s => [normState(s.state), s])), [states]);
+  const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr), [flights, routeMap, permits, settings, todayStr]);
+  const unmapped = useMemo(() => unmappedRoutes(flights, routeMap, todayStr), [flights, routeMap, todayStr]);
+  const reminders = useMemo(() => permitReminders(permits, todayStr), [permits, todayStr]);
+  const codeOf = id => resources.find(r => r.id === id)?.code || "?";
+  const knownStates = useMemo(() => [...new Set([...states.map(s => normState(s.state)), ...routes.flatMap(r => r.states || []).map(normState), ...permits.map(p => normState(p.state))])].sort(), [states, routes, permits]);
+  const rows = useMemo(() => permits.filter(p => {
+    const eff = effectiveStatus(p, todayStr);
+    if (statusFilter === "active" && !["draft", "submitted", "approved"].includes(eff)) return false;
+    if (statusFilter !== "active" && statusFilter !== "all" && eff !== statusFilter) return false;
+    return !stateFilter.trim() || normState(p.state).includes(normState(stateFilter));
+  }), [permits, statusFilter, stateFilter, todayStr]);
+  const modalPermit = modal?.permit ? permits.find(p => p.id === modal.permit.id) || null : null;
+
+  if (error) {
+    return <div style={{ padding: 24, maxWidth: 640 }}>
+      <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 6 }}>Permits aren't set up yet</div>
+      <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.5 }}>The permit tables could not be read, which usually means database migration <b>00028_overfly_permits.sql</b> has not been run yet in Supabase.</div>
+      <div style={{ fontFamily: MONO, fontSize: 11.5, color: C.red, marginTop: 10 }}>{error}</div>
+      <button onClick={onReload} style={{ ...miniBtn, marginTop: 12 }}>Try again</button>
+    </div>;
+  }
+
+  async function saveRoute() {
+    const origin = routeForm.origin.trim().toUpperCase(), destination = routeForm.destination.trim().toUpperCase();
+    if (!origin || !destination || origin === destination) { pushToast("Enter two different airport codes.", "warn"); return; }
+    const { error: e } = await supabase.from("route_overfly_states").upsert({ origin, destination, states: parseStates(routeForm.states), note: routeForm.note.trim() || null }, { onConflict: "origin,destination" });
+    if (e) { pushToast(`Route not saved: ${e.message}`, "warn"); return; }
+    setRouteForm({ origin: "", destination: "", states: "", note: "" });
+    pushToast(`${origin}–${destination} saved.`, "ok"); onReload();
+  }
+  async function deleteRoute(r) {
+    if (!window.confirm(`Remove the State list for ${r.origin}–${r.destination}? Flights on it will show as unmapped until you add it again.`)) return;
+    const { data, error: e } = await supabase.from("route_overfly_states").delete().eq("id", r.id).select("id");
+    if (e || !data?.length) { pushToast(`Could not remove: ${e?.message || "no permission"}`, "warn"); return; }
+    onReload();
+  }
+  async function saveState() {
+    const st = normState(stateForm.state);
+    if (!st) { pushToast("Enter a State code or name.", "warn"); return; }
+    const { error: e } = await supabase.from("overfly_states").upsert({ state: st, lead_days: Math.max(0, Math.round(+stateForm.leadDays || 0)), authority: stateForm.authority.trim() || null, contact: stateForm.contact.trim() || null, note: stateForm.note.trim() || null }, { onConflict: "state" });
+    if (e) { pushToast(`Not saved: ${e.message}`, "warn"); return; }
+    setStateForm({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
+    pushToast(`${st} saved.`, "ok"); onReload();
+  }
+
+  const subBtn = k => ({ ...miniBtn, background: sub === k ? C.amberSoft : C.panel, borderColor: sub === k ? C.amber : C.border, color: sub === k ? C.amber : C.muted, fontWeight: sub === k ? 600 : 400 });
+  const overdueCount = gaps.filter(g => g.overdue).length;
+  const sevColor = s => s === "error" ? C.red : C.amber;
+  return (
+    <div style={{ padding: 16 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <button onClick={() => setSub("requests")} style={subBtn("requests")}>Requests ({permits.filter(p => ["draft", "submitted", "approved"].includes(effectiveStatus(p, todayStr))).length})</button>
+        <button onClick={() => setSub("gaps")} style={subBtn("gaps")}>Gaps ({gaps.length}{overdueCount ? `, ${overdueCount} overdue` : ""})</button>
+        <button onClick={() => setSub("routes")} style={subBtn("routes")}>Routes → States ({routes.length}{unmapped.length ? `, ${unmapped.length} unmapped` : ""})</button>
+        <button onClick={() => setSub("states")} style={subBtn("states")}>States ({states.length})</button>
+        {canEdit && <button onClick={() => setModal({ prefill: {} })} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New request</button>}
+      </div>
+
+      {sub === "requests" && <>
+        {reminders.length > 0 && <div style={{ marginBottom: 12, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px" }}>
+          {reminders.map(r => <div key={r.id} onClick={() => setModal({ permit: permits.find(p => p.id === r.permitId) })} style={{ fontSize: 12.5, padding: "3px 0", cursor: "pointer", color: sevColor(r.severity) }}>{r.severity === "error" ? "⚠ " : "• "}{r.message}</div>)}
+        </div>}
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 170 }}>
+            <option value="active">Active (draft/submitted/approved)</option><option value="all">All</option>
+            {Object.entries(PERMIT_STATUS_META).map(([k, [l]]) => <option key={k} value={k}>{l}</option>)}
+          </select>
+          <input value={stateFilter} onChange={e => setStateFilter(e.target.value)} placeholder="Filter by State…" style={{ ...inputStyle, width: 160 }} />
+          <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{rows.length} of {permits.length}</span>
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
+            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Submitted</th><th style={th}>Docs</th>
+          </tr></thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={8} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Map your routes first (Routes → States), then use Gaps to see what needs requesting." : "No requests match these filters."}</td></tr>}
+            {rows.map(p => {
+              const eff = effectiveStatus(p, todayStr);
+              return <tr key={p.id} onClick={() => setModal({ permit: p })} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
+                <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
+                <td style={td}>{p.permitNumber || <span style={{ color: C.faint }}>—</span>}</td>
+                <td style={td}>{p.authorityRef || <span style={{ color: C.faint }}>—</span>}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.submittedAt ? p.submittedAt.slice(0, 10) : "—"}</td>
+                <td style={td}>{permitData.docs.filter(d => d.permit_id === p.id).length || <span style={{ color: C.faint }}>0</span>}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </>}
+
+      {sub === "gaps" && <>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Upcoming flights (from today, not cancelled) whose route crosses a State without an <b>approved</b> permit covering that date and aircraft. "File by" = first flight date minus the State's processing time.</div>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
+            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Flights</th><th style={th}>Dates needed</th><th style={th}>Paperwork</th><th style={th}>File by</th><th style={th}></th>
+          </tr></thead>
+          <tbody>
+            {gaps.length === 0 && <tr><td colSpan={7} style={{ ...td, color: C.green, textAlign: "center", padding: 20 }}>Every upcoming flight on a mapped route is covered{unmapped.length ? ` — but ${unmapped.length} route(s) are not mapped yet (see Routes → States)` : ""}.</td></tr>}
+            {gaps.map(g => (
+              <tr key={g.state + g.resourceId} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{g.state}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{codeOf(g.resourceId)}</td>
+                <td style={td}><span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => onJumpToFlight(g.flightIds[0])} title="Open the first affected flight">{g.flightCount}</span></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{g.firstDay} → {g.lastDay}</td>
+                <td style={td}><Badge color={g.reason === "submitted" ? C.amber : g.reason === "draft" ? C.faint : C.red}>{{ none: "NO REQUEST", draft: "DRAFT ONLY", submitted: "AWAITING APPROVAL", rejected: "REJECTED", expired: "EXPIRED" }[g.reason]}</Badge></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11, color: g.overdue ? C.red : C.text, fontWeight: g.overdue ? 700 : 400 }}>{g.reason === "submitted" ? "—" : g.fileBy}{g.overdue ? " ⚠ overdue" : ""} <span style={{ color: C.faint }}>({g.leadDays}d)</span></td>
+                <td style={td}>{canEdit && (g.reason === "none" || g.reason === "expired" || g.reason === "rejected") && <button onClick={() => setModal({ prefill: { state: g.state, validFrom: g.firstDay, validTo: g.lastDay, resourceIds: [g.resourceId] } })} style={miniBtn}>Create request</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>}
+
+      {sub === "routes" && <>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>List the States each route overflies (codes or names, separated by commas). A route applies in both directions. A route you have not listed is <b>not checked</b> — it appears under "Unmapped routes" below. Leave the States blank for a route that crosses no State needing a permit.</div>
+        {unmapped.length > 0 && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: C.red, marginBottom: 4 }}>Unmapped routes with upcoming flights ({unmapped.length})</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {unmapped.map(u => <button key={u.origin + u.destination} disabled={!canEdit} onClick={() => setRouteForm({ origin: u.origin, destination: u.destination, states: "", note: "" })} style={{ ...miniBtn, fontFamily: MONO }}>{u.origin}–{u.destination} · {u.count} flt · from {u.firstDay}</button>)}
+          </div>
+        </div>}
+        {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <FieldSm label="From"><input value={routeForm.origin} onChange={e => setRouteForm({ ...routeForm, origin: e.target.value })} style={{ ...inputStyle, width: 70, fontFamily: MONO }} /></FieldSm>
+          <FieldSm label="To"><input value={routeForm.destination} onChange={e => setRouteForm({ ...routeForm, destination: e.target.value })} style={{ ...inputStyle, width: 70, fontFamily: MONO }} /></FieldSm>
+          <FieldSm label="States overflown"><input value={routeForm.states} onChange={e => setRouteForm({ ...routeForm, states: e.target.value })} placeholder="e.g. TM, UZ" style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <FieldSm label="Note"><input value={routeForm.note} onChange={e => setRouteForm({ ...routeForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <button onClick={saveRoute} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save route</button>
+        </div>}
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Route</th><th style={th}>States overflown</th><th style={th}>Note</th><th style={th}></th></tr></thead>
+          <tbody>
+            {routes.length === 0 && <tr><td colSpan={4} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No routes mapped yet.</td></tr>}
+            {routes.map(r => (
+              <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{r.origin}–{r.destination}</td>
+                <td style={{ ...td, fontFamily: MONO }}>{(r.states || []).length ? r.states.join(", ") : <span style={{ color: C.faint }}>none needed</span>}</td>
+                <td style={td}>{r.note || <span style={{ color: C.faint }}>—</span>}</td>
+                <td style={{ ...td, textAlign: "right" }}>{canEdit && <>
+                  <button onClick={() => setRouteForm({ origin: r.origin, destination: r.destination, states: (r.states || []).join(", "), note: r.note || "" })} style={miniBtn}>Edit</button>{" "}
+                  <button onClick={() => deleteRoute(r)} style={{ ...miniBtn, color: C.red }}>Remove</button></>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>}
+
+      {sub === "states" && <>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Processing time (days before the first flight that a request must be filed) and authority contact per State. States without an entry use {DEFAULT_LEAD_DAYS} days.</div>
+        {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <FieldSm label="State"><input value={stateForm.state} onChange={e => setStateForm({ ...stateForm, state: e.target.value })} list="permit-known-states-2" style={{ ...inputStyle, width: 90, fontFamily: MONO }} /><datalist id="permit-known-states-2">{knownStates.map(s => <option key={s} value={s} />)}</datalist></FieldSm>
+          <FieldSm label="Lead days"><input type="number" min="0" value={stateForm.leadDays} onChange={e => setStateForm({ ...stateForm, leadDays: e.target.value })} style={{ ...inputStyle, width: 80 }} /></FieldSm>
+          <FieldSm label="Authority"><input value={stateForm.authority} onChange={e => setStateForm({ ...stateForm, authority: e.target.value })} style={{ ...inputStyle, width: 180 }} /></FieldSm>
+          <FieldSm label="Contact"><input value={stateForm.contact} onChange={e => setStateForm({ ...stateForm, contact: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <FieldSm label="Note"><input value={stateForm.note} onChange={e => setStateForm({ ...stateForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <button onClick={saveState} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save State</button>
+        </div>}
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>State</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Note</th><th style={th}></th></tr></thead>
+          <tbody>
+            {states.length === 0 && <tr><td colSpan={6} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No State settings yet — all States use the {DEFAULT_LEAD_DAYS}-day default.</td></tr>}
+            {states.map(s => (
+              <tr key={s.state} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{s.state}</td><td style={td}>{s.leadDays}</td>
+                <td style={td}>{s.authority || "—"}</td><td style={td}>{s.contact || "—"}</td><td style={td}>{s.note || "—"}</td>
+                <td style={{ ...td, textAlign: "right" }}>{canEdit && <button onClick={() => setStateForm({ state: s.state, leadDays: s.leadDays, authority: s.authority || "", contact: s.contact || "", note: s.note || "" })} style={miniBtn}>Edit</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </>}
+
+      {modal && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+    </div>
+  );
+}
+
 function SlotsPanel({ flights, slotRequests, onJumpToFlight }) {
   const [statusFilter, setStatusFilter] = useState("all");
   const [airportFilter, setAirportFilter] = useState("");
