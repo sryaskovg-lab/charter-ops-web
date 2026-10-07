@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/release-options",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/permits/sync",
+      "schedule": "30 3 * * *"
     }
   ]
 }

@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
+import { noteTextForEmail } from "../lib/permit-mail";
 import {
   normState, parseStates, buildRouteMap, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
@@ -465,7 +466,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [slotRequests, setSlotRequests] = useState([]);
   // Overfly permits load separately from fetchAll on purpose: if the permit tables aren't there
   // yet (migration not run) the rest of the app must keep working and the Permits tab explains why.
-  const [permitData, setPermitData] = useState({ loaded: false, error: null, permits: [], routes: [], states: [], docs: [], notes: [] });
+  const [permitData, setPermitData] = useState({ loaded: false, error: null, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false });
   const permitReloadTimer = useRef(null);
   const reloadPermitData = useCallback(async () => { setPermitData(await fetchPermitData()); }, []);
   const [slotCorrespondence, setSlotCorrespondence] = useState([]);
@@ -819,7 +820,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (!loaded) return;
     reloadPermitData();
     const ch = supabase.channel("permits-sync");
-    ["overfly_permits", "route_overfly_states", "overfly_states", "permit_documents", "permit_notes"].forEach(table => {
+    ["overfly_permits", "route_overfly_states", "overfly_states", "permit_documents", "permit_notes", "permit_emails"].forEach(table => {
       ch.on("postgres_changes", { event: "*", schema: "public", table }, () => {
         clearTimeout(permitReloadTimer.current);
         permitReloadTimer.current = setTimeout(reloadPermitData, 400);
@@ -6451,11 +6452,14 @@ async function fetchPermitData() {
     supabase.from("overfly_states").select("*").order("state"),
     supabase.from("permit_documents").select("*").order("created_at"),
     supabase.from("permit_notes").select("*").order("created_at"),
+    supabase.from("permit_emails").select("*").order("received_at", { ascending: false }).limit(300),
   ]);
-  const err = results.find(r => r.error)?.error;
-  if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [] };
-  const [p, r, s, d, n] = results.map(x => x.data || []);
-  return { error: null, loaded: true, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note })), docs: d, notes: n };
+  // the e-mail inbox has its own migration (00029): its absence must not break the rest of Permits
+  const mailRes = results[5];
+  const err = results.slice(0, 5).find(r => r.error)?.error;
+  if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false };
+  const [p, r, s, d, n] = results.slice(0, 5).map(x => x.data || []);
+  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note })), docs: d, notes: n };
 }
 function describePermitEvent(r) {
   const d = r.details || {};
@@ -6656,11 +6660,16 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [statusFilter, setStatusFilter] = useState("active");
   const [stateFilter, setStateFilter] = useState("");
   const [modal, setModal] = useState(null); // { permit } | { prefill }
+  const [syncing, setSyncing] = useState(false);
+  const [openMail, setOpenMail] = useState(null);
+  const [assignTo, setAssignTo] = useState({});
   const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
   const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
   const todayStr = iso(new Date());
   const canEdit = !!perms.editFlight;
   const { permits, routes, states, error } = permitData;
+  const emails = permitData.emails || [];
+  const unassignedMail = emails.filter(m => m.status === "unassigned");
   const routeMap = useMemo(() => buildRouteMap(routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [routes]);
   const settings = useMemo(() => new Map(states.map(s => [normState(s.state), s])), [states]);
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr), [flights, routeMap, permits, settings, todayStr]);
@@ -6708,6 +6717,37 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
     pushToast(`${st} saved.`, "ok"); onReload();
   }
 
+  async function syncMail() {
+    setSyncing(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/permits/sync", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) pushToast(j.error || `Mail check failed (${res.status}).`, "warn", true);
+      else if (j.configured === false) pushToast(j.error, "warn", true);
+      else pushToast(`Mail checked: ${j.found} message(s) carry the label; ${j.added} new — ${j.filed} filed on permits, ${j.unassigned} in the inbox${j.remaining ? `; ${j.remaining} more waiting, run again` : ""}${j.errors?.length ? `. Problems: ${j.errors.slice(0, 2).join("; ")}` : ""}.`, j.errors?.length ? "warn" : "ok");
+      onReload();
+    } catch (e) { pushToast(`Mail check failed: ${e.message}`, "warn"); }
+    setSyncing(false);
+  }
+  async function fileMail(m, permitId) {
+    if (!permitId) return;
+    const { data, error: e } = await supabase.from("permit_emails").update({ permit_id: permitId, status: "filed", match_reason: "filed by hand" }).eq("id", m.id).eq("status", "unassigned").select("id");
+    if (e || !data?.length) { pushToast(`Could not file the e-mail: ${e?.message || "already handled or no permission"}`, "warn"); onReload(); return; }
+    const { data: auth } = await supabase.auth.getUser();
+    const { error: ne } = await supabase.from("permit_notes").insert({ permit_id: permitId, body: noteTextForEmail(m), created_by: auth?.user?.id, created_by_name: `E-mail · ${m.from_addr || "unknown"}`.slice(0, 200) });
+    if (ne) pushToast(`E-mail filed, but the note failed: ${ne.message}`, "warn");
+    for (const a of m.attachments || []) {
+      const { error: de } = await supabase.from("permit_documents").insert({ permit_id: permitId, path: a.path, file_name: a.name, size_bytes: a.size });
+      if (de) pushToast(`Attachment ${a.name} not linked: ${de.message}`, "warn");
+    }
+    pushToast("E-mail filed on the permit.", "ok"); onReload();
+  }
+  async function ignoreMail(m) {
+    const { data, error: e } = await supabase.from("permit_emails").update({ status: "ignored" }).eq("id", m.id).select("id");
+    if (e || !data?.length) { pushToast(`Could not update: ${e?.message || "no permission"}`, "warn"); return; }
+    onReload();
+  }
   const subBtn = k => ({ ...miniBtn, background: sub === k ? C.amberSoft : C.panel, borderColor: sub === k ? C.amber : C.border, color: sub === k ? C.amber : C.muted, fontWeight: sub === k ? 600 : 400 });
   const overdueCount = gaps.filter(g => g.overdue).length;
   const sevColor = s => s === "error" ? C.red : C.amber;
@@ -6718,6 +6758,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         <button onClick={() => setSub("gaps")} style={subBtn("gaps")}>Gaps ({gaps.length}{overdueCount ? `, ${overdueCount} overdue` : ""})</button>
         <button onClick={() => setSub("routes")} style={subBtn("routes")}>Routes → States ({routes.length}{unmapped.length ? `, ${unmapped.length} unmapped` : ""})</button>
         <button onClick={() => setSub("states")} style={subBtn("states")}>States ({states.length})</button>
+        <button onClick={() => setSub("inbox")} style={subBtn("inbox")}>Mail inbox ({unassignedMail.length})</button>
         {canEdit && <button onClick={() => setModal({ prefill: {} })} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New request</button>}
       </div>
 
@@ -6835,6 +6876,34 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             ))}
           </tbody>
         </table>
+      </>}
+
+      {sub === "inbox" && <>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails carrying the permit label in Gmail are read (never changed or deleted) once a day and when you press the button. An e-mail that mentions a permit number or authority reference of exactly one permit is filed on it as a note, with its attachments. Anything else waits here for you. <b>Status changes are always made by you</b> — an e-mail never approves a permit by itself, and the sender is not verified.</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
+          {canEdit && <button disabled={syncing} onClick={syncMail} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{syncing ? "Checking…" : "Check mail now"}</button>}
+          <span style={{ fontSize: 11, color: C.faint }}>{emails.filter(m => m.status === "filed").length} filed · {unassignedMail.length} waiting · {emails.filter(m => m.status === "ignored").length} ignored</span>
+        </div>
+        {!permitData.mailReady && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", fontSize: 12.5, marginBottom: 10 }}>The mail inbox table is missing — run migration <b>00029_permit_emails.sql</b> in Supabase.</div>}
+        {unassignedMail.length === 0 && permitData.mailReady && <div style={{ color: C.faint, textAlign: "center", padding: 20, fontSize: 12.5 }}>No e-mails waiting.</div>}
+        {unassignedMail.map(m => (
+          <div key={m.id} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "baseline", cursor: "pointer" }} onClick={() => setOpenMail(openMail === m.id ? null : m.id)}>
+              <b style={{ fontSize: 13 }}>{m.subject || "(no subject)"}</b>
+              <span style={{ fontSize: 11, color: C.faint }}>{m.from_addr} · {fmtUtc(m.received_at)}</span>
+              <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{m.match_reason}{(m.attachments || []).length ? ` · ${(m.attachments || []).length} file(s)` : ""}</span>
+            </div>
+            {openMail === m.id && <pre style={{ whiteSpace: "pre-wrap", fontFamily: SANS, fontSize: 12, background: C.panel2, borderRadius: 8, padding: 10, margin: "8px 0", maxHeight: 260, overflow: "auto" }}>{m.body_text || "(empty)"}</pre>}
+            {canEdit && <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+              <select value={assignTo[m.id] || ""} onChange={e => setAssignTo({ ...assignTo, [m.id]: e.target.value })} style={{ ...inputStyle, width: 340 }}>
+                <option value="">File on permit…</option>
+                {permits.filter(p => p.status !== "cancelled").map(p => <option key={p.id} value={p.id}>{normState(p.state)} · {p.validFrom || "…"}→{p.validTo || "…"} · {PERMIT_STATUS_META[effectiveStatus(p, todayStr)][0]}{p.permitNumber || p.authorityRef ? ` · ${p.permitNumber || p.authorityRef}` : ""}</option>)}
+              </select>
+              <button disabled={!assignTo[m.id]} onClick={() => fileMail(m, assignTo[m.id])} style={miniBtn}>File</button>
+              <button onClick={() => ignoreMail(m)} style={{ ...miniBtn, marginLeft: "auto" }}>Ignore</button>
+            </div>}
+          </div>
+        ))}
       </>}
 
       {modal && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
