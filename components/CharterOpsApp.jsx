@@ -5,8 +5,9 @@ import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
 import { noteTextForEmail } from "../lib/permit-mail";
 import {
-  normState, parseStates, buildRouteMap, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, permitReminders, DEFAULT_LEAD_DAYS,
+  normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
+import { buildRequestEmail, extractEmails } from "../lib/permit-request";
 import * as XLSX from "xlsx";
 import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
@@ -6483,7 +6484,8 @@ const PERMIT_TRANSITIONS = {
   cancelled: [["draft", "Reopen as draft"]],
 };
 
-function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitData, onClose, onSaved, pushToast }) {
+function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitData, flights, routeMap, settings, onClose, onSaved, pushToast }) {
+  const [drafting, setDrafting] = useState(false);
   const isNew = !permit;
   const [form, setForm] = useState(() => permit
     ? { state: permit.state, validFrom: permit.validFrom || "", validTo: permit.validTo || "", resourceIds: permit.resourceIds, permitNumber: permit.permitNumber || "", authority: permit.authority || "", authorityRef: permit.authorityRef || "", notes: permit.notes || "" }
@@ -6542,6 +6544,34 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     setBaseVersion(data[0].updated_at);
     pushToast(`${normState(form.state)} request → ${PERMIT_STATUS_META[next][0].toLowerCase()}.`, "ok");
     onSaved();
+  }
+  async function draftRequest() {
+    const st = normState(form.state);
+    const today = dayOf(new Date());
+    const covered = flights.filter(f => f.status !== "cancelled" && (form.resourceIds.length === 0 || form.resourceIds.includes(f.resourceId))
+      && (routeStatesFor(routeMap, f.origin, f.destination) || []).map(normState).includes(st)
+      && dayOf(f.start) >= (form.validFrom && form.validFrom > today ? form.validFrom : today) && (!form.validTo || dayOf(f.start) <= form.validTo))
+      .sort((a, b) => a.start - b.start);
+    const setting = settings.get(st);
+    const { data: auth } = await supabase.auth.getUser();
+    const mail = buildRequestEmail({
+      state: st, validFrom: form.validFrom, validTo: form.validTo, authority: form.authority.trim() || setting?.authority || "",
+      aircraft: form.resourceIds.map(id => resources.find(r => r.id === id)?.code).filter(Boolean),
+      flights: covered.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, aircraft: resources.find(r => r.id === f.resourceId)?.code })),
+      signature: auth?.user?.email || "",
+    });
+    const to = extractEmails(setting?.contact);
+    setDrafting(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/permits/draft", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ to, subject: mail.subject, body: mail.body }) });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) { pushToast(j.error || `Draft failed (${res.status}).`, "warn", true); setDrafting(false); return; }
+      pushToast(`Draft created in Gmail (${covered.length} flight(s) listed${to.length ? `, to ${to.join(", ")}` : ", no recipient: add the authority e-mail under States → Contact"}). Open Gmail → Drafts to review and send.`, "ok", true);
+      if (permit) await supabase.from("permit_notes").insert({ permit_id: permit.id, body: `Request e-mail drafted in Gmail (${covered.length} flight(s) listed). Subject: ${mail.subject}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+      onSaved();
+    } catch (e) { pushToast(`Draft failed: ${e.message}`, "warn"); }
+    setDrafting(false);
   }
   async function addNote() {
     if (!noteText.trim()) return;
@@ -6622,6 +6652,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
             {!isNew && (PERMIT_TRANSITIONS[permit.status] || []).map(([to, label]) => (
               <button key={to} disabled={busy || !stateOk || !datesOk} onClick={() => moveTo(to)} style={{ ...miniBtn, color: to === "rejected" || to === "cancelled" ? C.red : C.text }}>{label}</button>
             ))}
+            {stateOk && <button disabled={drafting || busy} onClick={draftRequest} title="Creates a draft in Gmail; nothing is sent" style={miniBtn}>{drafting ? "Drafting…" : "Draft request e-mail"}</button>}
             {!isNew && <button onClick={deletePermit} style={{ ...miniBtn, marginLeft: "auto", color: C.red }}>Delete</button>}
           </div>
         )}
@@ -6689,6 +6720,13 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr), [flights, routeMap, permits, settings, todayStr]);
   const unmapped = useMemo(() => unmappedRoutes(flights, routeMap, todayStr), [flights, routeMap, todayStr]);
   const reminders = useMemo(() => permitReminders(permits, todayStr), [permits, todayStr]);
+  const urgent = useMemo(() => computeUrgentUncovered(flights, routeMap, permits, todayStr), [flights, routeMap, permits, todayStr]);
+  const [alerting, setAlerting] = useState(false);
+  const receivedGroups = useMemo(() => {
+    const byPermit = new Map(permits.map(p => [p.id, p]));
+    const rows = emails.filter(m => m.status === "filed" && byPermit.has(m.permit_id)).map(m => ({ m, p: byPermit.get(m.permit_id) }));
+    return rows.sort((a, b) => normState(a.p.state).localeCompare(normState(b.p.state)) || String(b.m.received_at).localeCompare(String(a.m.received_at)));
+  }, [emails, permits]);
   const codeOf = id => resources.find(r => r.id === id)?.code || "?";
   const knownStates = useMemo(() => [...new Set([...states.map(s => normState(s.state)), ...routes.flatMap(r => r.states || []).map(normState), ...permits.map(p => normState(p.state))])].sort(), [states, routes, permits]);
   const rows = useMemo(() => permits.filter(p => {
@@ -6744,6 +6782,19 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
     } catch (e) { pushToast(`Mail check failed: ${e.message}`, "warn"); }
     setSyncing(false);
   }
+  async function sendAlert(dryRun) {
+    if (!dryRun && !window.confirm("E-mail the 4-day permit alert now to the addresses in PERMIT_ALERT_TO?")) return;
+    setAlerting(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/permits/alert", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ dryRun }) });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) pushToast(j.error || `Alert failed (${res.status}).`, "warn", true);
+      else if (j.note) pushToast(j.note, "ok");
+      else pushToast(dryRun ? `Would alert: ${j.uncovered} uncovered flight/State pair(s) and ${j.unmapped} unmapped-route flight(s) in the next ${ALERT_DAYS} days.` : `Alert e-mailed to ${j.recipients} address(es): ${j.uncovered} uncovered, ${j.unmapped} unmapped.`, "ok", true);
+    } catch (e) { pushToast(`Alert failed: ${e.message}`, "warn"); }
+    setAlerting(false);
+  }
   async function fileMail(m, permitId) {
     if (!permitId) return;
     // note and documents first, status last: if anything fails the e-mail stays in the inbox to retry
@@ -6771,6 +6822,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       <div style={{ display: "flex", gap: 8, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
         <button onClick={() => setSub("requests")} style={subBtn("requests")}>Requests ({permits.filter(p => ["draft", "submitted", "approved"].includes(effectiveStatus(p, todayStr))).length})</button>
         <button onClick={() => setSub("gaps")} style={subBtn("gaps")}>Gaps ({gaps.length}{overdueCount ? `, ${overdueCount} overdue` : ""})</button>
+        <button onClick={() => setSub("received")} style={subBtn("received")}>Received ({receivedGroups.length})</button>
         <button onClick={() => setSub("routes")} style={subBtn("routes")}>Routes → States ({routes.length}{unmapped.length ? `, ${unmapped.length} unmapped` : ""})</button>
         <button onClick={() => setSub("states")} style={subBtn("states")}>States ({states.length})</button>
         <button onClick={() => setSub("inbox")} style={subBtn("inbox")}>Mail inbox ({unassignedMail.length})</button>
@@ -6808,6 +6860,35 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
                 <td style={td}>{permitData.docs.filter(d => d.permit_id === p.id).length || <span style={{ color: C.faint }}>0</span>}</td>
               </tr>;
             })}
+          </tbody>
+        </table></div>
+      </>}
+
+      {urgent.uncovered.length + urgent.unmapped.length > 0 && <div role="alert" style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, color: C.red, fontWeight: 600 }}>⚠ Next {ALERT_DAYS} days: {urgent.uncovered.length} flight/State pair(s) without an approved permit{urgent.unmapped.length ? `, ${urgent.unmapped.length} flight(s) on unmapped routes` : ""}.</span>
+        <span style={{ fontSize: 11.5, color: C.muted }}>{[...new Set(urgent.uncovered.map(u => u.state))].join(", ")}</span>
+        {canEdit && <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button disabled={alerting} onClick={() => sendAlert(true)} style={miniBtn}>Preview alert</button>
+          <button disabled={alerting} onClick={() => sendAlert(false)} style={{ ...miniBtn, color: C.red }}>E-mail alert now</button>
+        </span>}
+      </div>}
+
+      {sub === "received" && <>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails pulled from the Gmail permit label that were filed on a permit, grouped by State, newest first. E-mails still waiting for a permit are under Mail inbox.</div>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>State</th><th style={th}>Received (UTC)</th><th style={th}>Permit</th><th style={th}>Valid</th><th style={th}>Subject</th><th style={th}>From</th><th style={th}>Files</th></tr></thead>
+          <tbody>
+            {receivedGroups.length === 0 && <tr><td colSpan={7} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>Nothing received yet. Press "Check mail now" in the Mail inbox tab.</td></tr>}
+            {receivedGroups.map(({ m, p }, i) => (
+              <tr key={m.id} onClick={() => setModal({ permit: p })} style={{ borderTop: `1px solid ${i > 0 && normState(receivedGroups[i - 1].p.state) === normState(p.state) ? C.borderSoft : C.border}`, cursor: "pointer" }}>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{fmtUtc(m.received_at)}</td>
+                <td style={td}>{p.permitNumber || p.authorityRef || "—"} <Badge color={PERMIT_STATUS_META[effectiveStatus(p, todayStr)][1]}>{PERMIT_STATUS_META[effectiveStatus(p, todayStr)][0].toUpperCase()}</Badge></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
+                <td style={td}>{m.subject || "(no subject)"}</td><td style={{ ...td, fontSize: 11 }}>{m.from_addr}</td>
+                <td style={td}>{(m.attachments || []).length || "—"}</td>
+              </tr>
+            ))}
           </tbody>
         </table></div>
       </>}
@@ -6922,7 +7003,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         ))}
       </>}
 
-      {modal && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+      {modal && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} flights={flights} routeMap={routeMap} settings={settings} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
     </div>
   );
 }
