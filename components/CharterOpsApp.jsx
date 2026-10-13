@@ -6975,7 +6975,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       </>}
 
       {sub === "inbox" && <>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails carrying the permit label in Gmail are read (never changed or deleted) once a day and when you press the button. An e-mail that mentions a permit number or authority reference of exactly one permit is filed on it as a note, with its attachments. Anything else waits here for you. <b>Status changes are always made by you</b> — an e-mail never approves a permit by itself, and the sender is not verified.</div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails carrying the permit label in Gmail are read (never changed or deleted) once a day and when you press the button. An e-mail that mentions a permit number or authority reference of exactly one permit is filed on it as a note, with its PDF and TXT attachments (images, Word, Excel and other files are not picked up; open the e-mail in Gmail for those). Anything else waits here for you. <b>Status changes are always made by you</b> — an e-mail never approves a permit by itself, and the sender is not verified.</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
           {canEdit && <button disabled={syncing} onClick={syncMail} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{syncing ? "Checking…" : "Check mail now"}</button>}
           <span style={{ fontSize: 11, color: C.faint }}>{emails.filter(m => m.status === "filed").length} filed · {unassignedMail.length} waiting · {emails.filter(m => m.status === "ignored").length} ignored</span>
