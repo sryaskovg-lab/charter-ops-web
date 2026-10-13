@@ -1,6 +1,7 @@
 import { requireActiveUser } from "../../../../lib/serverAuth";
 import { syncPermitMail } from "../../../../lib/permitMailSync";
 import { runPermitAlerts } from "../../../../lib/permitAlerts";
+import { analyzePermitBriefs } from "../../../../lib/permitBriefReader";
 
 export const maxDuration = 60;
 
@@ -21,9 +22,10 @@ export async function POST(request) {
 export async function GET(request) {
   const secret = process.env.CRON_SECRET;
   if (!secret || request.headers.get("authorization") !== `Bearer ${secret}`) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  // mail first, then the 4-day alert; one failing must not stop the other
+  // mail first, then read new attachments, then the 4-day alert; one failing must not stop the others
   const out = {};
   try { out.mail = await syncPermitMail(); } catch (e) { out.mail = { error: e.message }; }
+  try { out.briefs = await analyzePermitBriefs({ limit: 3, budgetMs: 25000 }); } catch (e) { out.briefs = { error: e.message }; }
   try { out.alert = await runPermitAlerts(); } catch (e) { out.alert = { error: e.message }; }
   return Response.json(out, { status: out.mail.error && out.alert.error ? 500 : 200 });
 }
