@@ -6451,7 +6451,7 @@ const PERMIT_STATUS_META = {
 };
 function mapPermit(r) {
   return { id: r.id, state: r.state, status: r.status, validFrom: r.valid_from, validTo: r.valid_to, resourceIds: r.resource_ids || [],
-    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
+    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], validDates: r.valid_dates || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 async function fetchPermitData() {
   const results = await Promise.all([
@@ -6492,8 +6492,8 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
   const [drafting, setDrafting] = useState(false);
   const isNew = !permit;
   const [form, setForm] = useState(() => permit
-    ? { kind: permit.kind || "overfly", airport: permit.airport || "", flightRefs: (permit.flightRefs || []).join(", "), state: permit.state, validFrom: permit.validFrom || "", validTo: permit.validTo || "", resourceIds: permit.resourceIds, permitNumber: permit.permitNumber || "", authority: permit.authority || "", authorityRef: permit.authorityRef || "", notes: permit.notes || "" }
-    : { kind: prefill?.kind || "overfly", airport: prefill?.airport || "", flightRefs: "", state: prefill?.state || "", validFrom: prefill?.validFrom || "", validTo: prefill?.validTo || "", resourceIds: prefill?.resourceIds || [], permitNumber: "", authority: "", authorityRef: "", notes: "" });
+    ? { kind: permit.kind || "overfly", airport: permit.airport || "", flightRefs: (permit.flightRefs || []).join(", "), validDates: (permit.validDates || []).join(", "), state: permit.state, validFrom: permit.validFrom || "", validTo: permit.validTo || "", resourceIds: permit.resourceIds, permitNumber: permit.permitNumber || "", authority: permit.authority || "", authorityRef: permit.authorityRef || "", notes: permit.notes || "" }
+    : { kind: prefill?.kind || "overfly", airport: prefill?.airport || "", flightRefs: "", validDates: "", state: prefill?.state || "", validFrom: prefill?.validFrom || "", validTo: prefill?.validTo || "", resourceIds: prefill?.resourceIds || [], permitNumber: "", authority: "", authorityRef: "", notes: "" });
   const [busy, setBusy] = useState(false);
   const [baseVersion, setBaseVersion] = useState(permit?.updatedAt || null); // version the form was loaded from
   const [noteText, setNoteText] = useState("");
@@ -6504,7 +6504,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
   useEffect(() => { const h = e => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
   const stateOk = normState(form.state).length > 0;
   const datesOk = !form.validFrom || !form.validTo || form.validTo >= form.validFrom;
-  const toRow = () => ({ kind: form.kind, airport: form.kind === "landing" ? (normAirport(form.airport) || null) : null, flight_refs: form.flightRefs.split(/[\s,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean), state: normState(form.state), valid_from: form.validFrom || null, valid_to: form.validTo || null, resource_ids: form.resourceIds,
+  const toRow = () => ({ kind: form.kind, airport: form.kind === "landing" ? (normAirport(form.airport) || null) : null, flight_refs: form.flightRefs.split(/[\s,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean), valid_dates: [...new Set(form.validDates.split(/[\s,;]+/).filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x)))].sort(), state: normState(form.state), valid_from: form.validFrom || null, valid_to: form.validTo || null, resource_ids: form.resourceIds,
     permit_number: form.permitNumber.trim() || null, authority: form.authority.trim() || null, authority_ref: form.authorityRef.trim() || null, notes: form.notes.trim() || null });
 
   useEffect(() => {
@@ -6655,6 +6655,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
         </div>
         <div style={{ fontSize: 10.5, color: C.faint, marginTop: 4 }}>Select none to cover every aircraft, including ones added later.</div>
         <FieldSm label="Only these flights (optional)"><input disabled={lock} value={form.flightRefs} onChange={e => setForm({ ...form, flightRefs: e.target.value })} style={inputStyle} placeholder="e.g. DV101, DV102 — leave empty to cover every flight in the period" /></FieldSm>
+        <FieldSm label="Only on these dates (optional, YYYY-MM-DD)"><input disabled={lock} value={form.validDates} onChange={e => setForm({ ...form, validDates: e.target.value })} style={inputStyle} placeholder="empty = every day between Valid from and Valid to" /></FieldSm>
         <FieldSm label="Notes"><textarea disabled={lock} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} style={{ ...inputStyle, resize: "vertical" }} /></FieldSm>
 
         {canEdit && (
@@ -6877,14 +6878,14 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       if (!p) { pushToast("The matched request no longer exists. Reload and try again.", "warn"); return; }
       const patch = { permit_number: it.permitNumber || p.permitNumber || null, authority_ref: it.authorityRef || p.authorityRef || null,
         valid_from: it.validFrom || p.validFrom || null, valid_to: it.validTo || p.validTo || null,
-        resource_ids: aircraftIds.length ? aircraftIds : p.resourceIds, flight_refs: (it.flights || []).length ? it.flights : (p.flightRefs || []) };
+        resource_ids: aircraftIds.length ? aircraftIds : p.resourceIds, flight_refs: (it.flights || []).length ? it.flights : (p.flightRefs || []), valid_dates: (it.dates || []).length ? it.dates : (p.validDates || []) };
       if (next !== p.status) { patch.status = next; if (next === "submitted") patch.submitted_at = p.submittedAt || nowIso; if (next === "approved" || next === "rejected") patch.decided_at = nowIso; }
       const { data, error: e } = await supabase.from("overfly_permits").update(patch).eq("id", permitId).eq("updated_at", p.updatedAt).select("id");
       if (e || !data?.length) { pushToast(`Not applied: ${e?.message || "the request was changed by someone else, deleted, or you don't have permission"}. Reload and try again.`, "warn", true); onReload(); return; }
     } else {
       if (it.decision === "cancelled") { pushToast("Nothing to cancel: no matching request exists. Dismiss this item.", "warn"); return; }
       const row = { kind: it.kind, airport: it.airport || null, state: normState(it.state), status: next, valid_from: it.validFrom || null, valid_to: it.validTo || null, resource_ids: aircraftIds,
-        flight_refs: it.flights || [], permit_number: it.permitNumber || null, authority_ref: it.authorityRef || null };
+        flight_refs: it.flights || [], valid_dates: it.dates || [], permit_number: it.permitNumber || null, authority_ref: it.authorityRef || null };
       if (next === "submitted") row.submitted_at = nowIso;
       if (next === "approved" || next === "rejected") row.decided_at = nowIso;
       const { data, error: e } = await supabase.from("overfly_permits").insert(row).select("id").single();
@@ -6943,7 +6944,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {rows.map(p => {
               const eff = effectiveStatus(p, todayStr);
               return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.length} flt</span> : ""}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
                 <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
@@ -6994,7 +6995,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
                     <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{it.kind === "landing" ? "LANDING" : "OVERFLY"} · {it.state}{it.airport ? ` ${it.airport}` : ""}</td>
                     <td style={td}><Badge color={it.decision === "granted" ? C.green : it.decision === "rejected" ? C.red : C.amber}>{it.decision.toUpperCase()}</Badge></td>
                     <td style={td}>{it.permitNumber || it.authorityRef || "—"}</td>
-                    <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{it.validFrom ? `${it.validFrom} → ${it.validTo || "?"}` : <span style={{ color: C.red }}>no dates</span>}</td>
+                    <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{it.validFrom ? `${it.validFrom} → ${it.validTo || "?"}` : <span style={{ color: C.red }}>no dates</span>}{(it.dates || []).length ? <div style={{ color: C.faint }}>{it.dates.length} operating day(s)</div> : null}</td>
                     <td style={{ ...td, fontSize: 11 }}>{(it.aircraft || []).join(", ") || "all"}{(it.flights || []).length ? ` · ${it.flights.join(", ")}` : ""}{(it.unknownAircraft || []).length ? <span style={{ color: C.red }}> · unknown: {it.unknownAircraft.join(", ")}</span> : null}</td>
                     <td style={{ ...td, fontSize: 11.5 }}>{open ? action : it.itemState === "applied" ? "✓ applied" : "dismissed"}{open && it.remarks ? <div style={{ color: C.faint }}>{it.remarks}</div> : null}</td>
                     <td style={{ ...td, whiteSpace: "nowrap" }}>{open && canEdit && <><button onClick={() => applyItem(prop, i)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Confirm</button> <button onClick={() => dismissItem(prop, i)} style={miniBtn}>Dismiss</button></>}</td>
