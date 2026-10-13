@@ -468,7 +468,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // yet (migration not run) the rest of the app must keep working and the Permits tab explains why.
   const [permitData, setPermitData] = useState({ loaded: false, error: null, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false });
   const permitReloadTimer = useRef(null);
-  const reloadPermitData = useCallback(async () => { setPermitData(await fetchPermitData()); }, []);
+  const permitReloadSeq = useRef(0);
+  const reloadPermitData = useCallback(async () => {
+    const mine = ++permitReloadSeq.current;
+    let data;
+    try { data = await fetchPermitData(); } catch (e) { data = { loaded: true, error: e.message || "Could not load permits", permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false }; }
+    if (mine === permitReloadSeq.current) setPermitData(data); // an older, slower response must not overwrite a newer one
+  }, []);
   const [slotCorrespondence, setSlotCorrespondence] = useState([]);
   const [atfmRecords, setAtfmRecords] = useState([]);
   const [flights, setFlightsRaw] = useState([]);
@@ -3211,10 +3217,10 @@ function CommitNumberInput({ value, onCommit, style }) {
 }
 
 function FieldSm({ label, children }) {
-  return <div style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
-    <label style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</label>
+  return <label style={{ flex: 1, minWidth: 140, display: "flex", flexDirection: "column", gap: 4 }}>
+    <span style={{ fontSize: 10.5, color: C.muted, fontWeight: 600 }}>{label}</span>
     {children}
-  </div>;
+  </label>;
 }
 // Like FieldSm but no minWidth — for narrow contexts (the 380px flight drawer) where three of
 // FieldSm's 140px-minimum fields side by side would overflow.
@@ -4139,7 +4145,7 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
-      <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
+      <div className="modal-pop" role="dialog" aria-modal="true" aria-label={isNew ? "New overfly permit request" : `Overfly permit ${permit.state}`} onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkDeleteTitle")}</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("bulkDeleteDescription")}</div>
 
@@ -6443,7 +6449,7 @@ const PERMIT_STATUS_META = {
 };
 function mapPermit(r) {
   return { id: r.id, state: r.state, status: r.status, validFrom: r.valid_from, validTo: r.valid_to, resourceIds: r.resource_ids || [],
-    permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at };
+    permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 async function fetchPermitData() {
   const results = await Promise.all([
@@ -6483,10 +6489,13 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     ? { state: permit.state, validFrom: permit.validFrom || "", validTo: permit.validTo || "", resourceIds: permit.resourceIds, permitNumber: permit.permitNumber || "", authority: permit.authority || "", authorityRef: permit.authorityRef || "", notes: permit.notes || "" }
     : { state: prefill?.state || "", validFrom: prefill?.validFrom || "", validTo: prefill?.validTo || "", resourceIds: prefill?.resourceIds || [], permitNumber: "", authority: "", authorityRef: "", notes: "" });
   const [busy, setBusy] = useState(false);
+  const [baseVersion, setBaseVersion] = useState(permit?.updatedAt || null); // version the form was loaded from
   const [noteText, setNoteText] = useState("");
   const [history, setHistory] = useState(null);
   const docs = permit ? permitData.docs.filter(d => d.permit_id === permit.id) : [];
   const notes = permit ? permitData.notes.filter(n => n.permit_id === permit.id) : [];
+  const stale = !isNew && !!permit && permit.updatedAt !== baseVersion; // someone else saved while this was open
+  useEffect(() => { const h = e => { if (e.key === "Escape") onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose]);
   const stateOk = normState(form.state).length > 0;
   const datesOk = !form.validFrom || !form.validTo || form.validTo >= form.validFrom;
   const toRow = () => ({ state: normState(form.state), valid_from: form.validFrom || null, valid_to: form.validTo || null, resource_ids: form.resourceIds,
@@ -6510,9 +6519,11 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
       pushToast(`${normState(form.state)} permit request created as a draft.`, "ok");
       onSaved(); onClose();
     } else {
-      const { data, error } = await supabase.from("overfly_permits").update(toRow()).eq("id", permit.id).select("id");
+      if (stale) { setBusy(false); pushToast("Someone else changed this permit while you had it open. Close it and reopen to see their changes before saving.", "warn"); return; }
+      const { data, error } = await supabase.from("overfly_permits").update(toRow()).eq("id", permit.id).eq("updated_at", baseVersion).select("id,updated_at");
       setBusy(false);
-      if (error || !data?.length) { pushToast(`Could not save: ${error?.message || "the request no longer exists or you don't have permission"}.`, "warn"); return; }
+      if (error || !data?.length) { pushToast(`Not saved: ${error?.message || "the request was changed by someone else, deleted, or you don't have permission"}. Close and reopen it.`, "warn"); onSaved(); return; }
+      setBaseVersion(data[0].updated_at);
       pushToast("Permit saved.", "ok");
       onSaved();
     }
@@ -6524,9 +6535,11 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     const patch = { ...toRow(), status: next };
     if (next === "submitted") patch.submitted_at = new Date().toISOString();
     if (next === "approved" || next === "rejected") patch.decided_at = new Date().toISOString();
-    const { data, error } = await supabase.from("overfly_permits").update(patch).eq("id", permit.id).select("id");
+    if (stale) { setBusy(false); pushToast("Someone else changed this permit while you had it open. Close it and reopen it first.", "warn"); return; }
+    const { data, error } = await supabase.from("overfly_permits").update(patch).eq("id", permit.id).eq("updated_at", baseVersion).select("id,updated_at");
     setBusy(false);
-    if (error || !data?.length) { pushToast(`Status not changed: ${error?.message || "no permission or request missing"}.`, "warn"); return; }
+    if (error || !data?.length) { pushToast(`Status not changed: ${error?.message || "the request was changed by someone else, deleted, or you don't have permission"}. Close and reopen it.`, "warn"); onSaved(); return; }
+    setBaseVersion(data[0].updated_at);
     pushToast(`${normState(form.state)} request → ${PERMIT_STATUS_META[next][0].toLowerCase()}.`, "ok");
     onSaved();
   }
@@ -6561,7 +6574,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
   }
   async function deletePermit() {
     if (!window.confirm(`Delete this ${permit.state} request? Its notes and document links are removed too (a history entry stays).`)) return;
-    const paths = docs.map(d => d.path);
+    const paths = docs.map(d => d.path).filter(p => !p.startsWith("mail/")); // e-mail attachments stay: the e-mail returns to the inbox and still points at them
     const { data, error } = await supabase.from("overfly_permits").delete().eq("id", permit.id).select("id");
     if (error || !data?.length) { pushToast(`Could not delete: ${error?.message || "no permission"}`, "warn"); return; }
     if (paths.length) await supabase.storage.from("permit-docs").remove(paths);
@@ -6590,7 +6603,8 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
           <FieldSm label="Authority"><input disabled={lock} value={form.authority} onChange={e => setForm({ ...form, authority: e.target.value })} style={inputStyle} /></FieldSm>
           <FieldSm label="Authority reference"><input disabled={lock} value={form.authorityRef} onChange={e => setForm({ ...form, authorityRef: e.target.value })} style={inputStyle} /></FieldSm>
         </div>
-        {!datesOk && <div style={{ color: C.red, fontSize: 11.5, marginTop: 6 }}>"Valid to" is before "Valid from".</div>}
+        {!datesOk && <div role="alert" style={{ color: C.red, fontSize: 11.5, marginTop: 6 }}>"Valid to" is before "Valid from".</div>}
+        {stale && <div role="alert" style={{ color: C.red, background: C.redSoft, borderRadius: 8, fontSize: 12, marginTop: 8, padding: "6px 10px" }}>Someone else changed this permit while you had it open. Close and reopen it to see their changes — saving is blocked so nothing is overwritten.</div>}
         <div style={sec}>Aircraft covered {form.resourceIds.length === 0 && <span style={{ color: C.green, fontWeight: 500 }}>— all aircraft</span>}</div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {resources.map(r => {
@@ -6669,7 +6683,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const canEdit = !!perms.editFlight;
   const { permits, routes, states, error } = permitData;
   const emails = permitData.emails || [];
-  const unassignedMail = emails.filter(m => m.status === "unassigned");
+  const unassignedMail = emails.filter(m => m.status === "unassigned" || m.status === "error" || (m.status === "filed" && !m.permit_id));
   const routeMap = useMemo(() => buildRouteMap(routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [routes]);
   const settings = useMemo(() => new Map(states.map(s => [normState(s.state), s])), [states]);
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr), [flights, routeMap, permits, settings, todayStr]);
@@ -6725,22 +6739,23 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j.error) pushToast(j.error || `Mail check failed (${res.status}).`, "warn", true);
       else if (j.configured === false) pushToast(j.error, "warn", true);
-      else pushToast(`Mail checked: ${j.found} message(s) carry the label; ${j.added} new — ${j.filed} filed on permits, ${j.unassigned} in the inbox${j.remaining ? `; ${j.remaining} more waiting, run again` : ""}${j.errors?.length ? `. Problems: ${j.errors.slice(0, 2).join("; ")}` : ""}.`, j.errors?.length ? "warn" : "ok");
+      else pushToast(`Mail checked: ${j.found} message(s) carry the label; ${j.added} new — ${j.filed} filed on permits, ${j.unassigned} in the inbox${j.remaining ? `; ${j.remaining} more waiting, run again` : ""}${j.capped ? ". Only the newest 200 labelled messages are scanned" : ""}${j.errors?.length ? `. Problems: ${j.errors.slice(0, 2).join("; ")}` : ""}.`, j.errors?.length ? "warn" : "ok");
       onReload();
     } catch (e) { pushToast(`Mail check failed: ${e.message}`, "warn"); }
     setSyncing(false);
   }
   async function fileMail(m, permitId) {
     if (!permitId) return;
-    const { data, error: e } = await supabase.from("permit_emails").update({ permit_id: permitId, status: "filed", match_reason: "filed by hand" }).eq("id", m.id).eq("status", "unassigned").select("id");
-    if (e || !data?.length) { pushToast(`Could not file the e-mail: ${e?.message || "already handled or no permission"}`, "warn"); onReload(); return; }
+    // note and documents first, status last: if anything fails the e-mail stays in the inbox to retry
     const { data: auth } = await supabase.auth.getUser();
-    const { error: ne } = await supabase.from("permit_notes").insert({ permit_id: permitId, body: noteTextForEmail(m), created_by: auth?.user?.id, created_by_name: `E-mail · ${m.from_addr || "unknown"}`.slice(0, 200) });
-    if (ne) pushToast(`E-mail filed, but the note failed: ${ne.message}`, "warn");
+    const { error: ne } = await supabase.from("permit_notes").insert({ permit_id: permitId, body: noteTextForEmail(m), created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+    if (ne) { pushToast(`E-mail not filed: the note could not be saved (${ne.message}).`, "warn"); return; }
     for (const a of m.attachments || []) {
       const { error: de } = await supabase.from("permit_documents").insert({ permit_id: permitId, path: a.path, file_name: a.name, size_bytes: a.size });
-      if (de) pushToast(`Attachment ${a.name} not linked: ${de.message}`, "warn");
+      if (de && de.code !== "23505") { pushToast(`E-mail not fully filed: attachment ${a.name} could not be linked (${de.message}). It is still in the inbox; a note was already added, so check the permit before retrying.`, "warn", true); return; }
     }
+    const { data, error: e } = await supabase.from("permit_emails").update({ permit_id: permitId, status: "filed", match_reason: "filed by hand" }).eq("id", m.id).eq("status", "unassigned").select("id");
+    if (e || !data?.length) { pushToast(`Note added, but the e-mail's status could not be updated: ${e?.message || "already handled or no permission"}`, "warn"); onReload(); return; }
     pushToast("E-mail filed on the permit.", "ok"); onReload();
   }
   async function ignoreMail(m) {
@@ -6767,14 +6782,14 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
           {reminders.map(r => <div key={r.id} onClick={() => setModal({ permit: permits.find(p => p.id === r.permitId) })} style={{ fontSize: 12.5, padding: "3px 0", cursor: "pointer", color: sevColor(r.severity) }}>{r.severity === "error" ? "⚠ " : "• "}{r.message}</div>)}
         </div>}
         <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center" }}>
-          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 170 }}>
+          <select aria-label="Filter by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 170 }}>
             <option value="active">Active (draft/submitted/approved)</option><option value="all">All</option>
             {Object.entries(PERMIT_STATUS_META).map(([k, [l]]) => <option key={k} value={k}>{l}</option>)}
           </select>
-          <input value={stateFilter} onChange={e => setStateFilter(e.target.value)} placeholder="Filter by State…" style={{ ...inputStyle, width: 160 }} />
+          <input aria-label="Filter by State" value={stateFilter} onChange={e => setStateFilter(e.target.value)} placeholder="Filter by State…" style={{ ...inputStyle, width: 160 }} />
           <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{rows.length} of {permits.length}</span>
         </div>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
             <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Submitted</th><th style={th}>Docs</th>
           </tr></thead>
@@ -6782,7 +6797,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {rows.length === 0 && <tr><td colSpan={8} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Map your routes first (Routes → States), then use Gaps to see what needs requesting." : "No requests match these filters."}</td></tr>}
             {rows.map(p => {
               const eff = effectiveStatus(p, todayStr);
-              return <tr key={p.id} onClick={() => setModal({ permit: p })} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
+              return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
@@ -6794,12 +6809,12 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               </tr>;
             })}
           </tbody>
-        </table>
+        </table></div>
       </>}
 
       {sub === "gaps" && <>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Upcoming flights (from today, not cancelled) whose route crosses a State without an <b>approved</b> permit covering that date and aircraft. "File by" = first flight date minus the State's processing time.</div>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
             <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Flights</th><th style={th}>Dates needed</th><th style={th}>Paperwork</th><th style={th}>File by</th><th style={th}></th>
           </tr></thead>
@@ -6812,12 +6827,12 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
                 <td style={td}><span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => onJumpToFlight(g.flightIds[0])} title="Open the first affected flight">{g.flightCount}</span></td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{g.firstDay} → {g.lastDay}</td>
                 <td style={td}><Badge color={g.reason === "submitted" ? C.amber : g.reason === "draft" ? C.faint : C.red}>{{ none: "NO REQUEST", draft: "DRAFT ONLY", submitted: "AWAITING APPROVAL", rejected: "REJECTED", expired: "EXPIRED" }[g.reason]}</Badge></td>
-                <td style={{ ...td, fontFamily: MONO, fontSize: 11, color: g.overdue ? C.red : C.text, fontWeight: g.overdue ? 700 : 400 }}>{g.reason === "submitted" ? "—" : g.fileBy}{g.overdue ? " ⚠ overdue" : ""} <span style={{ color: C.faint }}>({g.leadDays}d)</span></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11, color: g.overdue ? C.red : C.text, fontWeight: g.overdue ? 700 : 400 }}>{g.fileBy ? <>{g.fileBy}{g.overdue ? " ⚠ overdue" : ""} <span style={{ color: C.faint }}>({g.leadDays}d)</span></> : "—"}</td>
                 <td style={td}>{canEdit && (g.reason === "none" || g.reason === "expired" || g.reason === "rejected") && <button onClick={() => setModal({ prefill: { state: g.state, validFrom: g.firstDay, validTo: g.lastDay, resourceIds: [g.resourceId] } })} style={miniBtn}>Create request</button>}</td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </>}
 
       {sub === "routes" && <>
@@ -6835,7 +6850,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
           <FieldSm label="Note"><input value={routeForm.note} onChange={e => setRouteForm({ ...routeForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
           <button onClick={saveRoute} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save route</button>
         </div>}
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Route</th><th style={th}>States overflown</th><th style={th}>Note</th><th style={th}></th></tr></thead>
           <tbody>
             {routes.length === 0 && <tr><td colSpan={4} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No routes mapped yet.</td></tr>}
@@ -6850,7 +6865,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </>}
 
       {sub === "states" && <>
@@ -6863,7 +6878,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
           <FieldSm label="Note"><input value={stateForm.note} onChange={e => setStateForm({ ...stateForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
           <button onClick={saveState} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save State</button>
         </div>}
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>State</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Note</th><th style={th}></th></tr></thead>
           <tbody>
             {states.length === 0 && <tr><td colSpan={6} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No State settings yet — all States use the {DEFAULT_LEAD_DAYS}-day default.</td></tr>}
@@ -6875,7 +6890,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </>}
 
       {sub === "inbox" && <>
@@ -6894,8 +6909,9 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{m.match_reason}{(m.attachments || []).length ? ` · ${(m.attachments || []).length} file(s)` : ""}</span>
             </div>
             {openMail === m.id && <pre style={{ whiteSpace: "pre-wrap", fontFamily: SANS, fontSize: 12, background: C.panel2, borderRadius: 8, padding: 10, margin: "8px 0", maxHeight: 260, overflow: "auto" }}>{m.body_text || "(empty)"}</pre>}
-            {canEdit && <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-              <select value={assignTo[m.id] || ""} onChange={e => setAssignTo({ ...assignTo, [m.id]: e.target.value })} style={{ ...inputStyle, width: 340 }}>
+            {canEdit && m.status === "error" && <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}><span style={{ fontSize: 12, color: C.red }}>Could not be imported — open it in Gmail.</span><button onClick={() => ignoreMail(m)} style={{ ...miniBtn, marginLeft: "auto" }}>Dismiss</button></div>}
+            {canEdit && m.status !== "error" && <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
+              <select aria-label="File this e-mail on a permit" value={assignTo[m.id] || ""} onChange={e => setAssignTo({ ...assignTo, [m.id]: e.target.value })} style={{ ...inputStyle, width: 340 }}>
                 <option value="">File on permit…</option>
                 {permits.filter(p => p.status !== "cancelled").map(p => <option key={p.id} value={p.id}>{normState(p.state)} · {p.validFrom || "…"}→{p.validTo || "…"} · {PERMIT_STATUS_META[effectiveStatus(p, todayStr)][0]}{p.permitNumber || p.authorityRef ? ` · ${p.permitNumber || p.authorityRef}` : ""}</option>)}
               </select>
