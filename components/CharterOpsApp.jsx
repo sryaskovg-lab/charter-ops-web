@@ -10,6 +10,7 @@ import {
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
 import { stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
+import { assignTails } from "../lib/tail-assign";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
@@ -1555,6 +1556,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   function quickCreateFlight(prefill) { setAddFlightPrefill(prefill); setShowAddFlight(true); }
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showSchedMsgs, setShowSchedMsgs] = useState(false);
+  const [showAssignTails, setShowAssignTails] = useState(false);
   // While a coordinator has the app open, look for new SSIM/SSM/ASM e-mail every 15 minutes.
   // This only files the messages for review; it never changes the schedule.
   useEffect(() => {
@@ -1656,8 +1658,16 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     const skipped = inserts.length - valid.length;
     if (valid.length === 0) { pushToast(`${label}: nothing to add — ${skipped} row${skipped === 1 ? "" : "s"} had no seat capacity or an arrival before departure.`, "warn"); return null; }
     const added = [];
+    let withType = true; // falls back to inserting without aircraft_type until migration 00034 has been run
     for (let i = 0; i < valid.length; i += 300) {
-      const { data, error } = await supabase.from("flights").insert(valid.slice(i, i + 300)).select();
+      const strip = rows => rows.map(({ aircraft_type, ...rest }) => rest);
+      let chunk = valid.slice(i, i + 300);
+      let { data, error } = await supabase.from("flights").insert(withType ? chunk : strip(chunk)).select();
+      if (error && withType && /aircraft_type/.test(error.message)) {
+        withType = false;
+        pushToast("The aircraft type could not be saved: run migration 00034_flight_aircraft_type.sql in Supabase. The flights are saved without it.", "warn", true);
+        ({ data, error } = await supabase.from("flights").insert(strip(chunk)).select());
+      }
       if (error) {
         if (added.length) setFlightsRaw(fl => [...fl, ...added]);
         pushToast(`${label} failed after ${added.length} of ${valid.length} flights: ${error.message}${added.length ? " — those first flights were saved; check the board before retrying." : ""}`, "warn");
@@ -1670,6 +1680,29 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return added;
   }
 
+  // Saves tail assignments straight to the database in chunks (one update per aircraft and chunk), like the imports do.
+  async function applyTailAssignments(assigned) {
+    const byRes = new Map();
+    assigned.forEach(a => { if (!byRes.has(a.resourceId)) byRes.set(a.resourceId, []); byRes.get(a.resourceId).push(a.flightId); });
+    const saved = new Map();
+    let failed = 0, firstError = "";
+    for (const [rid, ids] of byRes) {
+      const res = resources.find(r => r.id === rid);
+      if (!res) { failed += ids.length; continue; }
+      for (let i = 0; i < ids.length; i += 150) {
+        const chunk = ids.slice(i, i + 150);
+        const { data, error } = await supabase.from("flights").update({ resource_id: rid, capacity: res.capacity }).in("id", chunk).select("id");
+        if (error) { failed += chunk.length; firstError = firstError || error.message; continue; }
+        (data || []).forEach(r => saved.set(r.id, res));
+        failed += chunk.length - (data || []).length;
+      }
+    }
+    if (saved.size) setFlightsRaw(fl => fl.map(f => saved.has(f.id) ? { ...f, resourceId: saved.get(f.id).id, capacity: saved.get(f.id).capacity } : f));
+    pushToast(`${saved.size} flight${saved.size === 1 ? "" : "s"} assigned to aircraft${failed ? `, ${failed} not saved${firstError ? `: ${firstError}` : ""}` : ""}.`, failed ? "warn" : "ok", !!failed);
+    if (saved.size) pushNotification("Schedule update", `${saved.size} flights assigned to aircraft`, "flight");
+    return failed === 0;
+  }
+
   async function commitBulkRows(rows, opts) {
     const inserts = rows.map((r, i) => ({
       resource_id: r.resourceId || null, origin: r.origin, destination: r.destination,
@@ -1677,6 +1710,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
       capacity: resources.find(res => res.id === r.resourceId)?.capacity ?? r.capacity, // schedule messages can create flights with no tail yet
       status: "tentative", ref: r.flightNo ? (r.airline || "DV") + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
+      ...(r.aircraftType ? { aircraft_type: canonicalAircraftType(r.aircraftType) } : {}),
     }));
     // The database allows one flight per (reference, departure time). Leave out rows that would collide, whether with a
     // flight already in the schedule (any status) or with an earlier row of the same file, so one clash cannot stop the whole import.
@@ -1903,7 +1937,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues}
@@ -1940,6 +1974,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
+      {showAssignTails && <AssignTailsModal flights={flights} resources={resources} isGrounded={isGrounded} perms={perms} onClose={() => setShowAssignTails(false)} onApply={applyTailAssignments} />}
       {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} onLogScr={logScrSent} />}
@@ -1963,7 +1998,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2249,6 +2284,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
                   <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkImport")}</button>
                   <button onClick={() => { onScheduleMessages(); setShowMoreMenu(false); }} style={ctxMenuItem}>SSIM / SSM / ASM messages</button>
+                  <button onClick={() => { onAssignTails(); setShowMoreMenu(false); }} style={ctxMenuItem}>Assign aircraft to flights without one</button>
                   <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkRetime")}</button>
                   <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>{t("bulkDelete")}</button>
                 </>}
@@ -2289,7 +2325,9 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
           </div>
 
           {(() => {
-            const sortedResources = [...resources].sort((a, b) => (a.variant || "").localeCompare(b.variant || "") || a.code.localeCompare(b.code));
+            // Flights without an aircraft (e.g. created from an SSIM file, which names the type, not the tail) get their own lane on top so they are visible.
+            const hasUnassigned = flights.some(f => !f.resourceId);
+            const sortedResources = [...(hasUnassigned ? [{ id: UNASSIGNED_LANE, code: "No aircraft", variant: "Not assigned to an aircraft yet", capacity: null, unassigned: true }] : []), ...[...resources].sort((a, b) => (a.variant || "").localeCompare(b.variant || "") || a.code.localeCompare(b.code))];
             const filterActive = filterText.trim().length > 0;
             const anyMatch = !filterActive || flights.some(matchesFilter);
             let lastVariant = null;
@@ -2303,7 +2341,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                 {sortedResources.map(res => {
                   const showDivider = res.variant !== lastVariant;
                   lastVariant = res.variant;
-                  const resFlights = flights.filter(f => f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
+                  const resFlights = flights.filter(f => res.unassigned ? !f.resourceId : f.resourceId === res.id).map(f => ({ f, c: colFor(f.start) })).filter(x => x.c >= 0 && x.c < days.length);
                   const laneOf = new Map();
                   let maxLanes = 1;
                   if (resFlights.length > 0) {
@@ -2339,14 +2377,15 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
               <div style={{ width: LABELW, flexShrink: 0, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center", borderRight: `1px solid ${C.border}`, background: C.panel2, position: "sticky", left: 0, zIndex: 15 }}>
                 <div style={{ display: "flex", alignItems: "center" }}>
                   <span style={{ fontFamily: MONO, fontWeight: 700, color: C.text }}>{res.code}</span>
-                  <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 10.5, color: C.text, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 5, padding: "1px 6px", marginLeft: 8 }}>{res.capacity}Y</span>
+                  <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 10.5, color: C.text, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 5, padding: "1px 6px", marginLeft: 8, display: res.unassigned ? "none" : undefined }}>{res.capacity}Y</span>
                 </div>
                 {maxLanes > 1 && <div style={{ fontSize: 9.5, color: C.faint, marginTop: 2 }}>{t("upToFlightsPerDay", maxLanes)}</div>}
+                {res.unassigned && perms.editFlight && <button onClick={onAssignTails} style={{ ...miniBtn, marginTop: 4, fontSize: 10.5, padding: "2px 8px", width: "fit-content" }}>Assign aircraft…</button>}
               </div>
               <div data-resource-id={res.id} style={{ position: "relative", display: "flex", cursor: perms.editFlight ? (panDragActive ? "grabbing" : "grab") : "default" }}
                 onDragOver={e => { if (perms.editFlight) e.preventDefault(); }}
                 onDrop={e => {
-                  if (!perms.editFlight) return;
+                  if (!perms.editFlight || res.unassigned) return;
                   e.preventDefault();
                   const flightId = e.dataTransfer.getData("text/flight-id");
                   if (!flightId) return;
@@ -2363,7 +2402,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   setPanDrag(initial);
                 }}
                 onContextMenu={e => {
-                  if (!perms.editFlight) return;
+                  if (!perms.editFlight || res.unassigned) return;
                   e.preventDefault();
                   const rect = e.currentTarget.getBoundingClientRect();
                   const relX = e.clientX - rect.left;
@@ -3274,6 +3313,7 @@ function FieldXs({ label, children }) {
 }
 
 // ---------- bulk import (matched to the roster-grid format) ----------
+const UNASSIGNED_LANE = "__unassigned";
 const SAMPLE_PASTE = `date,flight_no,origin,destination,dep_time,arr_time,resource,leg_type
 2027-06-05,5335,CXR,ALA,0800,1530,G-CHTR,revenue
 2027-06-12,5335,CXR,ALA,0800,1530,G-CHTR,revenue
@@ -3489,7 +3529,7 @@ function ScheduleMessagesModal({ flights, resources, allotments = [], perms, pus
         const rows = createRows.map(({ r }) => {
           const key = canonicalAircraftType(r.aircraftType);
           const res = resources.find(x => x.id === typeMap[key]);
-          return { date: r.date, airline: r.airline, flightNo: r.flightNo, origin: r.origin, destination: r.destination, depTime: r.depTime, arrTime: r.arrTime, legType: r.legType, resourceId: res?.id || null, capacity: res?.capacity ?? capacityFor(key) };
+          return { date: r.date, airline: r.airline, flightNo: r.flightNo, origin: r.origin, destination: r.destination, depTime: r.depTime, arrTime: r.arrTime, legType: r.legType, aircraftType: r.aircraftType, resourceId: res?.id || null, capacity: res?.capacity ?? capacityFor(key) };
         });
         const made = await onCreateRows(rows);
         if (made) done.push(`${made.length} new`); else throw new Error("the new flights could not be saved, so nothing else was applied");
@@ -3628,6 +3668,51 @@ function ScheduleMessagesModal({ flights, resources, allotments = [], perms, pus
             {canEdit && <button disabled={busy || (!createRows.length && !nCancel && !nRetime)} onClick={apply} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Applying…" : `Apply selected (${createRows.length + nCancel + nRetime})`}</button>}
           </div>
         </>}
+      </div>
+    </div>
+  );
+}
+
+function AssignTailsModal({ flights, resources, isGrounded, perms, onClose, onApply }) {
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [allowJump, setAllowJump] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const unassigned = flights.filter(f => !f.resourceId && f.status !== "cancelled");
+  const result = useMemo(() => assignTails(flights, resources, { typeKey: fleetTypeKey, canonType: canonicalAircraftType, isGrounded, allowJump, from: from ? new Date(from + "T00:00:00Z") : null, to: to ? new Date(to + "T00:00:00Z") : null }), [flights, resources, allowJump, from, to]);
+  const byId = useMemo(() => new Map(flights.map(f => [f.id, f])), [flights]);
+  const tailCode = id => resources.find(r => r.id === id)?.code || "?";
+  const perTail = {};
+  result.assigned.forEach(a => { perTail[tailCode(a.resourceId)] = (perTail[tailCode(a.resourceId)] || 0) + 1; });
+  const reasons = {};
+  result.left.forEach(l => { reasons[l.reason] = (reasons[l.reason] || 0) + 1; });
+  const jumps = result.assigned.filter(a => a.jump);
+  async function go() { setBusy(true); const ok = await onApply(result.assigned); setBusy(false); if (ok) onClose(); }
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" role="dialog" aria-modal="true" aria-label="Assign aircraft" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 700, maxWidth: "96vw", maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Assign aircraft to flights without one</div>
+          <button onClick={onClose} style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>{unassigned.length} flight{unassigned.length === 1 ? "" : "s"} have no aircraft. Flights from an SSIM file name the type, not the tail. The proposal gives each flight a tail of its own type that is free (with a 45 minute turnaround, not grounded) and, where possible, already at the departure station. Nothing is saved until you press Assign.</div>
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 10 }}>
+          <FieldSm label="From (optional)"><input type="date" value={from} onChange={e => setFrom(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
+          <FieldSm label="To (optional)"><input type="date" value={to} onChange={e => setTo(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, paddingBottom: 6 }}><input type="checkbox" checked={allowJump} onChange={e => setAllowJump(e.target.checked)} />Allow a tail to change station without a flight (positioning)</label>
+        </div>
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10, fontSize: 12.5 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>{result.assigned.length} flight{result.assigned.length === 1 ? "" : "s"} can be assigned{jumps.length ? `, ${jumps.length} of them need the aircraft to be positioned first` : ""}; {result.left.length} left</div>
+          {Object.keys(perTail).length > 0 && <div style={{ color: C.muted, fontFamily: MONO, fontSize: 11.5 }}>{Object.entries(perTail).sort().map(([k, n]) => `${k} ${n}`).join(" · ")}</div>}
+          {Object.entries(reasons).map(([r, n]) => <div key={r} style={{ color: C.amber, fontSize: 12, marginTop: 3 }}>{n} left unassigned: {r}</div>)}
+        </div>
+        {result.left.length > 0 && <div style={{ maxHeight: 170, overflowY: "auto", marginBottom: 10 }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <tbody>{result.left.slice(0, 60).map(l => { const f = byId.get(l.flightId); return f ? <tr key={l.flightId} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+            <td style={{ padding: "3px 6px", fontFamily: MONO }}>{f.ref}</td><td style={{ padding: "3px 6px", fontFamily: MONO }}>{iso(f.start)} {f.depTime}Z</td><td style={{ padding: "3px 6px", fontFamily: MONO }}>{f.origin}–{f.destination}</td><td style={{ padding: "3px 6px", color: C.muted }}>{l.reason}</td></tr> : null; })}</tbody>
+        </table>{result.left.length > 60 && <div style={{ fontSize: 11, color: C.faint, padding: 4 }}>Showing the first 60 of {result.left.length}.</div>}</div>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          {perms.editFlight && <button disabled={busy || !result.assigned.length} onClick={go} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Saving…" : `Assign ${result.assigned.length} flights`}</button>}
+        </div>
       </div>
     </div>
   );
