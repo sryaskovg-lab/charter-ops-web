@@ -7592,7 +7592,18 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
           <FieldSm label="From"><input value={routeForm.origin} onChange={e => setRouteForm({ ...routeForm, origin: e.target.value })} style={{ ...inputStyle, width: 70, fontFamily: MONO }} /></FieldSm>
           <FieldSm label="To"><input value={routeForm.destination} onChange={e => setRouteForm({ ...routeForm, destination: e.target.value })} style={{ ...inputStyle, width: 70, fontFamily: MONO }} /></FieldSm>
-          <FieldSm label="States overflown"><input value={routeForm.states} onChange={e => setRouteForm({ ...routeForm, states: e.target.value })} placeholder="e.g. TM, UZ" style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <FieldSm label="States overflown">
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <select value="" aria-label="Add a country to this route" onChange={e => { const c = e.target.value; if (!c) return; const cur = parseStates(routeForm.states); if (!cur.includes(c)) setRouteForm({ ...routeForm, states: [...cur, c].join(", ") }); }} style={{ ...inputStyle, width: 220 }}>
+                <option value="">Add a country…</option>
+                {allCountries().map(([code, name]) => <option key={code} value={code}>{name} ({code})</option>)}
+              </select>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, minHeight: 22 }}>
+                {parseStates(routeForm.states).length === 0 && <span style={{ fontSize: 11.5, color: C.faint }}>None — no permit needed</span>}
+                {parseStates(routeForm.states).map(c => <span key={c} style={{ ...miniBtn, cursor: "default" }}>{stateLabel(c)} <span role="button" aria-label={`Remove ${c}`} onClick={() => setRouteForm({ ...routeForm, states: parseStates(routeForm.states).filter(x => x !== c).join(", ") })} style={{ cursor: "pointer", color: C.red, marginLeft: 4 }}>×</span></span>)}
+              </div>
+            </div>
+          </FieldSm>
           <FieldSm label="Note"><input value={routeForm.note} onChange={e => setRouteForm({ ...routeForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
           <button onClick={saveRoute} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save route</button>
         </div>}
@@ -7603,7 +7614,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {routes.map(r => (
               <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{r.origin}–{r.destination}</td>
-                <td style={{ ...td, fontFamily: MONO }}>{(r.states || []).length ? r.states.map(stateLabel).join(", ") : <span style={{ color: C.faint }}>none needed</span>}</td>
+                <td style={td}>{(r.states || []).length ? r.states.map(c => <span key={c} style={{ display: "inline-block", marginRight: 10 }}>{countryName(c) !== c ? countryName(c) : c} <span style={{ fontFamily: MONO, color: C.faint }}>{c}</span></span>) : <span style={{ color: C.faint }}>none needed</span>}</td>
                 <td style={td}>{r.note || <span style={{ color: C.faint }}>—</span>}</td>
                 <td style={{ ...td, textAlign: "right" }}>{canEdit && <>
                   <button onClick={() => setRouteForm({ origin: r.origin, destination: r.destination, states: (r.states || []).join(", "), note: r.note || "" })} style={miniBtn}>Edit</button>{" "}
