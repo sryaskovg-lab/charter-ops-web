@@ -7134,6 +7134,8 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [syncing, setSyncing] = useState(false);
   const [openMail, setOpenMail] = useState(null);
   const [assignTo, setAssignTo] = useState({});
+  const [picked, setPicked] = useState(() => new Set()); // permit requests ticked for deletion
+  const [deleting, setDeleting] = useState(false);
   const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
   const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
   const todayStr = iso(new Date());
@@ -7147,6 +7149,32 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr, airportMap), [flights, routeMap, permits, settings, todayStr, airportMap]);
   const unmappedAp = useMemo(() => unmappedAirports(flights, airportMap, todayStr), [flights, airportMap, todayStr]);
   const proposals = permitData.proposals || [];
+  // Deletes permit requests (their notes and document links go with them, a history entry stays). Uploaded files go too, except
+  // e-mail attachments: those e-mails return to the inbox and still point at them.
+  async function deletePermits(ids) {
+    if (!canEdit || !ids.length) return;
+    const list = permits.filter(p => ids.includes(p.id));
+    const msg = list.length === 1
+      ? `Delete this ${normState(list[0].state)} request? Its notes and document links are removed too (a history entry stays).`
+      : `Delete ${list.length} permit requests (${[...new Set(list.map(p => normState(p.state)))].slice(0, 6).join(", ")}${new Set(list.map(p => p.state)).size > 6 ? ", …" : ""})? Their notes and document links are removed too (a history entry stays for each).`;
+    if (!window.confirm(msg)) return;
+    setDeleting(true);
+    const gone = [];
+    let firstError = "";
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const paths = (permitData.docs || []).filter(d => chunk.includes(d.permit_id)).map(d => d.path).filter(x => x && !x.startsWith("mail/"));
+      const { data, error } = await retryNetwork(() => supabase.from("overfly_permits").delete().in("id", chunk).select("id"));
+      if (error) { firstError = firstError || error.message; continue; }
+      (data || []).forEach(r => gone.push(r.id));
+      if ((data || []).length < chunk.length) firstError = firstError || "some requests were already gone or you lack permission to delete them";
+      if (paths.length) await supabase.storage.from("permit-docs").remove(paths);
+    }
+    setDeleting(false);
+    setPicked(new Set());
+    pushToast(`${gone.length} permit request${gone.length === 1 ? "" : "s"} deleted${firstError ? `, ${ids.length - gone.length} not deleted: ${firstError}` : ""}.`, firstError ? "warn" : "ok", !!firstError);
+    if (gone.length) onReload();
+  }
   const openItemCount = proposals.filter(x => x.status === "pending").reduce((n, x) => n + (x.items || []).filter(i => i.itemState === "open").length, 0);
   const [airportForm, setAirportForm] = useState({ airport: "", state: "" });
   const [reading, setReading] = useState(false);
@@ -7378,17 +7406,21 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {Object.entries(PERMIT_STATUS_META).map(([k, [l]]) => <option key={k} value={k}>{l}</option>)}
           </select>
           <input aria-label="Filter by State" value={stateFilter} onChange={e => setStateFilter(e.target.value)} placeholder="Filter by State…" style={{ ...inputStyle, width: 160 }} />
+          {canEdit && rows.some(p => picked.has(p.id)) && <button disabled={deleting} onClick={() => deletePermits(rows.filter(p => picked.has(p.id)).map(p => p.id))} style={{ ...miniBtn, color: C.red, borderColor: C.red, fontWeight: 600 }}>{deleting ? "Deleting…" : `Delete selected (${rows.filter(p => picked.has(p.id)).length})`}</button>}
+          {canEdit && picked.size > 0 && <button onClick={() => setPicked(new Set())} style={miniBtn}>Clear selection</button>}
           <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{rows.length} of {permits.length}</span>
         </div>
         <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
-            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Submitted</th><th style={th}>Docs</th>
+            {canEdit && <th style={{ ...th, width: 28 }}><input type="checkbox" aria-label="Select all shown requests" checked={rows.length > 0 && rows.every(p => picked.has(p.id))} onChange={e => setPicked(e.target.checked ? new Set(rows.map(p => p.id)) : new Set())} /></th>}
+            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Submitted</th><th style={th}>Docs</th>{canEdit && <th style={th}></th>}
           </tr></thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={8} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Map your routes first (Routes → States), then use Gaps to see what needs requesting." : "No requests match these filters."}</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={canEdit ? 10 : 8} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Map your routes first (Routes → States), then use Gaps to see what needs requesting." : "No requests match these filters."}</td></tr>}
             {rows.map(p => {
               const eff = effectiveStatus(p, todayStr);
-              return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
+              return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer", background: picked.has(p.id) ? C.amberSoft : undefined }}>
+                {canEdit && <td style={td} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${normState(p.state)} request`} checked={picked.has(p.id)} onChange={e => setPicked(prev => { const n = new Set(prev); e.target.checked ? n.add(p.id) : n.delete(p.id); return n; })} /></td>}
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
@@ -7397,6 +7429,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
                 <td style={td}>{p.authorityRef || <span style={{ color: C.faint }}>—</span>}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.submittedAt ? p.submittedAt.slice(0, 10) : "—"}</td>
                 <td style={td}>{permitData.docs.filter(d => d.permit_id === p.id).length || <span style={{ color: C.faint }}>0</span>}</td>
+                {canEdit && <td style={{ ...td, textAlign: "right" }} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><button disabled={deleting} onClick={() => deletePermits([p.id])} aria-label={`Delete ${normState(p.state)} request`} style={{ ...miniBtn, color: C.red, padding: "2px 8px", fontSize: 11 }}>Delete</button></td>}
               </tr>;
             })}
           </tbody>
