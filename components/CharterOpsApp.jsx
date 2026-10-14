@@ -1678,7 +1678,21 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       capacity: resources.find(res => res.id === r.resourceId)?.capacity ?? r.capacity, // schedule messages can create flights with no tail yet
       status: "tentative", ref: r.flightNo ? (r.airline || "DV") + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
     }));
-    const newFlights = await insertFlightsChunked(inserts, "Import");
+    // The database allows one flight per (reference, departure time). Leave out rows that would collide, whether with a
+    // flight already in the schedule (any status) or with an earlier row of the same file, so one clash cannot stop the whole import.
+    const taken = new Set(flights.map(f => `${f.ref}|${f.start.toISOString()}`));
+    const unique = [], clashes = [];
+    for (const row of inserts) {
+      const k = `${row.ref}|${row.scheduled_departure}`;
+      if (taken.has(k)) { clashes.push(row); continue; }
+      taken.add(k); unique.push(row);
+    }
+    if (clashes.length) {
+      const eg = clashes.slice(0, 3).map(c => `${c.ref} ${c.scheduled_departure.slice(0, 16).replace("T", " ")}Z`).join(", ");
+      pushToast(`${clashes.length} row${clashes.length === 1 ? "" : "s"} left out: a flight with the same number and departure time already exists, or the file lists it twice (${eg}${clashes.length > 3 ? ", …" : ""}).`, "warn", true);
+    }
+    if (!unique.length) { if (!opts?.keepOpen) setShowBulkImport(false); return []; }
+    const newFlights = await insertFlightsChunked(unique, "Import");
     if (!newFlights) return null;
     const ferryCount = newFlights.filter(f => f.legType === "ferry").length;
     pushToast(`Imported ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"}${ferryCount ? ` (${ferryCount} ferry/positioning, excluded from inventory)` : ""}`, "ok");
