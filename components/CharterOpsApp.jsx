@@ -195,6 +195,18 @@ function ghostFlightFromPatch(current, patch) {
     arrivalAt: combineArrivalDateTime(start, arrTime),
   };
 }
+// Runs a Supabase call again (with growing pauses) when it fails because the connection dropped.
+// Only use it for calls that are safe to repeat.
+async function retryNetwork(run, tries = 5) {
+  let out;
+  for (let a = 0; a < tries; a++) {
+    out = await run();
+    if (!out?.error || !/fetch|network|timeout|load failed/i.test(out.error.message || "")) return out;
+    await new Promise(r => setTimeout(r, 600 * 2 ** a));
+  }
+  return out;
+}
+
 function mapAllotment(a) { return { id: a.id, flightId: a.flight_id, operatorId: a.tour_operator_id, contractId: a.contract_id, seatsAllocated: a.seats_allocated, pricePerSeat: Number(a.price_per_seat), allotmentType: a.allotment_type, tripType: a.trip_type || "one_way", optionReleaseAt: a.option_release_at ? new Date(a.option_release_at) : null, status: a.status }; }
 function mapOperator(o, contract) {
   return {
@@ -1072,22 +1084,28 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     // flights) can push the URL past the host's length limit and come back as a bare "Bad
     // Request" with no useful detail. Chunking keeps every request well under that limit and
     // still reports exactly how many flights, if any, failed to delete.
-    const CHUNK = 150;
-    const chunks = [];
-    for (let i = 0; i < flightIds.length; i += CHUNK) chunks.push(flightIds.slice(i, i + CHUNK));
+    // One database function call per 500 flights (a few requests in all); a dropped connection is retried, and
+    // deleting twice is harmless. Falls back to plain chunked deletes if migration 00035 has not been run yet.
     const deletedIds = [];
     let firstError = null;
-    for (const chunk of chunks) {
-      // a dropped connection ("Failed to fetch") is retried a few times before the chunk counts as failed
-      let gone = null, error = null;
-      for (let attempt = 0; attempt < 4; attempt++) {
-        ({ data: gone, error } = await supabase.from("flights").delete().in("id", chunk).select("id"));
-        if (!error || !/fetch|network|timeout/i.test(error.message)) break;
-        await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    let useRpc = true;
+    let i = 0;
+    while (i < flightIds.length) {
+      const size = useRpc ? 500 : 150;
+      const chunk = flightIds.slice(i, i + size);
+      let gone = [], error = null;
+      if (useRpc) {
+        const res = await retryNetwork(() => supabase.rpc("delete_flights", { ids: chunk }));
+        if (res.error && /delete_flights|schema cache|Could not find the function/i.test(res.error.message)) { useRpc = false; continue; } // redo this chunk the old way
+        gone = res.data || []; error = res.error;
+      } else {
+        const res = await retryNetwork(() => supabase.from("flights").delete().in("id", chunk).select("id"));
+        gone = (res.data || []).map(r => r.id); error = res.error;
       }
+      i += size;
       if (error) { firstError = firstError || error; continue; }
-      deletedIds.push(...(gone || []).map(r => r.id));
-      if ((gone || []).length < chunk.length) firstError = firstError || { message: "some flights were already gone or you lack permission to delete them" };
+      deletedIds.push(...gone);
+      if (gone.length < chunk.length) firstError = firstError || { message: "some flights were already gone or you lack permission to delete them" };
     }
     if (deletedIds.length) {
       setFlightsRaw(fl => fl.filter(f => !deletedIds.includes(f.id)));
@@ -1665,18 +1683,20 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (valid.length === 0) { pushToast(`${label}: nothing to add — ${skipped} row${skipped === 1 ? "" : "s"} had no seat capacity or an arrival before departure.`, "warn"); return null; }
     const added = [];
     let withType = true; // falls back to inserting without aircraft_type until migration 00034 has been run
+    const strip = rows => rows.map(({ aircraft_type, ...rest }) => rest);
+    // "on conflict do nothing" on (ref, departure): repeating a chunk after a dropped connection can never double-book or fail on a clash
+    const insertChunk = rows => retryNetwork(() => supabase.from("flights").upsert(withType ? rows : strip(rows), { onConflict: "ref,scheduled_departure", ignoreDuplicates: true }).select());
     for (let i = 0; i < valid.length; i += 300) {
-      const strip = rows => rows.map(({ aircraft_type, ...rest }) => rest);
-      let chunk = valid.slice(i, i + 300);
-      let { data, error } = await supabase.from("flights").insert(withType ? chunk : strip(chunk)).select();
+      const chunk = valid.slice(i, i + 300);
+      let { data, error } = await insertChunk(chunk);
       if (error && withType && /aircraft_type/.test(error.message)) {
         withType = false;
         pushToast("The aircraft type could not be saved: run migration 00034_flight_aircraft_type.sql in Supabase. The flights are saved without it.", "warn", true);
-        ({ data, error } = await supabase.from("flights").insert(strip(chunk)).select());
+        ({ data, error } = await insertChunk(chunk));
       }
       if (error) {
         if (added.length) setFlightsRaw(fl => [...fl, ...added]);
-        pushToast(`${label} failed after ${added.length} of ${valid.length} flights: ${error.message}${added.length ? " — those first flights were saved; check the board before retrying." : ""}`, "warn");
+        pushToast(`${label} stopped after ${added.length} of ${valid.length} flights: ${error.message}${added.length ? " — those first flights are saved. Running the same import again adds only the missing ones." : ""}`, "warn", true);
         return null;
       }
       added.push(...(data || []).map(mapFlight));
@@ -1697,7 +1717,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       if (!res) { failed += ids.length; continue; }
       for (let i = 0; i < ids.length; i += 150) {
         const chunk = ids.slice(i, i + 150);
-        const { data, error } = await supabase.from("flights").update({ resource_id: rid, capacity: res.capacity }).in("id", chunk).select("id");
+        const { data, error } = await retryNetwork(() => supabase.from("flights").update({ resource_id: rid, capacity: res.capacity }).in("id", chunk).select("id"));
         if (error) { failed += chunk.length; firstError = firstError || error.message; continue; }
         (data || []).forEach(r => saved.set(r.id, res));
         failed += chunk.length - (data || []).length;
