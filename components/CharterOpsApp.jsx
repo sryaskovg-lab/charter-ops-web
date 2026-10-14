@@ -8,6 +8,7 @@ import {
   normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
+import { stateLabel, countryName } from "../lib/country-names";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
 import {
@@ -6625,7 +6626,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
       <div className="modal-pop" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "90vh", overflow: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-          <div style={{ fontSize: 14, fontWeight: 600 }}>{isNew ? `New ${form.kind} permit request` : `${form.kind === "landing" ? "Landing" : "Overfly"} permit · ${permit.state}`}</div>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>{isNew ? `New ${form.kind} permit request` : `${form.kind === "landing" ? "Landing" : "Overfly"} permit · ${stateLabel(permit.state)}`}</div>
           {!isNew && <Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge>}
           <button onClick={onClose} style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
         </div>
@@ -6636,7 +6637,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
           <FieldSm label="State (code or name)">
             <input list="permit-known-states" disabled={lock} value={form.state} onChange={e => setForm({ ...form, state: e.target.value })} style={inputStyle} placeholder="e.g. TM" />
-            <datalist id="permit-known-states">{knownStates.map(s => <option key={s} value={s} />)}</datalist>
+            <datalist id="permit-known-states">{knownStates.map(s => <option key={s} value={s} label={stateLabel(s)} />)}</datalist>
           </FieldSm>
           <FieldSm label="Valid from"><input type="date" disabled={lock} value={form.validFrom} onChange={e => setForm({ ...form, validFrom: e.target.value })} style={inputStyle} /></FieldSm>
           <FieldSm label="Valid to"><input type="date" disabled={lock} value={form.validTo} onChange={e => setForm({ ...form, validTo: e.target.value })} style={inputStyle} /></FieldSm>
@@ -6988,7 +6989,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {rows.map(p => {
               const eff = effectiveStatus(p, todayStr);
               return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer" }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
                 <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
@@ -7004,7 +7005,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
 
       {urgent.uncovered.length + urgent.unmapped.length > 0 && <div role="alert" style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
         <span style={{ fontSize: 12.5, color: C.red, fontWeight: 600 }}>⚠ Next {ALERT_DAYS} days: {urgent.uncovered.length} flight/State pair(s) without an approved permit{urgent.unmapped.length ? `, ${urgent.unmapped.length} flight(s) that cannot be checked (route or airport not mapped)` : ""}.</span>
-        <span style={{ fontSize: 11.5, color: C.muted }}>{[...new Set(urgent.uncovered.map(u => u.state))].join(", ")}</span>
+        <span style={{ fontSize: 11.5, color: C.muted }}>{[...new Set(urgent.uncovered.map(u => u.state))].map(stateLabel).join(", ")}</span>
         {canEdit && <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button disabled={alerting} onClick={() => sendAlert(true)} style={miniBtn}>Preview alert</button>
           <button disabled={alerting} onClick={() => sendAlert(false)} style={{ ...miniBtn, color: C.red }}>E-mail alert now</button>
@@ -7036,7 +7037,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
                   const open = it.itemState === "open";
                   const action = it.match?.how === "ambiguous" ? "Several open requests match — cancel the duplicate first" : mp ? `Set the existing ${normState(mp.state)} request (${PERMIT_STATUS_META[mp.status][0].toLowerCase()}) to ${PERMIT_STATUS_META[next][0].toLowerCase()}` : `Create a new permit as ${PERMIT_STATUS_META[next][0].toLowerCase()}`;
                   return <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: open ? 1 : 0.5 }}>
-                    <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{it.kind === "landing" ? "LANDING" : "OVERFLY"} · {it.state}{it.airport ? ` ${it.airport}` : ""}</td>
+                    <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{it.kind === "landing" ? "LANDING" : "OVERFLY"} · {stateLabel(it.state)}{it.airport ? ` ${it.airport}` : ""}</td>
                     <td style={td}><Badge color={it.decision === "granted" ? C.green : it.decision === "rejected" ? C.red : C.amber}>{it.decision.toUpperCase()}</Badge></td>
                     <td style={td}>{it.permitNumber || it.authorityRef || "—"}</td>
                     <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{it.validFrom ? `${it.validFrom} → ${it.validTo || "?"}` : <span style={{ color: C.red }}>no dates</span>}{(it.dates || []).length ? <div style={{ color: C.faint }}>{it.dates.length} operating day(s)</div> : null}</td>
@@ -7060,7 +7061,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {receivedGroups.length === 0 && <tr><td colSpan={7} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>Nothing received yet. Press "Check mail now" in the Mail inbox tab.</td></tr>}
             {receivedGroups.map(({ m, p }, i) => (
               <tr key={m.id} onClick={() => setModal({ permit: p })} style={{ borderTop: `1px solid ${i > 0 && normState(receivedGroups[i - 1].p.state) === normState(p.state) ? C.borderSoft : C.border}`, cursor: "pointer" }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{normState(p.state)}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{fmtUtc(m.received_at)}</td>
                 <td style={td}>{p.permitNumber || p.authorityRef || "—"} <Badge color={PERMIT_STATUS_META[effectiveStatus(p, todayStr)][1]}>{PERMIT_STATUS_META[effectiveStatus(p, todayStr)][0].toUpperCase()}</Badge></td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
@@ -7082,7 +7083,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {gaps.length === 0 && <tr><td colSpan={7} style={{ ...td, color: C.green, textAlign: "center", padding: 20 }}>Every upcoming flight on a mapped route is covered{unmapped.length ? ` — but ${unmapped.length} route(s) are not mapped yet (see Routes → States)` : ""}.</td></tr>}
             {gaps.map(g => (
               <tr key={g.kind + g.state + g.resourceId} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{g.state}{g.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{g.airports.length ? ` ${g.airports.join("/")}` : ""}</span> : ""}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(g.state)}{g.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{g.airports.length ? ` ${g.airports.join("/")}` : ""}</span> : ""}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{codeOf(g.resourceId)}</td>
                 <td style={td}><span style={{ cursor: "pointer", textDecoration: "underline" }} onClick={() => onJumpToFlight(g.flightIds[0])} title="Open the first affected flight">{g.flightCount}</span></td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{g.firstDay} → {g.lastDay}</td>
@@ -7119,22 +7120,22 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {apSug.map(x => <label key={x.airport} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, padding: "2px 0" }}>
               <input type="checkbox" disabled={!x.found || !canEdit} checked={x.found && isPicked("a:" + x.airport)} onChange={e => setPick({ ...pick, ["a:" + x.airport]: e.target.checked })} aria-label={`Save ${x.airport}`} />
               <span style={{ fontFamily: MONO, fontWeight: 700, width: 44 }}>{x.airport}</span>
-              {x.found ? <span>{x.name} → <b style={{ fontFamily: MONO }}>{x.state || "none needed"}</b>{x.home ? <span style={{ color: C.faint }}> (home State {x.country})</span> : null} <span style={{ color: C.faint }}>· {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>not in the airport data — add it by hand below</span>}
+              {x.found ? <span>{x.name} → <b style={{ fontFamily: MONO }}>{x.state ? stateLabel(x.state) : "none needed"}</b>{x.home ? <span style={{ color: C.faint }}> (home State: {countryName(x.country)})</span> : null} <span style={{ color: C.faint }}>· {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>not in the airport data — add it by hand below</span>}
             </label>)}
             <div style={{ fontSize: 12, fontWeight: 600, margin: "10px 0 3px" }}>Unmapped routes ({rtSug.length})</div>
             {rtSug.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No unmapped routes with upcoming flights.</div>}
             {rtSug.map(x => <label key={x.origin + x.destination} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, padding: "2px 0" }}>
               <input type="checkbox" disabled={!x.found || !canEdit} checked={x.found && isPicked("r:" + x.origin + "-" + x.destination)} onChange={e => setPick({ ...pick, ["r:" + x.origin + "-" + x.destination]: e.target.checked })} aria-label={`Save ${x.origin}–${x.destination}`} style={{ marginTop: 3 }} />
               <span style={{ fontFamily: MONO, fontWeight: 700, width: 80 }}>{x.origin}–{x.destination}</span>
-              {x.found ? <span>{x.states.length === 0 ? <span style={{ color: C.faint }}>crosses no other State</span> : x.states.map(c => <span key={c.state} title={`${c.name}, about ${c.km} km from ${x.origin}${c.viaSeaOnly ? ", territorial sea only" : ""}`} style={{ fontFamily: MONO, marginRight: 8 }}>{c.state}{c.viaSeaOnly ? <span style={{ color: C.amber }}> (sea only)</span> : null}</span>)} <span style={{ color: C.faint }}>· {x.origin} in {x.originState}, {x.destination} in {x.destState} · {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>airport not in the data: {x.missing.join(", ")} — map it by hand</span>}
+              {x.found ? <span>{x.states.length === 0 ? <span style={{ color: C.faint }}>crosses no other State</span> : x.states.map(c => <span key={c.state} title={`${c.name}, about ${c.km} km from ${x.origin}${c.viaSeaOnly ? ", territorial sea only" : ""}`} style={{ fontFamily: MONO, marginRight: 8 }}>{stateLabel(c.state)}{c.viaSeaOnly ? <span style={{ color: C.amber }}> (sea only)</span> : null}</span>)} <span style={{ color: C.faint }}>· {x.origin} in {countryName(x.originState)}, {x.destination} in {countryName(x.destState)} · {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>airport not in the data: {x.missing.join(", ")} — map it by hand</span>}
             </label>)}
             {geoDiffs.length > 0 && <>
               <div style={{ fontSize: 12, fontWeight: 600, margin: "10px 0 3px" }}>Your mapped routes that differ from the line ({geoDiffs.length})</div>
               <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>Information only. A route flown on airways can differ from the straight line, so a difference is not necessarily a mistake.</div>
               {geoDiffs.map(d => <div key={d.origin + d.destination} style={{ fontSize: 12.5, padding: "2px 0" }}>
                 <span style={{ fontFamily: MONO, fontWeight: 700 }}>{d.origin}–{d.destination}</span>{" "}
-                {d.missing.length > 0 && <span>line also crosses <b style={{ fontFamily: MONO }}>{d.missing.map(m => m.state + (m.viaSeaOnly ? " (sea only)" : "")).join(", ")}</b>. </span>}
-                {d.extra.length > 0 && <span>you list <b style={{ fontFamily: MONO }}>{d.extra.join(", ")}</b>, which the line does not cross.</span>}
+                {d.missing.length > 0 && <span>line also crosses <b style={{ fontFamily: MONO }}>{d.missing.map(m => stateLabel(m.state) + (m.viaSeaOnly ? " (sea only)" : "")).join(", ")}</b>. </span>}
+                {d.extra.length > 0 && <span>you list <b style={{ fontFamily: MONO }}>{d.extra.map(stateLabel).join(", ")}</b>, which the line does not cross.</span>}
               </div>)}
             </>}
           </>}
@@ -7151,7 +7152,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             <button onClick={saveAirport} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save airport</button>
           </div>}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(permitData.airports || []).map(a => <span key={a.airport} style={{ ...miniBtn, fontFamily: MONO, cursor: "default" }}>{a.airport} → {a.state || "none"} {canEdit && <span role="button" aria-label={`Remove ${a.airport}`} onClick={() => deleteAirport(a)} style={{ cursor: "pointer", color: C.red, marginLeft: 4 }}>×</span>}</span>)}
+            {(permitData.airports || []).map(a => <span key={a.airport} style={{ ...miniBtn, fontFamily: MONO, cursor: "default" }}>{a.airport} → {a.state ? stateLabel(a.state) : "none"} {canEdit && <span role="button" aria-label={`Remove ${a.airport}`} onClick={() => deleteAirport(a)} style={{ cursor: "pointer", color: C.red, marginLeft: 4 }}>×</span>}</span>)}
           </div>
         </div>
         {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -7168,7 +7169,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {routes.map(r => (
               <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{r.origin}–{r.destination}</td>
-                <td style={{ ...td, fontFamily: MONO }}>{(r.states || []).length ? r.states.join(", ") : <span style={{ color: C.faint }}>none needed</span>}</td>
+                <td style={{ ...td, fontFamily: MONO }}>{(r.states || []).length ? r.states.map(stateLabel).join(", ") : <span style={{ color: C.faint }}>none needed</span>}</td>
                 <td style={td}>{r.note || <span style={{ color: C.faint }}>—</span>}</td>
                 <td style={{ ...td, textAlign: "right" }}>{canEdit && <>
                   <button onClick={() => setRouteForm({ origin: r.origin, destination: r.destination, states: (r.states || []).join(", "), note: r.note || "" })} style={miniBtn}>Edit</button>{" "}
@@ -7182,7 +7183,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       {sub === "states" && <>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Processing time (days before the first flight that a request must be filed) and authority contact per State. States without an entry use {DEFAULT_LEAD_DAYS} days.</div>
         {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <FieldSm label="State"><input value={stateForm.state} onChange={e => setStateForm({ ...stateForm, state: e.target.value })} list="permit-known-states-2" style={{ ...inputStyle, width: 90, fontFamily: MONO }} /><datalist id="permit-known-states-2">{knownStates.map(s => <option key={s} value={s} />)}</datalist></FieldSm>
+          <FieldSm label="State"><input value={stateForm.state} onChange={e => setStateForm({ ...stateForm, state: e.target.value })} list="permit-known-states-2" style={{ ...inputStyle, width: 90, fontFamily: MONO }} /><datalist id="permit-known-states-2">{knownStates.map(s => <option key={s} value={s} label={stateLabel(s)} />)}</datalist></FieldSm>
           <FieldSm label="Lead days"><input type="number" min="0" value={stateForm.leadDays} onChange={e => setStateForm({ ...stateForm, leadDays: e.target.value })} style={{ ...inputStyle, width: 80 }} /></FieldSm>
           <FieldSm label="Authority"><input value={stateForm.authority} onChange={e => setStateForm({ ...stateForm, authority: e.target.value })} style={{ ...inputStyle, width: 180 }} /></FieldSm>
           <FieldSm label="Contact"><input value={stateForm.contact} onChange={e => setStateForm({ ...stateForm, contact: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
@@ -7195,7 +7196,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {states.length === 0 && <tr><td colSpan={6} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No State settings yet — all States use the {DEFAULT_LEAD_DAYS}-day default.</td></tr>}
             {states.map(s => (
               <tr key={s.state} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{s.state}</td><td style={td}>{s.leadDays}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(s.state)}</td><td style={td}>{s.leadDays}</td>
                 <td style={td}>{s.authority || "—"}</td><td style={td}>{s.contact || "—"}</td><td style={td}>{s.note || "—"}</td>
                 <td style={{ ...td, textAlign: "right" }}>{canEdit && <button onClick={() => setStateForm({ state: s.state, leadDays: s.leadDays, authority: s.authority || "", contact: s.contact || "", note: s.note || "" })} style={miniBtn}>Edit</button>}</td>
               </tr>
