@@ -9,6 +9,8 @@ import {
 } from "../lib/permit-utils";
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
 import { stateLabel, countryName } from "../lib/country-names";
+import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
+import { detectKind, parseScheduleMessage, planScheduleChanges, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
 import {
@@ -1552,6 +1554,25 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [addFlightPrefill, setAddFlightPrefill] = useState(null);
   function quickCreateFlight(prefill) { setAddFlightPrefill(prefill); setShowAddFlight(true); }
   const [showBulkImport, setShowBulkImport] = useState(false);
+  const [showSchedMsgs, setShowSchedMsgs] = useState(false);
+  // While a coordinator has the app open, look for new SSIM/SSM/ASM e-mail every 15 minutes.
+  // This only files the messages for review; it never changes the schedule.
+  useEffect(() => {
+    if (!perms.editFlight) return undefined;
+    let stop = false;
+    async function tick() {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session || stop) return;
+        const res = await fetch("/api/schedule/sync", { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } });
+        if (!res.ok) return;
+        const j = await res.json().catch(() => ({}));
+        if (!stop && j.added > 0) pushToast(`${j.added} new schedule message${j.added === 1 ? "" : "s"} waiting: Schedule → More → SSIM / SSM / ASM messages.`, "ok");
+      } catch { /* offline or not connected: try again later */ }
+    }
+    const first = setTimeout(tick, 8000), every = setInterval(tick, 15 * 60 * 1000);
+    return () => { stop = true; clearTimeout(first); clearInterval(every); };
+  }, [perms.editFlight]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showRotationGen, setShowRotationGen] = useState(false);
   const [showSchedulingEngine, setShowSchedulingEngine] = useState(false);
   const [showReports, setShowReports] = useState(false);
@@ -1649,20 +1670,21 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return added;
   }
 
-  async function commitBulkRows(rows) {
+  async function commitBulkRows(rows, opts) {
     const inserts = rows.map((r, i) => ({
-      resource_id: r.resourceId, origin: r.origin, destination: r.destination,
+      resource_id: r.resourceId || null, origin: r.origin, destination: r.destination,
       scheduled_departure: (combineDateAndTime(r.date, r.depTime) || r.date).toISOString(),
       scheduled_arrival: combineArrivalDateTime(combineDateAndTime(r.date, r.depTime) || r.date, r.arrTime)?.toISOString() ?? null,
-      capacity: resources.find(res => res.id === r.resourceId)?.capacity,
-      status: "tentative", ref: r.flightNo ? "DV" + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
+      capacity: resources.find(res => res.id === r.resourceId)?.capacity ?? r.capacity, // schedule messages can create flights with no tail yet
+      status: "tentative", ref: r.flightNo ? (r.airline || "DV") + r.flightNo : ("DV" + (4600 + i)), leg_type: r.legType || "revenue",
     }));
     const newFlights = await insertFlightsChunked(inserts, "Import");
-    if (!newFlights) return;
+    if (!newFlights) return null;
     const ferryCount = newFlights.filter(f => f.legType === "ferry").length;
     pushToast(`Imported ${newFlights.length} flight${newFlights.length === 1 ? "" : "s"}${ferryCount ? ` (${ferryCount} ferry/positioning, excluded from inventory)` : ""}`, "ok");
     pushNotification("Schedule update", `${newFlights.length} flights imported`, "flight");
-    setShowBulkImport(false);
+    if (!opts?.keepOpen) setShowBulkImport(false);
+    return newFlights;
   }
 
   async function commitRotationDates(rows, pattern) {
@@ -1867,7 +1889,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues}
@@ -1904,6 +1926,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
+      {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} onLogScr={logScrSent} />}
       {showSchedulingEngine && <SchedulingEngineModal resources={resources} flights={flights} isGrounded={isGrounded} onClose={() => setShowSchedulingEngine(false)} onCommit={commitSchedulingEngineRows} onLogScr={logScrSent} />}
@@ -1926,7 +1949,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2211,6 +2234,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("generateRotation")}</button>
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
                   <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkImport")}</button>
+                  <button onClick={() => { onScheduleMessages(); setShowMoreMenu(false); }} style={ctxMenuItem}>SSIM / SSM / ASM messages</button>
                   <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkRetime")}</button>
                   <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>{t("bulkDelete")}</button>
                 </>}
@@ -3342,6 +3366,240 @@ function groupIntoPatternsAndRemaining(parsed) {
   const patternedRowNumbers = new Set(detectedPatterns.flatMap(p => p.rows.map(r => r.row_number)));
   const remaining = parsed.filter(r => !patternedRowNumbers.has(r.row_number));
   return { patterns: detectedPatterns, rows: remaining };
+}
+
+// ---------- SSIM / SSM / ASM messages: paste, upload, or review what arrived by e-mail ----------
+function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, onCreateRows, onUpdateFlight }) {
+  const [tab, setTab] = useState("mail"); // mail | paste
+  const [list, setList] = useState([]);
+  const [listErr, setListErr] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [text, setText] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [current, setCurrent] = useState(null); // { id?, label, text }
+  const [airlines, setAirlines] = useState(() => { try { return localStorage.getItem("scheduleAirlines") ?? "DV"; } catch { return "DV"; } });
+  const [fromDay, setFromDay] = useState("");
+  const [toDay, setToDay] = useState("");
+  const [typeMap, setTypeMap] = useState({}); // aircraft type key -> resource id or ""
+  const [skip, setSkip] = useState({}); // row key -> true when the person unticked it
+  const [busy, setBusy] = useState(false);
+  const canEdit = !!perms.editFlight;
+  const todayStr = iso(new Date());
+
+  async function loadList() {
+    const { data, error } = await supabase.from("schedule_messages").select("id,gmail_message_id,part,from_addr,subject,received_at,file_name,kind,summary,status,result_note").neq("kind", "other").order("received_at", { ascending: false }).limit(100);
+    if (error) { setListErr(/relation|schema cache|does not exist/i.test(error.message) ? "The schedule messages table is missing: run migration 00033_schedule_messages.sql in Supabase." : error.message); return; }
+    setListErr(""); setList(data || []);
+  }
+  useEffect(() => { loadList(); }, []);
+
+  async function checkMail() {
+    setChecking(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/schedule/sync", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) pushToast(j.error || `Mail check failed (${res.status}).`, "warn", true);
+      else pushToast(j.configured === false ? j.error : `${j.added} new message${j.added === 1 ? "" : "s"} found${j.failed ? `, ${j.failed} failed` : ""}.`, j.configured === false || j.failed ? "warn" : "ok");
+      await loadList();
+    } catch (e) { pushToast(`Mail check failed: ${e.message}`, "warn", true); }
+    setChecking(false);
+  }
+  async function openMessage(m) {
+    const { data, error } = await supabase.from("schedule_messages").select("raw_text").eq("id", m.id).maybeSingle();
+    if (error || !data) { pushToast(`Could not open the message: ${error?.message || "not found"}`, "warn"); return; }
+    setSkip({}); setCurrent({ id: m.id, status: m.status, label: m.subject || m.file_name || "(no subject)", text: data.raw_text || "" });
+  }
+  async function decide(status, note) {
+    if (!current?.id) return;
+    const { error } = await supabase.from("schedule_messages").update({ status, result_note: note || null }).eq("id", current.id);
+    if (error) pushToast(`Could not record the decision: ${error.message}`, "warn");
+    await loadList();
+  }
+  function startPaste() {
+    if (!text.trim()) { pushToast("Paste a message or choose a file first.", "warn"); return; }
+    setSkip({}); setCurrent({ id: null, label: fileName || "Pasted text", text });
+  }
+  async function pickFile(f) {
+    if (!f) return;
+    if (f.size > 4 * 1024 * 1024) { pushToast("That file is larger than 4 MB. Narrow it to your airline first.", "warn"); return; }
+    setFileName(f.name); setText(await f.text());
+  }
+  function changeAirlines(v) { setAirlines(v); try { localStorage.setItem("scheduleAirlines", v); } catch { /* storage unavailable */ } }
+
+  const airlineList = useMemo(() => airlines.split(/[\s,;]+/).map(x => x.trim().toUpperCase()).filter(Boolean), [airlines]);
+  const parsed = useMemo(() => {
+    if (!current) return null;
+    const t = current.text;
+    if (looksLikeSsim(t)) {
+      const s = parseSsim(t);
+      const x = expandLegs(s.legs, { airlines: airlineList, fromDate: fromDay ? new Date(fromDay + "T00:00:00Z") : null, toDate: toDay ? new Date(toDay + "T00:00:00Z") : null });
+      const rows = markDuplicates(x.rows, flights);
+      return { kind: "ssim", warnings: [...s.warnings, ...x.warnings], create: rows, cancel: [], retime: [], manual: [], notes: [], legsTotal: s.legs.length, airlinesInFile: [...new Set(s.legs.map(l => l.airline))] };
+    }
+    if (detectKind(t)) {
+      const m = parseScheduleMessage(t, { today: new Date() });
+      const blocked = m.timeMode === "LT";
+      const plan = planScheduleChanges(m.items, flights, { airlines: airlineList });
+      if (blocked) { plan.manual.push(...plan.create.map(c => ({ action: "NEW", label: c.airline + c.flightNo, text: "local time message" })), ...plan.cancel.map(c => ({ action: "CNL", label: c.label, text: "local time message" })), ...plan.retime.map(c => ({ action: "TIM", label: c.label, text: "local time message" }))); plan.create = []; plan.cancel = []; plan.retime = []; }
+      return { kind: m.kind, warnings: m.warnings, ...plan, create: markDuplicates(plan.create, flights), items: m.items.length, timeMode: m.timeMode };
+    }
+    return { kind: null, warnings: ["This does not look like an SSIM file, an SSM or an ASM message."], create: [], cancel: [], retime: [], manual: [], notes: [] };
+  }, [current, airlineList, fromDay, toDay, flights]);
+
+  const typeKeys = useMemo(() => [...new Set((parsed?.create || []).map(r => canonicalAircraftType(r.aircraftType)).filter(Boolean))], [parsed]);
+  const fleetFor = key => resources.filter(r => fleetTypeKey(r.variant) === key);
+  function capacityFor(key) { const f = fleetFor(key); return f.length ? Math.max(...f.map(r => r.capacity || 0)) : Math.max(0, ...resources.map(r => r.capacity || 0)); }
+  const rowKey = (kind, r, i) => `${kind}:${i}`;
+  const picked = (kind, i) => !skip[rowKey(kind, null, i)];
+  const createRows = (parsed?.create || []).map((r, i) => ({ r, i })).filter(x => !x.r.duplicateOf && picked("c", x.i));
+  const nCancel = (parsed?.cancel || []).filter((_, i) => picked("x", i)).length;
+  const nRetime = (parsed?.retime || []).filter((_, i) => picked("t", i)).length;
+
+  async function apply() {
+    if (!canEdit) return;
+    setBusy(true);
+    const done = [];
+    try {
+      if (createRows.length) {
+        const rows = createRows.map(({ r }) => {
+          const key = canonicalAircraftType(r.aircraftType);
+          const res = resources.find(x => x.id === typeMap[key]);
+          return { date: r.date, airline: r.airline, flightNo: r.flightNo, origin: r.origin, destination: r.destination, depTime: r.depTime, arrTime: r.arrTime, legType: r.legType, resourceId: res?.id || null, capacity: res?.capacity ?? capacityFor(key) };
+        });
+        const made = await onCreateRows(rows);
+        if (made) done.push(`${made.length} new`); else throw new Error("the new flights could not be saved, so nothing else was applied");
+      }
+      let cx = 0, rt = 0, failed = 0;
+      for (const [i, c] of (parsed.cancel || []).entries()) { if (!picked("x", i)) continue; const out = await onUpdateFlight(c.flightId, { status: "cancelled" }, { silent: true }); if (out === "failed") failed++; else cx++; }
+      for (const [i, c] of (parsed.retime || []).entries()) { if (!picked("t", i)) continue; const out = await onUpdateFlight(c.flightId, { depTime: c.to.dep, arrTime: c.to.arr }, { silent: true }); if (out === "failed") failed++; else rt++; }
+      if (cx) done.push(`${cx} cancelled`);
+      if (rt) done.push(`${rt} retimed`);
+      const note = done.join(", ") + (failed ? `, ${failed} failed` : "");
+      pushToast(`Schedule message applied: ${note || "nothing selected"}.`, failed ? "warn" : "ok");
+      if (current?.id && done.length) await decide("applied", note);
+      if (done.length && !failed) setCurrent(null);
+    } catch (e) { pushToast(`Not applied: ${e.message}`, "warn", true); }
+    setBusy(false);
+  }
+
+  const kindBadge = k => <span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, padding: "2px 6px", borderRadius: 6, background: C.panel2, textTransform: "uppercase" }}>{k}</span>;
+  const statusColor = { pending: C.amber, applied: C.green, dismissed: C.faint, error: C.red };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }} onClick={onClose}>
+      <div className="modal-pop" role="dialog" aria-modal="true" aria-label="Schedule messages" onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 900, maxWidth: "96vw", maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Schedule messages: SSIM, SSM, ASM</div>
+          <button onClick={onClose} style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
+        </div>
+
+        {!current && <>
+          <div style={{ display: "flex", gap: 2, background: C.panel2, borderRadius: 999, padding: 3, marginBottom: 12, width: "fit-content" }}>
+            {[["mail", `Received by e-mail (${list.filter(m => m.status === "pending").length} waiting)`], ["paste", "Paste or upload"]].map(([k, l]) =>
+              <button key={k} onClick={() => setTab(k)} style={{ background: tab === k ? C.panel : "transparent", color: tab === k ? C.text : C.muted, border: "none", borderRadius: 999, padding: "6px 14px", fontSize: 12, fontWeight: tab === k ? 600 : 400, cursor: "pointer" }}>{l}</button>)}
+          </div>
+          {tab === "mail" && <>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Send or forward SSIM files and SSM/ASM messages to the Gmail inbox the app reads, and give them the Gmail label <b>Schedule</b> (a Gmail filter on the sender or subject does this automatically). The app reads the message body and text attachments (.txt, .ssim, .ssm, .asm, .dat) once a day and whenever you press the button. It never changes or deletes e-mail, and <b>never changes the schedule by itself</b>: you review each message and press Apply.</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+              {perms.editFlight && <button disabled={checking} onClick={checkMail} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{checking ? "Checking…" : "Check mail now"}</button>}
+            </div>
+            {listErr && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", fontSize: 12.5, marginBottom: 10 }}>{listErr}</div>}
+            {!listErr && list.length === 0 && <div style={{ color: C.faint, textAlign: "center", padding: 20, fontSize: 12.5 }}>No schedule messages received yet.</div>}
+            {list.length > 0 && <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Received</th><th style={th}>Type</th><th style={th}>Subject / file</th><th style={th}>Contains</th><th style={th}>Status</th><th style={th}></th></tr></thead>
+              <tbody>{list.map(m => <tr key={m.id} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: m.status === "pending" ? 1 : 0.7 }}>
+                <td style={{ ...td, whiteSpace: "nowrap" }}>{m.received_at ? m.received_at.slice(0, 16).replace("T", " ") : "—"}</td>
+                <td style={td}>{kindBadge(m.kind)}</td>
+                <td style={td}>{m.subject || "(no subject)"}{m.file_name ? <span style={{ color: C.faint }}> · {m.file_name}</span> : null}<div style={{ color: C.faint, fontSize: 11 }}>{m.from_addr}</div></td>
+                <td style={td}>{m.summary}</td>
+                <td style={{ ...td, color: statusColor[m.status] || C.text, fontWeight: 600 }}>{m.status}{m.result_note ? <div style={{ fontWeight: 400, color: C.faint, fontSize: 11 }}>{m.result_note}</div> : null}</td>
+                <td style={{ ...td, textAlign: "right" }}><button onClick={() => openMessage(m)} style={miniBtn}>{m.status === "pending" ? "Review" : "Open"}</button></td>
+              </tr>)}</tbody>
+            </table>}
+          </>}
+          {tab === "paste" && <>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Choose an SSIM file, or paste an SSM or ASM message (a Type B header above it is fine). You see everything it contains before anything is created or changed.</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8 }}>
+              <input type="file" onChange={e => pickFile(e.target.files?.[0])} style={{ fontSize: 12.5 }} />
+              {fileName && <span style={{ fontSize: 11.5, color: C.muted }}>{fileName}</span>}
+            </div>
+            <textarea value={text} onChange={e => { setText(e.target.value); setFileName(""); }} rows={11} placeholder={"SSM\nUTC\nNEW\nDV778\n20OCT26 30OCT26 246\nJ B752\nSYX0300 SIN0700"} style={{ ...inputStyle, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}><button onClick={startPaste} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Read</button></div>
+          </>}
+        </>}
+
+        {current && parsed && <>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <button onClick={() => setCurrent(null)} style={miniBtn}>← Back</button>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{current.label}</div>
+            {parsed.kind && kindBadge(parsed.kind)}
+            {current.status && <span style={{ fontSize: 11.5, color: statusColor[current.status] || C.muted, fontWeight: 600 }}>{current.status}</span>}
+          </div>
+          {parsed.warnings.map((w, i) => <div key={i} style={{ border: `1px solid ${C.amber}66`, background: C.amberSoft || C.panel2, borderRadius: 10, padding: "6px 10px", fontSize: 12, marginBottom: 6 }}>{w}</div>)}
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 10 }}>
+            <FieldSm label="Airline code(s), blank = all"><input value={airlines} onChange={e => changeAirlines(e.target.value)} style={{ ...inputStyle, width: 110, fontFamily: MONO }} /></FieldSm>
+            {parsed.kind === "ssim" && <>
+              <FieldSm label="From (optional)"><input type="date" value={fromDay} onChange={e => setFromDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
+              <FieldSm label="To (optional)"><input type="date" value={toDay} onChange={e => setToDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
+              <span style={{ fontSize: 11.5, color: C.faint }}>{parsed.legsTotal} flight legs in the file · airlines: {parsed.airlinesInFile.join(", ") || "—"}</span>
+            </>}
+          </div>
+
+          {(parsed.create.length > 0) && <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>New flights ({createRows.length} to create{parsed.create.length - createRows.length ? `, ${parsed.create.length - createRows.length} left out` : ""})</div>
+            {typeKeys.length > 0 && <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 8 }}>
+              {typeKeys.map(k => <FieldSm key={k} label={`Aircraft type ${k} → tail`}>
+                <select value={typeMap[k] || ""} onChange={e => setTypeMap({ ...typeMap, [k]: e.target.value })} style={{ ...inputStyle, width: 220 }}>
+                  <option value="">Unassigned (capacity {capacityFor(k)})</option>
+                  {resources.map(r => <option key={r.id} value={r.id}>{r.code} · {r.variant}{fleetTypeKey(r.variant) === k ? "" : " (other type)"}</option>)}
+                </select></FieldSm>)}
+            </div>}
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Schedule messages name the aircraft type, not the tail. Flights left unassigned can be given a tail afterwards. Flights already in the schedule are left out. New flights start as tentative.</div>
+            <div style={{ maxHeight: 230, overflowY: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <tbody>{parsed.create.slice(0, 400).map((r, i) => <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: r.duplicateOf ? 0.5 : 1 }}>
+                <td style={{ padding: "3px 6px", width: 26 }}><input type="checkbox" aria-label={`Create ${r.airline}${r.flightNo} ${iso(r.date)}`} disabled={!!r.duplicateOf} checked={!r.duplicateOf && picked("c", i)} onChange={e => setSkip({ ...skip, [rowKey("c", null, i)]: !e.target.checked })} /></td>
+                <td style={{ padding: "3px 6px", fontFamily: MONO }}>{r.airline}{r.flightNo}</td><td style={{ padding: "3px 6px", fontFamily: MONO }}>{iso(r.date)}</td>
+                <td style={{ padding: "3px 6px", fontFamily: MONO }}>{r.origin}–{r.destination}</td><td style={{ padding: "3px 6px", fontFamily: MONO }}>{r.depTime}–{r.arrTime}Z</td>
+                <td style={{ padding: "3px 6px", color: C.muted }}>{r.aircraftType || "—"}{r.legType === "ferry" ? " · ferry" : ""}</td>
+                <td style={{ padding: "3px 6px", color: C.faint }}>{r.duplicateOf ? `already in the schedule (${r.duplicateOf})` : ""}</td>
+              </tr>)}</tbody>
+            </table>{parsed.create.length > 400 && <div style={{ fontSize: 11, color: C.faint, padding: 4 }}>Showing the first 400 of {parsed.create.length}; all selected rows are created.</div>}</div>
+          </div>}
+
+          {parsed.cancel.length > 0 && <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Cancellations ({nCancel} selected)</div>
+            {parsed.cancel.map((c, i) => <label key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, padding: "2px 0", alignItems: "center" }}>
+              <input type="checkbox" checked={picked("x", i)} onChange={e => setSkip({ ...skip, [rowKey("x", null, i)]: !e.target.checked })} aria-label={`Cancel ${c.ref} ${c.date}`} />
+              <span style={{ fontFamily: MONO, fontWeight: 700 }}>{c.ref}</span><span style={{ fontFamily: MONO }}>{c.date}</span><span style={{ fontFamily: MONO }}>{c.origin}–{c.destination}</span>
+            </label>)}
+          </div>}
+
+          {parsed.retime.length > 0 && <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Time changes ({nRetime} selected)</div>
+            {parsed.retime.map((c, i) => <label key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, padding: "2px 0", alignItems: "center" }}>
+              <input type="checkbox" checked={picked("t", i)} onChange={e => setSkip({ ...skip, [rowKey("t", null, i)]: !e.target.checked })} aria-label={`Retime ${c.ref} ${c.date}`} />
+              <span style={{ fontFamily: MONO, fontWeight: 700 }}>{c.ref}</span><span style={{ fontFamily: MONO }}>{c.date}</span><span style={{ fontFamily: MONO }}>{c.origin}–{c.destination}</span>
+              <span style={{ fontFamily: MONO, color: C.muted }}>{c.from.dep}–{c.from.arr}Z → <b>{c.to.dep}–{c.to.arr}Z</b></span>
+            </label>)}
+          </div>}
+
+          {parsed.manual.length > 0 && <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 2 }}>Needs handling by hand ({parsed.manual.length})</div>
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>The app does not carry these out. Only new flights, cancellations and time changes are applied.</div>
+            {parsed.manual.map((m, i) => <div key={i} style={{ fontSize: 12, padding: "2px 0" }}><span style={{ fontFamily: MONO, fontWeight: 700 }}>{m.action} {m.label}</span> <span style={{ color: C.muted }}>{m.text}</span></div>)}
+          </div>}
+          {parsed.notes.length > 0 && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>{parsed.notes.map((n, i) => <div key={i}>{n}</div>)}</div>}
+          {parsed.kind && !parsed.create.length && !parsed.cancel.length && !parsed.retime.length && !parsed.manual.length && <div style={{ color: C.faint, textAlign: "center", padding: 14, fontSize: 12.5 }}>Nothing in this message needs doing.</div>}
+
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 6 }}>
+            {current.id && current.status === "pending" && perms.editFlight && <button disabled={busy} onClick={async () => { await decide("dismissed", "dismissed without applying"); setCurrent(null); }} style={miniBtn}>Dismiss</button>}
+            {canEdit && <button disabled={busy || (!createRows.length && !nCancel && !nRetime)} onClick={apply} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Applying…" : `Apply selected (${createRows.length + nCancel + nRetime})`}</button>}
+          </div>
+        </>}
+      </div>
+    </div>
+  );
 }
 
 function BulkImportModal({ resources, flights, onClose, onCommit, onLogScr }) {
