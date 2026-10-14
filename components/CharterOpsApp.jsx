@@ -4438,7 +4438,7 @@ function BulkDeleteModal({ resources, flights, allotments, onClose, onCommit }) 
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 }}>
-      <div className="modal-pop" role="dialog" aria-modal="true" aria-label={isNew ? "New overfly permit request" : `Overfly permit ${permit.state}`} onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
+      <div className="modal-pop" role="dialog" aria-modal="true" aria-label={t("bulkDeleteTitle")} onClick={e => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 620, maxWidth: "94vw", maxHeight: "86vh", overflow: "auto" }}>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>{t("bulkDeleteTitle")}</div>
         <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 12 }}>{t("bulkDeleteDescription")}</div>
 
