@@ -8,7 +8,7 @@ import {
   normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
-import { stateLabel, countryName } from "../lib/country-names";
+import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
@@ -7136,6 +7136,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [assignTo, setAssignTo] = useState({});
   const [picked, setPicked] = useState(() => new Set()); // permit requests ticked for deletion
   const [deleting, setDeleting] = useState(false);
+  const [stateTableFilter, setStateTableFilter] = useState("");
   const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
   const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
   const todayStr = iso(new Date());
@@ -7613,30 +7614,61 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         </table></div>
       </>}
 
-      {sub === "states" && <>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Processing time (days before the first flight that a request must be filed) and authority contact per State. States without an entry use {DEFAULT_LEAD_DAYS} days.</div>
-        {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-          <FieldSm label="State"><input value={stateForm.state} onChange={e => setStateForm({ ...stateForm, state: e.target.value })} list="permit-known-states-2" style={{ ...inputStyle, width: 90, fontFamily: MONO }} /><datalist id="permit-known-states-2">{knownStates.map(s => <option key={s} value={s} label={stateLabel(s)} />)}</datalist></FieldSm>
-          <FieldSm label="Lead days"><input type="number" min="0" value={stateForm.leadDays} onChange={e => setStateForm({ ...stateForm, leadDays: e.target.value })} style={{ ...inputStyle, width: 80 }} /></FieldSm>
-          <FieldSm label="Authority"><input value={stateForm.authority} onChange={e => setStateForm({ ...stateForm, authority: e.target.value })} style={{ ...inputStyle, width: 180 }} /></FieldSm>
-          <FieldSm label="Contact"><input value={stateForm.contact} onChange={e => setStateForm({ ...stateForm, contact: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
-          <FieldSm label="Note"><input value={stateForm.note} onChange={e => setStateForm({ ...stateForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
-          <button onClick={saveState} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save State</button>
-        </div>}
-        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>State</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Note</th><th style={th}></th></tr></thead>
-          <tbody>
-            {states.length === 0 && <tr><td colSpan={6} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No State settings yet — all States use the {DEFAULT_LEAD_DAYS}-day default.</td></tr>}
-            {states.map(s => (
-              <tr key={s.state} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(s.state)}</td><td style={td}>{s.leadDays}</td>
-                <td style={td}>{s.authority || "—"}</td><td style={td}>{s.contact || "—"}</td><td style={td}>{s.note || "—"}</td>
-                <td style={{ ...td, textAlign: "right" }}>{canEdit && <button onClick={() => setStateForm({ state: s.state, leadDays: s.leadDays, authority: s.authority || "", contact: s.contact || "", note: s.note || "" })} style={miniBtn}>Edit</button>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table></div>
-      </>}
+      {sub === "states" && (() => {
+        const toList = v => (Array.isArray(v) ? v : String(v || "").split(/[\s,;]+/)).map(normState).filter(Boolean);
+        const routeCount = new Map(), permitCount = new Map();
+        routes.forEach(r => new Set(toList(r.states)).forEach(c => routeCount.set(c, (routeCount.get(c) || 0) + 1)));
+        permits.forEach(p => { if (["draft", "submitted", "approved"].includes(effectiveStatus(p, todayStr))) { const c = normState(p.state); permitCount.set(c, (permitCount.get(c) || 0) + 1); } });
+        const setUp = new Map(states.map(x => [normState(x.state), x]));
+        // every State with settings, plus every State that routes or permits use (shown with the default lead time)
+        const codes = [...new Set([...setUp.keys(), ...routeCount.keys(), ...permitCount.keys()])];
+        const q = stateTableFilter.trim().toLowerCase();
+        const tableRows = codes.map(c => ({ code: c, name: countryName(c), cfg: setUp.get(c) || null }))
+          .filter(r => !q || r.name.toLowerCase().includes(q) || r.code.toLowerCase().includes(q))
+          .sort((x, y) => x.name.localeCompare(y.name));
+        const countries = allCountries();
+        const pickedCode = normState(stateForm.state);
+        const inList = countries.some(([c]) => c === pickedCode);
+        const pickCountry = c => { const cfg = setUp.get(c); setStateForm(cfg ? { state: c, leadDays: cfg.leadDays, authority: cfg.authority || "", contact: cfg.contact || "", note: cfg.note || "" } : { state: c, leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" }); };
+        return <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Countries you overfly or land in, with the processing time (days before the first flight that a request must be filed) and authority contact for each. A country that routes or permits use but has no settings here uses {DEFAULT_LEAD_DAYS} days. Pick a country to add it or change its settings.</div>
+          {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <FieldSm label="Country">
+              <select aria-label="Country" value={pickedCode} onChange={e => pickCountry(e.target.value)} style={{ ...inputStyle, width: 230 }}>
+                <option value="">Choose a country…</option>
+                {pickedCode && !inList && <option value={pickedCode}>{pickedCode}</option>}
+                {countries.map(([c, n]) => <option key={c} value={c}>{n} ({c}){setUp.has(c) ? " · set up" : ""}</option>)}
+              </select>
+            </FieldSm>
+            <FieldSm label="Lead days"><input type="number" min="0" value={stateForm.leadDays} onChange={e => setStateForm({ ...stateForm, leadDays: e.target.value })} style={{ ...inputStyle, width: 80 }} /></FieldSm>
+            <FieldSm label="Authority"><input value={stateForm.authority} onChange={e => setStateForm({ ...stateForm, authority: e.target.value })} style={{ ...inputStyle, width: 180 }} /></FieldSm>
+            <FieldSm label="Contact"><input value={stateForm.contact} onChange={e => setStateForm({ ...stateForm, contact: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+            <FieldSm label="Note"><input value={stateForm.note} onChange={e => setStateForm({ ...stateForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+            <button disabled={!pickedCode} onClick={saveState} style={{ ...miniBtn, background: pickedCode ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{setUp.has(pickedCode) ? "Save changes" : "Add country"}</button>
+          </div>}
+          <div style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+            <input aria-label="Filter countries" value={stateTableFilter} onChange={e => setStateTableFilter(e.target.value)} placeholder="Filter countries…" style={{ ...inputStyle, width: 200 }} />
+            <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{tableRows.length} countr{tableRows.length === 1 ? "y" : "ies"} · {tableRows.filter(r => r.cfg).length} with settings</span>
+          </div>
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Country</th><th style={th}>Code</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Note</th><th style={th}>Routes</th><th style={th}>Active requests</th><th style={th}></th></tr></thead>
+            <tbody>
+              {tableRows.length === 0 && <tr><td colSpan={9} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{codes.length === 0 ? `No countries yet. Pick one above, or map your routes first (Routes → States). Every country uses the ${DEFAULT_LEAD_DAYS}-day default until you set it.` : "No countries match."}</td></tr>}
+              {tableRows.map(r => (
+                <tr key={r.code} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: r.cfg ? 1 : 0.75 }}>
+                  <td style={{ ...td, fontWeight: 600 }}>{r.name}</td>
+                  <td style={{ ...td, fontFamily: MONO }}>{r.code}</td>
+                  <td style={td}>{r.cfg ? r.cfg.leadDays : <span style={{ color: C.faint }}>{DEFAULT_LEAD_DAYS} (default)</span>}</td>
+                  <td style={td}>{r.cfg?.authority || "—"}</td><td style={td}>{r.cfg?.contact || "—"}</td><td style={td}>{r.cfg?.note || "—"}</td>
+                  <td style={td}>{routeCount.get(r.code) || <span style={{ color: C.faint }}>0</span>}</td>
+                  <td style={td}>{permitCount.get(r.code) || <span style={{ color: C.faint }}>0</span>}</td>
+                  <td style={{ ...td, textAlign: "right" }}>{canEdit && <button onClick={() => pickCountry(r.code)} style={miniBtn}>{r.cfg ? "Edit" : "Set up"}</button>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        </>;
+      })()}
 
       {sub === "inbox" && <>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails carrying the permit label in Gmail are read (never changed or deleted) once a day and when you press the button. An e-mail that mentions a permit number or authority reference of exactly one permit is filed on it as a note, with its PDF and TXT attachments (images, Word, Excel and other files are not picked up; open the e-mail in Gmail for those). Anything else waits here for you. <b>Status changes are always made by you</b> — an e-mail never approves a permit by itself, and the sender is not verified.</div>
