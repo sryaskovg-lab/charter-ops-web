@@ -8,6 +8,7 @@ import {
   normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
+import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
 import {
   iso, addDays, hhmm, combineDateAndTime, combineArrivalDateTime, timeToMinutes, minutesToHHMM,
@@ -6712,6 +6713,18 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
   );
 }
 
+// Airport and border files (public/data) are fetched the first time someone asks for suggestions.
+let GEO_PROMISE = null;
+function loadGeo() {
+  if (!GEO_PROMISE) {
+    GEO_PROMISE = Promise.all([fetch("/data/airports.json"), fetch("/data/countries.json")]).then(async ([a, c]) => {
+      if (!a.ok || !c.ok) throw new Error("Could not load the airport and border files.");
+      return makeGeo(await a.json(), await c.json());
+    }).catch(e => { GEO_PROMISE = null; throw e; });
+  }
+  return GEO_PROMISE;
+}
+
 function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpToFlight, pushToast }) {
   const [sub, setSub] = useState("requests");
   const [statusFilter, setStatusFilter] = useState("active");
@@ -6737,6 +6750,37 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [airportForm, setAirportForm] = useState({ airport: "", state: "" });
   const [reading, setReading] = useState(false);
   const unmapped = useMemo(() => unmappedRoutes(flights, routeMap, todayStr), [flights, routeMap, todayStr]);
+  const [geo, setGeo] = useState(null);
+  const [geoErr, setGeoErr] = useState("");
+  const [geoBusy, setGeoBusy] = useState(false);
+  const [homeText, setHomeText] = useState(() => { try { return localStorage.getItem("permitHomeStates") ?? "KZ"; } catch { return "KZ"; } });
+  const [pick, setPick] = useState({});
+  const [applying, setApplying] = useState(false);
+  const homeStates = useMemo(() => parseStates(homeText), [homeText]);
+  const apSug = useMemo(() => geo ? suggestAirports(upcomingDestinations(flights, airportMap, todayStr), geo, homeStates) : [], [geo, flights, airportMap, todayStr, homeStates]);
+  const rtSug = useMemo(() => geo ? suggestRoutes(unmapped, geo) : [], [geo, unmapped]);
+  const geoDiffs = useMemo(() => geo ? compareMapped(routes, geo) : [], [geo, routes]);
+  const isPicked = k => pick[k] !== false;
+  async function openSuggest() {
+    setGeoBusy(true); setGeoErr("");
+    try { setGeo(await loadGeo()); } catch (e) { setGeoErr(e.message || "Could not load the data."); }
+    setGeoBusy(false);
+  }
+  function changeHome(v) { setHomeText(v); try { localStorage.setItem("permitHomeStates", v); } catch { /* storage unavailable */ } }
+  async function applySuggestions() {
+    const aps = apSug.filter(x => x.found && isPicked("a:" + x.airport)).map(x => ({ airport: x.airport, state: x.state || null }));
+    const rts = rtSug.filter(x => x.found && isPicked("r:" + x.origin + "-" + x.destination)).map(x => ({ origin: x.origin, destination: x.destination, states: x.states.map(c => c.state), note: "Suggested from airport and border data (straight line between the airports). Check against the filed route." }));
+    if (!aps.length && !rts.length) { pushToast("Nothing selected.", "warn"); return; }
+    setApplying(true);
+    try {
+      // ignoreDuplicates: an entry someone saved in the meantime is never overwritten
+      if (aps.length) { const { error: e } = await supabase.from("airport_states").upsert(aps, { onConflict: "airport", ignoreDuplicates: true }); if (e) throw e; }
+      if (rts.length) { const { error: e } = await supabase.from("route_overfly_states").upsert(rts, { onConflict: "origin,destination", ignoreDuplicates: true }); if (e) throw e; }
+      pushToast(`Saved ${aps.length} airport${aps.length === 1 ? "" : "s"} and ${rts.length} route${rts.length === 1 ? "" : "s"}.`, "ok");
+      setPick({}); onReload();
+    } catch (e) { pushToast(`Not saved: ${e.message}`, "warn", true); }
+    setApplying(false);
+  }
   const reminders = useMemo(() => permitReminders(permits, todayStr), [permits, todayStr]);
   const urgent = useMemo(() => computeUrgentUncovered(flights, routeMap, permits, todayStr, ALERT_DAYS, airportMap), [flights, routeMap, permits, todayStr, airportMap]);
   const [alerting, setAlerting] = useState(false);
@@ -7059,6 +7103,42 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             {unmapped.map(u => <button key={u.origin + u.destination} disabled={!canEdit} onClick={() => setRouteForm({ origin: u.origin, destination: u.destination, states: "", note: "" })} style={{ ...miniBtn, fontFamily: MONO }}>{u.origin}–{u.destination} · {u.count} flt · from {u.firstDay}</button>)}
           </div>
         </div>}
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Suggest from airport and border data</div>
+          <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>Looks up each airport in the OurAirports list and draws the straight line between the two airports over the Natural Earth borders. It lists the States that line crosses (sea within 12 nm of a coast counts), without the departure and landing States. <b>This is an estimate of the straight line, not your filed route</b> — check it before relying on it. Nothing is saved until you press Save selected, and entries you already have are never changed.</div>
+          {!geo && <button disabled={geoBusy} onClick={openSuggest} style={miniBtn}>{geoBusy ? "Loading…" : "Show suggestions"}</button>}
+          {geoErr && <div style={{ fontSize: 12, color: C.red, marginTop: 6 }}>{geoErr}</div>}
+          {geo && <>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
+              <FieldSm label="Home State(s): airports there need no landing permit"><input value={homeText} onChange={e => changeHome(e.target.value)} style={{ ...inputStyle, width: 160, fontFamily: MONO }} /></FieldSm>
+              {canEdit && <button disabled={applying} onClick={applySuggestions} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{applying ? "Saving…" : "Save selected"}</button>}
+            </div>
+            <div style={{ fontSize: 12, fontWeight: 600, margin: "6px 0 3px" }}>Airports not listed yet ({apSug.length})</div>
+            {apSug.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>Every destination with an upcoming flight is already listed.</div>}
+            {apSug.length > 0 && <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>Saving airports switches landing-permit checks on for every listed airport.</div>}
+            {apSug.map(x => <label key={x.airport} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, padding: "2px 0" }}>
+              <input type="checkbox" disabled={!x.found || !canEdit} checked={x.found && isPicked("a:" + x.airport)} onChange={e => setPick({ ...pick, ["a:" + x.airport]: e.target.checked })} aria-label={`Save ${x.airport}`} />
+              <span style={{ fontFamily: MONO, fontWeight: 700, width: 44 }}>{x.airport}</span>
+              {x.found ? <span>{x.name} → <b style={{ fontFamily: MONO }}>{x.state || "none needed"}</b>{x.home ? <span style={{ color: C.faint }}> (home State {x.country})</span> : null} <span style={{ color: C.faint }}>· {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>not in the airport data — add it by hand below</span>}
+            </label>)}
+            <div style={{ fontSize: 12, fontWeight: 600, margin: "10px 0 3px" }}>Unmapped routes ({rtSug.length})</div>
+            {rtSug.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No unmapped routes with upcoming flights.</div>}
+            {rtSug.map(x => <label key={x.origin + x.destination} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12.5, padding: "2px 0" }}>
+              <input type="checkbox" disabled={!x.found || !canEdit} checked={x.found && isPicked("r:" + x.origin + "-" + x.destination)} onChange={e => setPick({ ...pick, ["r:" + x.origin + "-" + x.destination]: e.target.checked })} aria-label={`Save ${x.origin}–${x.destination}`} style={{ marginTop: 3 }} />
+              <span style={{ fontFamily: MONO, fontWeight: 700, width: 80 }}>{x.origin}–{x.destination}</span>
+              {x.found ? <span>{x.states.length === 0 ? <span style={{ color: C.faint }}>crosses no other State</span> : x.states.map(c => <span key={c.state} title={`${c.name}, about ${c.km} km from ${x.origin}${c.viaSeaOnly ? ", territorial sea only" : ""}`} style={{ fontFamily: MONO, marginRight: 8 }}>{c.state}{c.viaSeaOnly ? <span style={{ color: C.amber }}> (sea only)</span> : null}</span>)} <span style={{ color: C.faint }}>· {x.origin} in {x.originState}, {x.destination} in {x.destState} · {x.count} flt from {x.firstDay}</span></span> : <span style={{ color: C.red }}>airport not in the data: {x.missing.join(", ")} — map it by hand</span>}
+            </label>)}
+            {geoDiffs.length > 0 && <>
+              <div style={{ fontSize: 12, fontWeight: 600, margin: "10px 0 3px" }}>Your mapped routes that differ from the line ({geoDiffs.length})</div>
+              <div style={{ fontSize: 11, color: C.faint, marginBottom: 3 }}>Information only. A route flown on airways can differ from the straight line, so a difference is not necessarily a mistake.</div>
+              {geoDiffs.map(d => <div key={d.origin + d.destination} style={{ fontSize: 12.5, padding: "2px 0" }}>
+                <span style={{ fontFamily: MONO, fontWeight: 700 }}>{d.origin}–{d.destination}</span>{" "}
+                {d.missing.length > 0 && <span>line also crosses <b style={{ fontFamily: MONO }}>{d.missing.map(m => m.state + (m.viaSeaOnly ? " (sea only)" : "")).join(", ")}</b>. </span>}
+                {d.extra.length > 0 && <span>you list <b style={{ fontFamily: MONO }}>{d.extra.join(", ")}</b>, which the line does not cross.</span>}
+              </div>)}
+            </>}
+          </>}
+        </div>
         <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
           <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Airports → State (landing permits)</div>
           <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>List the State each destination airport is in. Leave the State blank for an airport that needs no landing permit (your home base, for example). Landing permits are checked as soon as the first airport is listed; destinations not listed are reported as "cannot be checked".</div>
