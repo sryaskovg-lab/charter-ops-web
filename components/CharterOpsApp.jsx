@@ -1078,7 +1078,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     const deletedIds = [];
     let firstError = null;
     for (const chunk of chunks) {
-      const { data: gone, error } = await supabase.from("flights").delete().in("id", chunk).select("id");
+      // a dropped connection ("Failed to fetch") is retried a few times before the chunk counts as failed
+      let gone = null, error = null;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        ({ data: gone, error } = await supabase.from("flights").delete().in("id", chunk).select("id"));
+        if (!error || !/fetch|network|timeout/i.test(error.message)) break;
+        await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+      }
       if (error) { firstError = firstError || error; continue; }
       deletedIds.push(...(gone || []).map(r => r.id));
       if ((gone || []).length < chunk.length) firstError = firstError || { message: "some flights were already gone or you lack permission to delete them" };
