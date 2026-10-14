@@ -3378,6 +3378,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
   const [fileName, setFileName] = useState("");
   const [current, setCurrent] = useState(null); // { id?, label, text }
   const [airlines, setAirlines] = useState(() => { try { return localStorage.getItem("scheduleAirlines") ?? "DV"; } catch { return "DV"; } });
+  const [ssimUtc, setSsimUtc] = useState(() => { try { return localStorage.getItem("scheduleSsimUtc") !== "no"; } catch { return true; } }); // SSIM files are normally supplied in UTC here
   const [fromDay, setFromDay] = useState("");
   const [toDay, setToDay] = useState("");
   const [typeMap, setTypeMap] = useState({}); // aircraft type key -> resource id or ""
@@ -3432,7 +3433,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
     if (!current) return null;
     const t = current.text;
     if (looksLikeSsim(t)) {
-      const s = parseSsim(t);
+      const s = parseSsim(t, { forceUtc: ssimUtc });
       const x = expandLegs(s.legs, { airlines: airlineList, fromDate: fromDay ? new Date(fromDay + "T00:00:00Z") : null, toDate: toDay ? new Date(toDay + "T00:00:00Z") : null });
       const rows = markDuplicates(x.rows, flights);
       return { kind: "ssim", warnings: [...s.warnings, ...x.warnings], create: rows, cancel: [], retime: [], manual: [], notes: [], legsTotal: s.legs.length, airlinesInFile: [...new Set(s.legs.map(l => l.airline))] };
@@ -3445,7 +3446,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
       return { kind: m.kind, warnings: m.warnings, ...plan, create: markDuplicates(plan.create, flights), items: m.items.length, timeMode: m.timeMode };
     }
     return { kind: null, warnings: ["This does not look like an SSIM file, an SSM or an ASM message."], create: [], cancel: [], retime: [], manual: [], notes: [] };
-  }, [current, airlineList, fromDay, toDay, flights]);
+  }, [current, airlineList, fromDay, toDay, flights, ssimUtc]);
 
   const typeKeys = useMemo(() => [...new Set((parsed?.create || []).map(r => canonicalAircraftType(r.aircraftType)).filter(Boolean))], [parsed]);
   const fleetFor = key => resources.filter(r => fleetTypeKey(r.variant) === key);
@@ -3540,6 +3541,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
           <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 10 }}>
             <FieldSm label="Airline code(s), blank = all"><input value={airlines} onChange={e => changeAirlines(e.target.value)} style={{ ...inputStyle, width: 110, fontFamily: MONO }} /></FieldSm>
             {parsed.kind === "ssim" && <>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, paddingBottom: 6 }}><input type="checkbox" checked={ssimUtc} onChange={e => { setSsimUtc(e.target.checked); try { localStorage.setItem("scheduleSsimUtc", e.target.checked ? "yes" : "no"); } catch { /* storage unavailable */ } }} />Times in this file are UTC</label>
               <FieldSm label="From (optional)"><input type="date" value={fromDay} onChange={e => setFromDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
               <FieldSm label="To (optional)"><input type="date" value={toDay} onChange={e => setToDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
               <span style={{ fontSize: 11.5, color: C.faint }}>{parsed.legsTotal} flight legs in the file · airlines: {parsed.airlinesInFile.join(", ") || "—"}</span>
