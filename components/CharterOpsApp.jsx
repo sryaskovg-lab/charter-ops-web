@@ -10,7 +10,7 @@ import {
 import { buildRequestEmail, extractEmails } from "../lib/permit-request";
 import { stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
-import { detectKind, parseScheduleMessage, planScheduleChanges, markDuplicates } from "../lib/schedule-msg";
+import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
 import {
@@ -1926,7 +1926,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
-      {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
+      {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} onLogScr={logScrSent} />}
       {showSchedulingEngine && <SchedulingEngineModal resources={resources} flights={flights} isGrounded={isGrounded} onClose={() => setShowSchedulingEngine(false)} onCommit={commitSchedulingEngineRows} onLogScr={logScrSent} />}
@@ -3369,7 +3369,7 @@ function groupIntoPatternsAndRemaining(parsed) {
 }
 
 // ---------- SSIM / SSM / ASM messages: paste, upload, or review what arrived by e-mail ----------
-function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, onCreateRows, onUpdateFlight }) {
+function ScheduleMessagesModal({ flights, resources, allotments = [], perms, pushToast, onClose, onCreateRows, onUpdateFlight }) {
   const [tab, setTab] = useState("mail"); // mail | paste
   const [list, setList] = useState([]);
   const [listErr, setListErr] = useState("");
@@ -3379,6 +3379,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
   const [current, setCurrent] = useState(null); // { id?, label, text }
   const [airlines, setAirlines] = useState(() => { try { return localStorage.getItem("scheduleAirlines") ?? "DV"; } catch { return "DV"; } });
   const [ssimUtc, setSsimUtc] = useState(() => { try { return localStorage.getItem("scheduleSsimUtc") !== "no"; } catch { return true; } }); // SSIM files are normally supplied in UTC here
+  const [syncMode, setSyncMode] = useState(() => { try { return localStorage.getItem("scheduleSsimSync") !== "no"; } catch { return true; } }); // compare an SSIM file with the schedule
   const [fromDay, setFromDay] = useState("");
   const [toDay, setToDay] = useState("");
   const [typeMap, setTypeMap] = useState({}); // aircraft type key -> resource id or ""
@@ -3435,8 +3436,15 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
     if (looksLikeSsim(t)) {
       const s = parseSsim(t, { forceUtc: ssimUtc });
       const x = expandLegs(s.legs, { airlines: airlineList, fromDate: fromDay ? new Date(fromDay + "T00:00:00Z") : null, toDate: toDay ? new Date(toDay + "T00:00:00Z") : null });
-      const rows = markDuplicates(x.rows, flights);
-      return { kind: "ssim", warnings: [...s.warnings, ...x.warnings], create: rows, cancel: [], retime: [], manual: [], notes: [], legsTotal: s.legs.length, airlinesInFile: [...new Set(s.legs.map(l => l.airline))] };
+      const base = { kind: "ssim", warnings: [...s.warnings, ...x.warnings], legsTotal: s.legs.length, airlinesInFile: [...new Set(s.legs.map(l => l.airline))] };
+      if (syncMode) {
+        const allotted = new Set(allotments.filter(a => a.status !== "released" && a.status !== "cancelled").map(a => a.flightId));
+        const sync = planSsimSync(x.rows, flights, { airlines: airlineList, fromDate: fromDay ? new Date(fromDay + "T00:00:00Z") : null, toDate: toDay ? new Date(toDay + "T00:00:00Z") : null, today: new Date(), allotted });
+        const cancel = sync.missing.map(m => ({ ...m, label: m.ref, notInFile: true }));
+        const manual = sync.changed.map(c => ({ action: "ROUTE", label: c.ref, text: `${c.date}: system has ${c.inSystem}, file has ${c.inFile}. Not changed automatically.` }));
+        return { ...base, sync: true, scope: sync.scope, create: sync.create, cancel, retime: sync.retime, manual, notes: [] };
+      }
+      return { ...base, create: markDuplicates(x.rows, flights), cancel: [], retime: [], manual: [], notes: [] };
     }
     if (detectKind(t)) {
       const m = parseScheduleMessage(t, { today: new Date() });
@@ -3446,13 +3454,14 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
       return { kind: m.kind, warnings: m.warnings, ...plan, create: markDuplicates(plan.create, flights), items: m.items.length, timeMode: m.timeMode };
     }
     return { kind: null, warnings: ["This does not look like an SSIM file, an SSM or an ASM message."], create: [], cancel: [], retime: [], manual: [], notes: [] };
-  }, [current, airlineList, fromDay, toDay, flights, ssimUtc]);
+  }, [current, airlineList, fromDay, toDay, flights, ssimUtc, syncMode, allotments]);
 
   const typeKeys = useMemo(() => [...new Set((parsed?.create || []).map(r => canonicalAircraftType(r.aircraftType)).filter(Boolean))], [parsed]);
   const fleetFor = key => resources.filter(r => fleetTypeKey(r.variant) === key);
   function capacityFor(key) { const f = fleetFor(key); return f.length ? Math.max(...f.map(r => r.capacity || 0)) : Math.max(0, ...resources.map(r => r.capacity || 0)); }
   const rowKey = (kind, r, i) => `${kind}:${i}`;
-  const picked = (kind, i) => !skip[rowKey(kind, null, i)];
+  // Cancellations proposed because the file does not contain a flight start unticked: the person opts in.
+  const picked = (kind, i) => { const v = skip[rowKey(kind, null, i)]; return v === undefined ? !(kind === "x" && parsed?.sync) : !v; };
   const createRows = (parsed?.create || []).map((r, i) => ({ r, i })).filter(x => !x.r.duplicateOf && picked("c", x.i));
   const nCancel = (parsed?.cancel || []).filter((_, i) => picked("x", i)).length;
   const nRetime = (parsed?.retime || []).filter((_, i) => picked("t", i)).length;
@@ -3542,6 +3551,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
             <FieldSm label="Airline code(s), blank = all"><input value={airlines} onChange={e => changeAirlines(e.target.value)} style={{ ...inputStyle, width: 110, fontFamily: MONO }} /></FieldSm>
             {parsed.kind === "ssim" && <>
               <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, paddingBottom: 6 }}><input type="checkbox" checked={ssimUtc} onChange={e => { setSsimUtc(e.target.checked); try { localStorage.setItem("scheduleSsimUtc", e.target.checked ? "yes" : "no"); } catch { /* storage unavailable */ } }} />Times in this file are UTC</label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12.5, paddingBottom: 6 }}><input type="checkbox" checked={syncMode} onChange={e => { setSyncMode(e.target.checked); setSkip({}); try { localStorage.setItem("scheduleSsimSync", e.target.checked ? "yes" : "no"); } catch { /* storage unavailable */ } }} />Compare with the current schedule</label>
               <FieldSm label="From (optional)"><input type="date" value={fromDay} onChange={e => setFromDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
               <FieldSm label="To (optional)"><input type="date" value={toDay} onChange={e => setToDay(e.target.value)} style={{ ...inputStyle, width: 150 }} /></FieldSm>
               <span style={{ fontSize: 11.5, color: C.faint }}>{parsed.legsTotal} flight legs in the file · airlines: {parsed.airlinesInFile.join(", ") || "—"}</span>
@@ -3570,10 +3580,14 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
           </div>}
 
           {parsed.cancel.length > 0 && <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 4 }}>Cancellations ({nCancel} selected)</div>
+            <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 2 }}>{parsed.sync ? "In the schedule but not in this file" : "Cancellations"} ({nCancel} selected)</div>
+            {parsed.sync && <div style={{ fontSize: 11, color: C.faint, marginBottom: 4 }}>Flights of {parsed.scope.airlines.join(", ") || "this airline"} between {parsed.scope.from ? iso(parsed.scope.from) : "—"} and {parsed.scope.to ? iso(parsed.scope.to) : "—"} that are still tentative or confirmed. Nothing here is ticked: tick the ones that should be cancelled. Flights that have started, positioning legs and other airlines are never listed.</div>}
             {parsed.cancel.map((c, i) => <label key={i} style={{ display: "flex", gap: 8, fontSize: 12.5, padding: "2px 0", alignItems: "center" }}>
               <input type="checkbox" checked={picked("x", i)} onChange={e => setSkip({ ...skip, [rowKey("x", null, i)]: !e.target.checked })} aria-label={`Cancel ${c.ref} ${c.date}`} />
               <span style={{ fontFamily: MONO, fontWeight: 700 }}>{c.ref}</span><span style={{ fontFamily: MONO }}>{c.date}</span><span style={{ fontFamily: MONO }}>{c.origin}–{c.destination}</span>
+              {c.depTime && <span style={{ fontFamily: MONO, color: C.muted }}>{c.depTime}Z</span>}
+              {c.flightNumberInFile && <span style={{ color: C.faint, fontSize: 11 }}>flight number is in the file on other days</span>}
+              {c.allotted && <span style={{ color: C.amber, fontSize: 11, fontWeight: 600 }}>has tour operator seats</span>}
             </label>)}
           </div>}
 
@@ -3583,6 +3597,7 @@ function ScheduleMessagesModal({ flights, resources, perms, pushToast, onClose, 
               <input type="checkbox" checked={picked("t", i)} onChange={e => setSkip({ ...skip, [rowKey("t", null, i)]: !e.target.checked })} aria-label={`Retime ${c.ref} ${c.date}`} />
               <span style={{ fontFamily: MONO, fontWeight: 700 }}>{c.ref}</span><span style={{ fontFamily: MONO }}>{c.date}</span><span style={{ fontFamily: MONO }}>{c.origin}–{c.destination}</span>
               <span style={{ fontFamily: MONO, color: C.muted }}>{c.from.dep}–{c.from.arr}Z → <b>{c.to.dep}–{c.to.arr}Z</b></span>
+              {c.allotted && <span style={{ color: C.amber, fontSize: 11, fontWeight: 600 }}>has tour operator seats</span>}
             </label>)}
           </div>}
 
