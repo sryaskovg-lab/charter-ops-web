@@ -3,12 +3,13 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
+import { flightKey, permitChanges, flightsForPermit, amendmentText, entryToFlight } from "../lib/permit-changes";
 import { countryRows, registerRows, toCsv, toHtmlTable } from "../lib/permit-report";
 import { noteTextForEmail } from "../lib/permit-mail";
 import {
   flightPermitStatus, permitImpact, coverageFor, addDaysStr, daysBetween, normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
-import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, renderTemplate, unknownPlaceholders, pickTemplate, requestVars, buildFromTemplate } from "../lib/permit-request";
+import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, renderTemplate, unknownPlaceholders, pickTemplate, requestVars, buildFromTemplate, AMENDMENT_TEMPLATE } from "../lib/permit-request";
 import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
@@ -6892,7 +6893,7 @@ const PERMIT_STATUS_META = {
 };
 function mapPermit(r) {
   return { id: r.id, state: r.state, status: r.status, validFrom: r.valid_from, validTo: r.valid_to, resourceIds: r.resource_ids || [],
-    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], validDates: r.valid_dates || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, agentId: r.agent_id || null, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
+    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], validDates: r.valid_dates || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, agentId: r.agent_id || null, requestedFlights: r.requested_flights || null, requestedAt: r.requested_at || null, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 async function fetchPermitData() {
   const results = await Promise.all([
@@ -6907,6 +6908,7 @@ async function fetchPermitData() {
     supabase.from("permit_agents").select("*").order("name"),
     supabase.from("permit_templates").select("*"),
     supabase.from("route_overfly_states").select("route_detail").limit(1),
+    supabase.from("overfly_permits").select("requested_flights").limit(1),
   ]);
   const agRes = results[8], tplRes = results[9]; // migration 00036: absence must not break the rest
   const apRes = results[6], propRes = results[7]; // migration 00031: their absence must not break the rest
@@ -6915,7 +6917,7 @@ async function fetchPermitData() {
   const err = results.slice(0, 5).find(r => r.error)?.error;
   if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false };
   const [p, r, s, d, n] = results.slice(0, 5).map(x => x.data || []);
-  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, agents: agRes.error ? [] : (agRes.data || []), templates: tplRes.error ? [] : (tplRes.data || []), agentsReady: !agRes.error && !tplRes.error, routeDetailReady: !results[10].error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note, channel: x.channel || "authority", agentId: x.agent_id || null })), docs: d, notes: n };
+  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, agents: agRes.error ? [] : (agRes.data || []), templates: tplRes.error ? [] : (tplRes.data || []), agentsReady: !agRes.error && !tplRes.error, routeDetailReady: !results[10].error, snapshotReady: !results[11].error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note, channel: x.channel || "authority", agentId: x.agent_id || null })), docs: d, notes: n };
 }
 function describePermitEvent(r) {
   const d = r.details || {};
@@ -7025,7 +7027,10 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
       const j = await res.json().catch(() => ({}));
       if (!res.ok || j.error) { pushToast(j.error || `Draft failed (${res.status}).`, "warn", true); setDrafting(false); return; }
       pushToast(`Draft created in Gmail (${covered.length} flight(s) listed${to.length ? `, to ${to.join(", ")}` : ", no recipient: add the authority e-mail under States → Contact"}). Open Gmail → Drafts to review and send.`, "ok", true);
-      if (permit) await supabase.from("permit_notes").insert({ permit_id: permit.id, body: `Request e-mail drafted in Gmail (${covered.length} flight(s) listed). Subject: ${mail.subject}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+      if (permit) {
+        await supabase.from("permit_notes").insert({ permit_id: permit.id, body: `Request e-mail drafted in Gmail (${covered.length} flight(s) listed). Subject: ${mail.subject}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+        if (permitData.snapshotReady) await supabase.from("overfly_permits").update({ requested_flights: covered.map(flightKey), requested_at: new Date().toISOString() }).eq("id", permit.id);
+      }
       onSaved();
     } catch (e) { pushToast(`Draft failed: ${e.message}`, "warn"); }
     setDrafting(false);
@@ -7367,7 +7372,7 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
     const built = [...groups.entries()].map(([id, grp]) => {
       const first = grp[0];
       const byId = new Map();
-      grp.forEach(r => flightsFor(r).forEach(f => byId.set(f.id, f)));
+      grp.forEach(r => { const rf = flightsFor(r); r.snapKeys = rf.map(flightKey); rf.forEach(f => byId.set(f.id, f)); });
       const fl = [...byId.values()].sort((a, b) => a.start - b.start);
       const ag = first.channel === "agent" ? agents.find(a => a.id === first.agentId) : null;
       const cfg = settings.get(normState(first.state));
@@ -7407,7 +7412,7 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
       const res = { key: m.id, states: m.rows.map(r => r.state), kind: m.kind, created: [], errors: [] };
       try {
         for (const r of m.rows) {
-          const row = { kind: r.kind, airport: r.kind === "landing" && r.airports.length === 1 ? r.airports[0] : null, state: normState(r.state), valid_from: r.validFrom || null, valid_to: r.validTo || null, resource_ids: r.resourceIds, status: markSubmitted ? "submitted" : "draft", ...(markSubmitted ? { submitted_at: new Date().toISOString() } : {}), ...(permitData.agentsReady ? { agent_id: r.channel === "agent" ? r.agentId : null } : {}) };
+          const row = { kind: r.kind, airport: r.kind === "landing" && r.airports.length === 1 ? r.airports[0] : null, state: normState(r.state), valid_from: r.validFrom || null, valid_to: r.validTo || null, resource_ids: r.resourceIds, status: markSubmitted ? "submitted" : "draft", ...(markSubmitted ? { submitted_at: new Date().toISOString() } : {}), ...(permitData.agentsReady ? { agent_id: r.channel === "agent" ? r.agentId : null } : {}), ...(permitData.snapshotReady ? { requested_flights: r.snapKeys || [], requested_at: new Date().toISOString() } : {}) };
           const ins = await retryNetwork(() => supabase.from("overfly_permits").insert(row).select("id"));
           if (ins.error || !ins.data?.length) res.errors.push(`${r.state}: ${ins.error?.message || "request not created"}`); else res.created.push(ins.data[0].id);
         }
@@ -7582,6 +7587,124 @@ function PermitReportPanel({ permitData, permits, flights, resources, routeMap, 
   </>;
 }
 
+// Amendment e-mails: for requests whose flights changed after they were sent (added, cancelled, retimed).
+function AmendmentModal({ permitData, permits, flights, resources, routeMap, airportMap, settings, changes, todayStr, onClose, onSaved, pushToast }) {
+  const agents = permitData.agents || [];
+  const [step, setStep] = useState("choose"); // choose | review | done
+  const [busy, setBusy] = useState(false);
+  const [pick, setPick] = useState(() => new Set(changes.keys()));
+  const [msgs, setMsgs] = useState([]);
+  const [results, setResults] = useState([]);
+  const list = permits.filter(p => changes.has(p.id));
+  useEffect(() => { const h = e => { if (e.key === "Escape" && !busy) onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose, busy]);
+  const nowKeys = p => flightsForPermit(p, flights, routeMap, airportMap).map(flightKey);
+  const resetSnapshot = async p => {
+    if (!permitData.snapshotReady) return { error: { message: "Run migration 00038 first." } };
+    return supabase.from("overfly_permits").update({ requested_flights: nowKeys(p), requested_at: new Date().toISOString() }).eq("id", p.id).select("id");
+  };
+  async function markHandled(p) {
+    if (!window.confirm(`Treat the ${stateLabel(p.state)} request as up to date, without sending an e-mail?`)) return;
+    const r = await resetSnapshot(p);
+    if (r.error || !r.data?.length) { pushToast(`Not saved: ${r.error?.message || "no permission"}`, "warn"); return; }
+    pushToast(`${stateLabel(p.state)}: changes marked as handled.`, "ok"); onSaved();
+  }
+  async function toReview() {
+    const { data: auth } = await supabase.auth.getUser();
+    const groups = new Map();
+    list.filter(p => pick.has(p.id)).forEach(p => {
+      const k = p.agentId && agents.some(a => a.id === p.agentId) ? `agent|${p.agentId}|${p.kind}` : `auth|${normState(p.state)}|${p.kind}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(p);
+    });
+    const built = [...groups.entries()].map(([id, grp]) => {
+      const added = new Map(), removed = new Map(), changed = new Map();
+      grp.forEach(p => { const c = changes.get(p.id); c.added.forEach(f => added.set(f.id, f)); c.removed.forEach(e => removed.set(e.ref + "|" + e.day, e)); c.changed.forEach(x => changed.set(x.from.ref + "|" + x.from.day, x)); });
+      const ch = { added: [...added.values()].sort((a, b) => a.start - b.start), removed: [...removed.values()], changed: [...changed.values()] };
+      const ag = grp[0].agentId ? agents.find(a => a.id === grp[0].agentId) : null;
+      const cfg = settings.get(normState(grp[0].state));
+      const touched = [...ch.added, ...ch.changed.map(x => x.to), ...ch.removed.map(entryToFlight)];
+      const vars = requestVars({ state: grp.map(p => normState(p.state)).join(", "), country: grp.map(p => countryName(p.state)).join(", "), kind: grp[0].kind, validFrom: grp.map(p => p.validFrom).filter(Boolean).sort()[0] || "", validTo: grp.map(p => p.validTo).filter(Boolean).sort().slice(-1)[0] || "",
+        flights: touched, agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || "") });
+      const mail = buildFromTemplate(AMENDMENT_TEMPLATE, { ...vars, amendment: amendmentText(ch) });
+      return { id, permits: grp, to: extractEmails(ag ? ag.contact : cfg?.contact).join(", "), subject: mail.subject, text: mail.body, agentName: ag?.name || "", n: ch.added.length + ch.removed.length + ch.changed.length };
+    });
+    setMsgs(built); setStep("review");
+  }
+  const patchMsg = (id, p) => setMsgs(ms => ms.map(m => m.id === id ? { ...m, ...p } : m));
+  async function createAll() {
+    setBusy(true);
+    const out = [];
+    const { data: { session } } = await supabase.auth.getSession();
+    const { data: auth } = await supabase.auth.getUser();
+    for (const m of msgs) {
+      const res = { id: m.id, label: m.permits.map(p => stateLabel(p.state)).join(", ") };
+      try {
+        const resp = await fetch("/api/permits/draft", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ to: extractEmails(m.to), subject: m.subject, body: m.text }) });
+        const j = await resp.json().catch(() => ({}));
+        if (!resp.ok || j.error) res.error = j.error || `Draft failed (${resp.status}).`;
+        else {
+          res.drafted = true;
+          for (const p of m.permits) {
+            await resetSnapshot(p);
+            await supabase.from("permit_notes").insert({ permit_id: p.id, body: `Amendment e-mail drafted in Gmail${m.agentName ? ` for agent ${m.agentName}` : ""} (${m.n} change(s)). Subject: ${m.subject}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+          }
+        }
+      } catch (e) { res.error = e.message; }
+      out.push(res);
+    }
+    setBusy(false); setResults(out); setStep("done"); onSaved();
+  }
+  const overlay = { position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 };
+  const box = { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 820, maxWidth: "95vw", maxHeight: "92vh", overflow: "auto" };
+  return (
+    <div style={overlay} onClick={() => !busy && onClose()}>
+      <div role="dialog" aria-modal="true" aria-label="Schedule changes since the request" className="modal-pop" onClick={e => e.stopPropagation()} style={box}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Schedule changes since the request</div>
+          <button onClick={onClose} disabled={busy} style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
+        </div>
+        {step === "choose" && <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>These requests were sent for a schedule that has changed since. Tick the ones to amend. Requests to the same agent go in one e-mail. A request you consider up to date can be marked as handled without an e-mail.</div>
+          {!permitData.snapshotReady && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>Run migration 00038_permit_request_snapshot.sql in Supabase first.</div>}
+          {list.map(p => { const c = changes.get(p.id); return <div key={p.id} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px", marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input type="checkbox" aria-label={`Amend ${stateLabel(p.state)}`} checked={pick.has(p.id)} onChange={e => setPick(prev => { const n = new Set(prev); e.target.checked ? n.add(p.id) : n.delete(p.id); return n; })} />
+              <b>{stateLabel(p.state)}</b><span style={{ fontSize: 12, color: C.muted }}>{p.kind === "landing" ? "Landing" : "Overfly"} · {p.validFrom || "…"} → {p.validTo || "…"} · {p.agentId ? (agents.find(a => a.id === p.agentId)?.name || "agent") : "direct"}</span>
+              <span style={{ fontSize: 12 }}><span style={{ color: C.green }}>+{c.added.length}</span> <span style={{ color: C.red }}>−{c.removed.length}</span> <span style={{ color: C.amber }}>~{c.changed.length}</span></span>
+              <button onClick={() => markHandled(p)} style={{ ...miniBtn, marginLeft: "auto" }}>Mark as handled</button>
+            </div>
+            <pre style={{ whiteSpace: "pre-wrap", fontFamily: MONO, fontSize: 11, color: C.muted, margin: "6px 0 0", maxHeight: 120, overflow: "auto" }}>{amendmentText(c)}</pre>
+          </div>; })}
+          <div style={{ display: "flex", marginTop: 10 }}>
+            <button disabled={pick.size === 0 || !permitData.snapshotReady} onClick={toReview} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Next: check e-mails ({pick.size})</button>
+          </div>
+        </>}
+        {step === "review" && <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Check each e-mail. <b>Create drafts</b> puts them in Gmail → Drafts; nothing is sent. The requests are then treated as up to date.</div>
+          {msgs.map(m => <div key={m.id} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "baseline", marginBottom: 6 }}><b>{m.permits.map(p => stateLabel(p.state)).join(", ")}</b><span style={{ fontSize: 12, color: C.muted }}>{m.n} change(s){m.agentName ? ` · via ${m.agentName}` : " · direct"}</span></div>
+            {!extractEmails(m.to).length && <div style={{ fontSize: 12, color: C.red, marginBottom: 4 }}>⚠ No e-mail address ({m.agentName ? "Agents & forms" : "States → Contact"}). The draft will have no recipient.</div>}
+            <FieldSm label="To"><input value={m.to} onChange={e => patchMsg(m.id, { to: e.target.value })} style={inputStyle} /></FieldSm>
+            <div style={{ height: 6 }} />
+            <FieldSm label="Subject"><input value={m.subject} onChange={e => patchMsg(m.id, { subject: e.target.value })} style={inputStyle} /></FieldSm>
+            <div style={{ height: 6 }} />
+            <FieldSm label="Text"><textarea value={m.text} onChange={e => patchMsg(m.id, { text: e.target.value })} rows={14} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12, resize: "vertical" }} /></FieldSm>
+          </div>)}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={busy} onClick={() => setStep("choose")} style={miniBtn}>Back</button>
+            <button disabled={busy || msgs.some(m => !m.subject.trim() || !m.text.trim())} onClick={createAll} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Creating…" : `Create ${msgs.length} draft${msgs.length === 1 ? "" : "s"}`}</button>
+          </div>
+        </>}
+        {step === "done" && <>
+          {results.map(r => <div key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "6px 0", fontSize: 12.5, color: r.error ? C.red : C.text }}><b>{r.label}</b>: {r.drafted ? "amendment drafted in Gmail." : `not drafted — ${r.error} The request still shows its changes.`}</div>)}
+          <div style={{ fontSize: 12, color: C.muted, margin: "10px 0" }}>Open Gmail → Drafts to check and send.</div>
+          <button onClick={onClose} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Close</button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpToFlight, pushToast }) {
   const [sub, setSub] = useState("requests");
   const [statusFilter, setStatusFilter] = useState("active");
@@ -7604,6 +7727,11 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const routeMap = useMemo(() => buildRouteMap(routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [routes]);
   const settings = useMemo(() => new Map(states.map(s => [normState(s.state), s])), [states]);
   const airportMap = useMemo(() => buildAirportMap((permitData.airports || []).map(a => ({ airport: a.airport, state: a.state }))), [permitData.airports]);
+  const changesByPermit = useMemo(() => {
+    const m = new Map();
+    permits.forEach(p => { if (!["draft", "submitted", "approved"].includes(p.status)) return; const ch = permitChanges(p, flights, routeMap, airportMap, todayStr); if (ch && ch.count) m.set(p.id, ch); });
+    return m;
+  }, [permits, flights, routeMap, airportMap, todayStr]);
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr, airportMap), [flights, routeMap, permits, settings, todayStr, airportMap]);
   const unmappedAp = useMemo(() => unmappedAirports(flights, airportMap, todayStr), [flights, airportMap, todayStr]);
   const proposals = permitData.proposals || [];
@@ -7860,6 +7988,11 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       </div>
 
       {sub === "requests" && <>
+        {changesByPermit.size > 0 && <div role="status" style={{ border: `1px solid ${C.amber}88`, background: C.amberSoft, borderRadius: 12, padding: "8px 12px", marginBottom: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12.5, fontWeight: 600 }}>Schedule changed since {changesByPermit.size} request{changesByPermit.size === 1 ? " was" : "s were"} sent</span>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{[...changesByPermit.keys()].slice(0, 6).map(id => stateLabel(permits.find(p => p.id === id)?.state)).join(", ")}{changesByPermit.size > 6 ? "…" : ""}</span>
+          {canEdit && <button onClick={() => setModal({ amend: true })} style={{ ...miniBtn, marginLeft: "auto", fontWeight: 600 }}>Prepare amendments…</button>}
+        </div>}
         {reminders.length > 0 && <div style={{ marginBottom: 12, border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px" }}>
           {reminders.map(r => <div key={r.id} onClick={() => setModal({ permit: permits.find(p => p.id === r.permitId) })} style={{ fontSize: 12.5, padding: "3px 0", cursor: "pointer", color: sevColor(r.severity) }}>{r.severity === "error" ? "⚠ " : "• "}{r.message}</div>)}
         </div>}
@@ -7884,7 +8017,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               const eff = effectiveStatus(p, todayStr);
               return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer", background: picked.has(p.id) ? C.amberSoft : undefined }}>
                 {canEdit && <td style={td} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${normState(p.state)} request`} checked={picked.has(p.id)} onChange={e => setPicked(prev => { const n = new Set(prev); e.target.checked ? n.add(p.id) : n.delete(p.id); return n; })} /></td>}
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}{changesByPermit.get(p.id) ? <span title="Flights added, cancelled or retimed since the request was sent" style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: C.amber, fontFamily: SANS }}>schedule changed (+{changesByPermit.get(p.id).added.length} −{changesByPermit.get(p.id).removed.length} ~{changesByPermit.get(p.id).changed.length})</span> : null}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}{eff === "approved" && p.validTo && daysBetween(todayStr, p.validTo) <= 30 ? <div style={{ color: daysBetween(todayStr, p.validTo) <= 7 ? C.red : C.amber, fontFamily: SANS }}>ends in {daysBetween(todayStr, p.validTo)} day(s)</div> : null}</td>
                 <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
@@ -8187,7 +8320,8 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       </>}
 
       {modal?.wizard && <RequestWizard permitData={permitData} permits={permits} flights={flights} resources={resources} routeMap={routeMap} airportMap={airportMap} settings={settings} gaps={gaps} todayStr={todayStr} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
-      {modal && !modal.wizard && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} flights={flights} routeMap={routeMap} airportMap={airportMap} settings={settings} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+      {modal?.amend && <AmendmentModal permitData={permitData} permits={permits} flights={flights} resources={resources} routeMap={routeMap} airportMap={airportMap} settings={settings} changes={changesByPermit} todayStr={todayStr} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+      {modal && !modal.wizard && !modal.amend && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} flights={flights} routeMap={routeMap} airportMap={airportMap} settings={settings} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
     </div>
   );
 }
