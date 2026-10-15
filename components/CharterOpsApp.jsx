@@ -5,9 +5,9 @@ import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
 import { noteTextForEmail } from "../lib/permit-mail";
 import {
-  normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
+  coverageFor, addDaysStr, daysBetween, normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
-import { buildRequestEmail, extractEmails } from "../lib/permit-request";
+import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, renderTemplate, unknownPlaceholders, pickTemplate, requestVars, buildFromTemplate } from "../lib/permit-request";
 import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
@@ -6853,7 +6853,7 @@ const PERMIT_STATUS_META = {
 };
 function mapPermit(r) {
   return { id: r.id, state: r.state, status: r.status, validFrom: r.valid_from, validTo: r.valid_to, resourceIds: r.resource_ids || [],
-    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], validDates: r.valid_dates || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
+    kind: r.kind || "overfly", airport: r.airport || "", flightRefs: r.flight_refs || [], validDates: r.valid_dates || [], permitNumber: r.permit_number, authority: r.authority, authorityRef: r.authority_ref, submittedAt: r.submitted_at, decidedAt: r.decided_at, agentId: r.agent_id || null, notes: r.notes, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 async function fetchPermitData() {
   const results = await Promise.all([
@@ -6865,14 +6865,17 @@ async function fetchPermitData() {
     supabase.from("permit_emails").select("*").order("received_at", { ascending: false }).limit(300),
     supabase.from("airport_states").select("*").order("airport"),
     supabase.from("permit_proposals").select("*").order("created_at", { ascending: false }).limit(200),
+    supabase.from("permit_agents").select("*").order("name"),
+    supabase.from("permit_templates").select("*"),
   ]);
+  const agRes = results[8], tplRes = results[9]; // migration 00036: absence must not break the rest
   const apRes = results[6], propRes = results[7]; // migration 00031: their absence must not break the rest
   // the e-mail inbox has its own migration (00029): its absence must not break the rest of Permits
   const mailRes = results[5];
   const err = results.slice(0, 5).find(r => r.error)?.error;
   if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false };
   const [p, r, s, d, n] = results.slice(0, 5).map(x => x.data || []);
-  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note })), docs: d, notes: n };
+  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, agents: agRes.error ? [] : (agRes.data || []), templates: tplRes.error ? [] : (tplRes.data || []), agentsReady: !agRes.error && !tplRes.error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note, channel: x.channel || "authority", agentId: x.agent_id || null })), docs: d, notes: n };
 }
 function describePermitEvent(r) {
   const d = r.details || {};
@@ -6921,7 +6924,8 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     if (!stateOk || !datesOk) return;
     setBusy(true);
     if (isNew) {
-      const { error } = await supabase.from("overfly_permits").insert({ ...toRow(), status: "draft" });
+      const cfg = settings.get(normState(form.state));
+      const { error } = await supabase.from("overfly_permits").insert({ ...toRow(), status: "draft", ...(permitData.agentsReady && cfg?.channel === "agent" && cfg.agentId ? { agent_id: cfg.agentId } : {}) });
       setBusy(false);
       if (error) { pushToast(`Could not save the request: ${error.message}`, "warn"); return; }
       pushToast(`${normState(form.state)} permit request created as a draft.`, "ok");
@@ -6962,13 +6966,17 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
       .sort((a, b) => a.start - b.start);
     const setting = settings.get(st);
     const { data: auth } = await supabase.auth.getUser();
-    const mail = buildRequestEmail({
-      state: st, kind: form.kind, airports: form.kind === "landing" ? [...new Set(covered.map(f => normAirport(f.destination)))] : [], validFrom: form.validFrom, validTo: form.validTo, authority: form.authority.trim() || setting?.authority || "",
+    const agentList = permitData.agents || [];
+    const ag = permit?.agentId ? agentList.find(x => x.id === permit.agentId) : (setting?.channel === "agent" ? agentList.find(x => x.id === setting.agentId) : null);
+    const airportsFor = form.kind === "landing" ? [...new Set(covered.map(f => normAirport(f.destination)))] : [];
+    const tpl = pickTemplate({ templates: permitData.templates || [], state: st, agentId: ag?.id, kind: form.kind, channel: ag ? "agent" : "authority" });
+    const mail = buildFromTemplate(tpl, requestVars({
+      state: st, country: countryName(st), kind: form.kind, airports: airportsFor, validFrom: form.validFrom, validTo: form.validTo, authority: form.authority.trim() || setting?.authority || "", agent: ag?.name || "",
       aircraft: form.resourceIds.map(id => resources.find(r => r.id === id)?.code).filter(Boolean),
       flights: covered.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, aircraft: resources.find(r => r.id === f.resourceId)?.code })),
       signature: auth?.user?.email || "",
-    });
-    const to = extractEmails(setting?.contact);
+    }));
+    const to = extractEmails(ag ? ag.contact : setting?.contact);
     setDrafting(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -7126,6 +7134,326 @@ function loadGeo() {
   return GEO_PROMISE;
 }
 
+// Permits -> "Agents & forms": handling agents and the predefined request e-mail for each country / agent.
+function AgentsFormsPanel({ permitData, canEdit, onReload, pushToast }) {
+  const agents = permitData.agents || [], templates = permitData.templates || [];
+  const [agentForm, setAgentForm] = useState({ id: null, name: "", contact: "", note: "" });
+  const [scope, setScope] = useState("default"); // default | agent:<id> | state:<CODE>
+  const [stateCode, setStateCode] = useState("");
+  const [kind, setKind] = useState("overfly");
+  const [draft, setDraft] = useState({ subject: "", body: "" });
+  const [busy, setBusy] = useState(false);
+  const scopeKey = scope === "state" ? "state:" + stateCode : scope;
+  const scopeRow = useMemo(() => {
+    if (scopeKey === "default") return templates.find(t => t.scope === "default" && t.kind === kind) || null;
+    if (scopeKey.startsWith("agent:")) return templates.find(t => t.scope === "agent" && t.agent_id === scopeKey.slice(6) && t.kind === kind) || null;
+    if (scopeKey.startsWith("state:") && scopeKey.length > 6) return templates.find(t => t.scope === "state" && normState(t.state) === scopeKey.slice(6) && t.kind === kind) || null;
+    return null;
+  }, [templates, scopeKey, kind]);
+  const builtin = BUILTIN_TEMPLATES[scopeKey.startsWith("agent:") ? "agent" : "authority"];
+  useEffect(() => { setDraft(scopeRow ? { subject: scopeRow.subject, body: scopeRow.body } : { subject: builtin.subject, body: builtin.body }); }, [scopeRow?.id, scopeRow?.updated_at, scopeKey, kind]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pickable = scope !== "state" || stateCode;
+  const unknown = unknownPlaceholders(draft.subject + " " + draft.body);
+  const sample = useMemo(() => {
+    const ag = scopeKey.startsWith("agent:") ? agents.find(a => a.id === scopeKey.slice(6)) : null;
+    const v = requestVars({ state: stateCode || "TM", country: stateCode ? countryName(stateCode) : "Turkmenistan", kind, airports: kind === "landing" ? ["ASB"] : [], validFrom: "2026-11-01", validTo: "2026-11-30", aircraft: ["UP-B3748"], agent: ag?.name || "Agent name", authority: "Civil Aviation Authority", operator: "Your airline", signature: "Your name",
+      flights: [{ ref: "DV123", origin: "ALA", destination: "ASB", start: new Date("2026-11-02T04:05:00Z"), aircraft: "UP-B3748" }] });
+    return buildFromTemplate(draft, v);
+  }, [draft, scopeKey, stateCode, kind, agents]);
+
+  async function saveAgent() {
+    if (!agentForm.name.trim()) { pushToast("Enter the agent's name.", "warn"); return; }
+    const row = { name: agentForm.name.trim(), contact: agentForm.contact.trim() || null, note: agentForm.note.trim() || null };
+    const { error } = agentForm.id ? await supabase.from("permit_agents").update(row).eq("id", agentForm.id) : await supabase.from("permit_agents").insert(row);
+    if (error) { pushToast(`Agent not saved: ${error.message}`, "warn"); return; }
+    setAgentForm({ id: null, name: "", contact: "", note: "" }); pushToast("Agent saved.", "ok"); onReload();
+  }
+  async function deleteAgent(a) {
+    const using = (permitData.states || []).filter(s => s.agentId === a.id).length;
+    if (!window.confirm(`Delete agent ${a.name}?${using ? ` ${using} countr${using === 1 ? "y" : "ies"} will go back to "Authority directly".` : ""} Its forms are deleted too; permits already requested through it are kept.`)) return;
+    const { data, error } = await supabase.from("permit_agents").delete().eq("id", a.id).select("id");
+    if (error || !data?.length) { pushToast(`Could not delete: ${error?.message || "no permission"}`, "warn"); return; }
+    if (scopeKey === "agent:" + a.id) setScope("default");
+    onReload();
+  }
+  async function saveForm() {
+    if (!pickable) return;
+    if (!draft.subject.trim() || !draft.body.trim()) { pushToast("Subject and text are both required.", "warn"); return; }
+    setBusy(true);
+    const base = { kind, subject: draft.subject.trim(), body: draft.body };
+    let res;
+    if (scopeRow) res = await supabase.from("permit_templates").update(base).eq("id", scopeRow.id).select("id");
+    else {
+      const ins = scopeKey === "default" ? { scope: "default" } : scopeKey.startsWith("agent:") ? { scope: "agent", agent_id: scopeKey.slice(6) } : { scope: "state", state: scopeKey.slice(6) };
+      res = await supabase.from("permit_templates").insert({ ...ins, ...base }).select("id");
+    }
+    setBusy(false);
+    if (res.error || !res.data?.length) { pushToast(`Form not saved: ${res.error?.message || "no permission"}`, "warn"); return; }
+    pushToast("Form saved.", "ok"); onReload();
+  }
+  async function resetForm() {
+    if (!scopeRow || !window.confirm("Go back to the built-in wording for this form?")) return;
+    const { data, error } = await supabase.from("permit_templates").delete().eq("id", scopeRow.id).select("id");
+    if (error || !data?.length) { pushToast(`Could not reset: ${error?.message || "no permission"}`, "warn"); return; }
+    onReload();
+  }
+  const label = t => t.scope === "default" ? "General (direct to authority)" : t.scope === "agent" ? `Agent: ${agents.find(a => a.id === t.agent_id)?.name || "?"}` : `Country: ${countryName(t.state)} (${normState(t.state)})`;
+  const sec = { fontSize: 12.5, fontWeight: 600, margin: "14px 0 6px" };
+  return <>
+    {!permitData.agentsReady && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", fontSize: 12.5, marginBottom: 10 }}>Agents and forms need migration <b>00036_permit_agents_templates.sql</b> in Supabase.</div>}
+    <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>Each country is requested either from its authority directly or through a handling agent (choose per country under <b>States</b>). Each way has a predefined e-mail form that the request wizard fills in; a form saved for one country is used before the agent's or the general form.</div>
+
+    <div style={sec}>Handling agents</div>
+    {canEdit && <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
+      <FieldSm label="Agent name"><input value={agentForm.name} onChange={e => setAgentForm({ ...agentForm, name: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+      <FieldSm label="E-mail address(es)"><input value={agentForm.contact} onChange={e => setAgentForm({ ...agentForm, contact: e.target.value })} placeholder="permits@agent.com, ops@agent.com" style={{ ...inputStyle, width: 280 }} /></FieldSm>
+      <FieldSm label="Note"><input value={agentForm.note} onChange={e => setAgentForm({ ...agentForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+      <button disabled={!permitData.agentsReady} onClick={saveAgent} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{agentForm.id ? "Save agent" : "Add agent"}</button>
+      {agentForm.id && <button onClick={() => setAgentForm({ id: null, name: "", contact: "", note: "" })} style={miniBtn}>Cancel</button>}
+    </div>}
+    <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+      <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Agent</th><th style={th}>E-mail</th><th style={th}>Countries</th><th style={th}>Note</th><th style={th}></th></tr></thead>
+      <tbody>
+        {agents.length === 0 && <tr><td colSpan={5} style={{ ...td, color: C.faint, textAlign: "center", padding: 16 }}>No agents yet. Without agents every country is requested from its authority directly.</td></tr>}
+        {agents.map(a => <tr key={a.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+          <td style={{ ...td, fontWeight: 600 }}>{a.name}</td><td style={td}>{a.contact || <span style={{ color: C.red }}>no e-mail</span>}</td>
+          <td style={td}>{(permitData.states || []).filter(s => s.agentId === a.id).map(s => normState(s.state)).join(", ") || <span style={{ color: C.faint }}>none</span>}</td>
+          <td style={td}>{a.note || "—"}</td>
+          <td style={{ ...td, textAlign: "right" }}>{canEdit && <><button onClick={() => setAgentForm({ id: a.id, name: a.name, contact: a.contact || "", note: a.note || "" })} style={miniBtn}>Edit</button>{" "}<button onClick={() => deleteAgent(a)} style={{ ...miniBtn, color: C.red }}>Delete</button></>}</td>
+        </tr>)}
+      </tbody>
+    </table></div>
+
+    <div style={sec}>Request forms</div>
+    <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 8 }}>
+      <FieldSm label="Form for">
+        <select aria-label="Form scope" value={scope.startsWith("agent:") ? scope : scope} onChange={e => setScope(e.target.value)} style={{ ...inputStyle, width: 240 }}>
+          <option value="default">General (direct to authority)</option>
+          {agents.map(a => <option key={a.id} value={"agent:" + a.id}>Agent: {a.name}</option>)}
+          <option value="state">A specific country…</option>
+        </select>
+      </FieldSm>
+      {scope === "state" && <FieldSm label="Country">
+        <select aria-label="Form country" value={stateCode} onChange={e => setStateCode(e.target.value)} style={{ ...inputStyle, width: 220 }}>
+          <option value="">Choose a country…</option>
+          {allCountries().map(([c, n]) => <option key={c} value={c}>{n} ({c}){templates.some(t => t.scope === "state" && normState(t.state) === c) ? " · has form" : ""}</option>)}
+        </select>
+      </FieldSm>}
+      <FieldSm label="Permit type"><select aria-label="Form permit type" value={kind} onChange={e => setKind(e.target.value)} style={{ ...inputStyle, width: 130 }}><option value="overfly">Overfly</option><option value="landing">Landing</option></select></FieldSm>
+      <span style={{ fontSize: 11.5, color: C.faint, paddingBottom: 8 }}>{pickable ? (scopeRow ? "Saved form" : "Built-in wording (not saved yet)") : "Choose a country"}</span>
+    </div>
+    {pickable && <>
+      <FieldSm label="Subject"><input value={draft.subject} onChange={e => setDraft({ ...draft, subject: e.target.value })} disabled={!canEdit} style={inputStyle} /></FieldSm>
+      <div style={{ height: 8 }} />
+      <FieldSm label="Text"><textarea value={draft.body} onChange={e => setDraft({ ...draft, body: e.target.value })} disabled={!canEdit} rows={14} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12, resize: "vertical" }} /></FieldSm>
+      <div style={{ fontSize: 11, color: C.faint, margin: "6px 0" }}>Fields that are filled in automatically: {TEMPLATE_VARS.map(([k, d]) => <span key={k} title={d} style={{ fontFamily: MONO, marginRight: 8 }}>{`{{${k}}}`}</span>)}</div>
+      {unknown.length > 0 && <div role="alert" style={{ fontSize: 12, color: C.red, marginBottom: 6 }}>Unknown field{unknown.length > 1 ? "s" : ""}: {unknown.map(u => `{{${u}}}`).join(", ")} — they will appear as written.</div>}
+      {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <button disabled={busy || !permitData.agentsReady || unknown.length > 0} onClick={saveForm} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Saving…" : "Save form"}</button>
+        {scopeRow && <button onClick={resetForm} style={miniBtn}>Back to built-in wording</button>}
+      </div>}
+      <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, margin: "8px 0 4px" }}>Preview with sample data</div>
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "8px 12px", background: C.panel2 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, marginBottom: 6 }}>{sample.subject}</div>
+        <pre style={{ whiteSpace: "pre-wrap", fontFamily: SANS, fontSize: 12, margin: 0 }}>{sample.body}</pre>
+      </div>
+    </>}
+    {templates.length > 0 && <>
+      <div style={sec}>Saved forms ({templates.length})</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {templates.map(t => <button key={t.id} onClick={() => { setKind(t.kind); if (t.scope === "default") setScope("default"); else if (t.scope === "agent") setScope("agent:" + t.agent_id); else { setScope("state"); setStateCode(normState(t.state)); } }} style={miniBtn}>{label(t)} · {t.kind}</button>)}
+      </div>
+    </>}
+  </>;
+}
+
+// "Request permits" wizard: choose countries (from what is missing, or any country) -> check the e-mail each one
+// will send (to the authority or to the handling agent, filled from the predefined form) -> create the requests
+// and put the e-mails into Gmail as drafts. Nothing is ever sent from here.
+function RequestWizard({ permitData, permits, flights, resources, routeMap, airportMap, settings, gaps, todayStr, onClose, onSaved, pushToast }) {
+  const agents = permitData.agents || [], templates = permitData.templates || [];
+  const [step, setStep] = useState("choose"); // choose | review | done
+  const [busy, setBusy] = useState(false);
+  const [markSubmitted, setMarkSubmitted] = useState(false);
+  const [results, setResults] = useState([]);
+  const [addState, setAddState] = useState("");
+  const [addKind, setAddKind] = useState("overfly");
+  const codeOf = id => resources.find(r => r.id === id)?.code;
+  const channelFor = st => { const c = settings.get(normState(st)); return c?.channel === "agent" && c.agentId && agents.some(a => a.id === c.agentId) ? { channel: "agent", agentId: c.agentId } : { channel: "authority", agentId: "" }; };
+  const [rows, setRows] = useState(() => {
+    const m = new Map();
+    gaps.filter(g => ["none", "expired", "rejected"].includes(g.reason)).forEach(g => {
+      const key = `${g.kind}|${g.state}`;
+      const r = m.get(key) || { key, kind: g.kind, state: g.state, airports: [], validFrom: g.firstDay, validTo: g.lastDay, resourceIds: [], flightCount: 0, fileBy: null, overdue: false, leadDays: g.leadDays, picked: true, ...channelFor(g.state) };
+      if (g.firstDay < r.validFrom) r.validFrom = g.firstDay;
+      if (g.lastDay > r.validTo) r.validTo = g.lastDay;
+      if (g.resourceId && !r.resourceIds.includes(g.resourceId)) r.resourceIds.push(g.resourceId);
+      g.airports.forEach(a => { if (!r.airports.includes(a)) r.airports.push(a); });
+      r.flightCount += g.flightCount;
+      if (g.fileBy && (!r.fileBy || g.fileBy < r.fileBy)) r.fileBy = g.fileBy;
+      r.overdue = r.overdue || g.overdue;
+      m.set(key, r);
+    });
+    return [...m.values()].sort((a, b) => (a.fileBy || "9").localeCompare(b.fileBy || "9") || a.state.localeCompare(b.state));
+  });
+  const patch = (key, p) => setRows(rs => rs.map(r => r.key === key ? { ...r, ...p } : r));
+  useEffect(() => { const h = e => { if (e.key === "Escape" && !busy) onClose(); }; window.addEventListener("keydown", h); return () => window.removeEventListener("keydown", h); }, [onClose, busy]);
+
+  function addCountry() {
+    const st = normState(addState); if (!st) return;
+    const key = `${addKind}|${st}`;
+    if (rows.some(r => r.key === key)) { pushToast("That country is already in the list.", "warn"); return; }
+    setRows(rs => [...rs, { key, kind: addKind, state: st, airports: [], validFrom: todayStr, validTo: "", resourceIds: [], flightCount: 0, fileBy: null, overdue: false, leadDays: settings.get(st)?.leadDays ?? DEFAULT_LEAD_DAYS, picked: true, manual: true, ...channelFor(st) }]);
+    setAddState("");
+  }
+  const flightsFor = r => flights.filter(f => {
+    if (f.status === "cancelled") return false;
+    const day = dayOf(f.start);
+    if (day < (r.validFrom && r.validFrom > todayStr ? r.validFrom : todayStr) || (r.validTo && day > r.validTo)) return false;
+    if (r.resourceIds.length && !r.resourceIds.includes(f.resourceId)) return false;
+    return flightNeeds(f, routeMap, airportMap).needs.some(n => n.kind === r.kind && normState(n.state) === normState(r.state) && (r.kind !== "landing" || r.airports.length !== 1 || normAirport(n.airport) === r.airports[0]))
+      && !coverageFor(permits, r.state, day, f.resourceId, { kind: r.kind, ref: f.ref, airport: normAirport(f.destination) }).covered;
+  }).sort((a, b) => a.start - b.start);
+
+  async function toReview() {
+    const { data: auth } = await supabase.auth.getUser();
+    const built = rows.filter(r => r.picked).map(r => {
+      const fl = flightsFor(r);
+      const ag = r.channel === "agent" ? agents.find(a => a.id === r.agentId) : null;
+      const cfg = settings.get(normState(r.state));
+      const tpl = pickTemplate({ templates, state: r.state, agentId: r.agentId, kind: r.kind, channel: r.channel });
+      const vars = requestVars({ state: r.state, country: countryName(r.state), kind: r.kind, airports: r.kind === "landing" ? (r.airports.length ? r.airports : [...new Set(fl.map(f => normAirport(f.destination)))]) : [],
+        validFrom: r.validFrom, validTo: r.validTo, aircraft: r.resourceIds.map(codeOf).filter(Boolean), agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || ""), signature: auth?.user?.email || "",
+        flights: fl.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, aircraft: codeOf(f.resourceId) })) });
+      const mail = buildFromTemplate(tpl, vars);
+      const to = extractEmails(ag ? ag.contact : cfg?.contact);
+      return { ...r, to: to.join(", "), subject: mail.subject, text: mail.body, source: tpl.source, listed: fl.length, agentName: ag?.name || "", unknown: unknownPlaceholders(tpl.subject + " " + tpl.body) };
+    });
+    setRows(rs => rs.map(r => built.find(b => b.key === r.key) || r));
+    setStep("review");
+  }
+  const picked = rows.filter(r => r.picked);
+  const dateBad = r => (r.validFrom && r.validTo && r.validTo < r.validFrom) || !r.validFrom || !r.validTo;
+
+  async function createAll() {
+    setBusy(true);
+    const out = [];
+    const { data: { session } } = await supabase.auth.getSession();
+    const { data: auth } = await supabase.auth.getUser();
+    for (const r of picked) {
+      const res = { key: r.key, state: r.state, kind: r.kind };
+      try {
+        const row = { kind: r.kind, airport: r.kind === "landing" && r.airports.length === 1 ? r.airports[0] : null, state: normState(r.state), valid_from: r.validFrom || null, valid_to: r.validTo || null, resource_ids: r.resourceIds, status: markSubmitted ? "submitted" : "draft", ...(markSubmitted ? { submitted_at: new Date().toISOString() } : {}), ...(permitData.agentsReady ? { agent_id: r.channel === "agent" ? r.agentId : null } : {}) };
+        const ins = await retryNetwork(() => supabase.from("overfly_permits").insert(row).select("id"));
+        if (ins.error || !ins.data?.length) throw new Error(ins.error?.message || "request not created");
+        res.permitId = ins.data[0].id;
+        const resp = await fetch("/api/permits/draft", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ to: extractEmails(r.to), subject: r.subject, body: r.text }) });
+        const j = await resp.json().catch(() => ({}));
+        if (!resp.ok || j.error) res.draftError = j.error || `Draft failed (${resp.status}).`;
+        else res.drafted = true;
+        await supabase.from("permit_notes").insert({ permit_id: res.permitId, body: res.drafted ? `Request e-mail drafted in Gmail${r.agentName ? ` for agent ${r.agentName}` : ""} (${r.listed} flight(s) listed). Subject: ${r.subject}` : `Request created from the wizard${r.agentName ? ` (via agent ${r.agentName})` : ""}; the e-mail was not drafted: ${res.draftError}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+      } catch (e) { res.error = e.message; }
+      out.push(res);
+    }
+    setBusy(false); setResults(out); setStep("done"); onSaved();
+  }
+  async function copy(text) { try { await navigator.clipboard.writeText(text); pushToast("Copied.", "ok"); } catch { pushToast("Copy failed — select the text and copy it by hand.", "warn"); } }
+
+  const overlay = { position: "fixed", inset: 0, background: "rgba(58,54,47,0.18)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 90 };
+  const box = { background: C.panel, border: `1px solid ${C.border}`, borderRadius: 20, boxShadow: "0 20px 50px rgba(58,54,47,0.14)", padding: 20, width: 860, maxWidth: "95vw", maxHeight: "92vh", overflow: "auto" };
+  const countries = allCountries();
+  return (
+    <div style={overlay} onClick={() => !busy && onClose()}>
+      <div role="dialog" aria-modal="true" aria-label="Request permits" className="modal-pop" onClick={e => e.stopPropagation()} style={box}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 600 }}>Request permits</div>
+          <span style={{ fontSize: 11.5, color: C.faint }}>{step === "choose" ? "Step 1 of 2 · choose countries" : step === "review" ? "Step 2 of 2 · check the e-mails" : "Done"}</span>
+          <button onClick={onClose} disabled={busy} aria-label="Close" style={{ ...miniBtn, marginLeft: "auto" }}>Close</button>
+        </div>
+
+        {step === "choose" && <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Countries with flights that have no permit and no request yet, most urgent first. Tick the ones to request now. Each goes to the authority or to the handling agent set for that country (change it here for this request only). You can also add a country that is not listed.</div>
+          <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}></th><th style={th}>Country</th><th style={th}>Type</th><th style={th}>From</th><th style={th}>To</th><th style={th}>Aircraft</th><th style={th}>Flights</th><th style={th}>File by</th><th style={th}>Goes to</th></tr></thead>
+            <tbody>
+              {rows.length === 0 && <tr><td colSpan={9} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>Nothing is missing — every upcoming flight has a permit or a request. You can still add a country below.</td></tr>}
+              {rows.map(r => <tr key={r.key} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
+                <td style={td}><input type="checkbox" aria-label={`Request ${stateLabel(r.state)}`} checked={r.picked} onChange={e => patch(r.key, { picked: e.target.checked })} /></td>
+                <td style={{ ...td, fontWeight: 600 }}>{stateLabel(r.state)}</td>
+                <td style={td}>{r.kind === "landing" ? `Landing${r.airports.length ? " " + r.airports.join("/") : ""}` : "Overfly"}</td>
+                <td style={td}><input type="date" aria-label="Valid from" value={r.validFrom} onChange={e => patch(r.key, { validFrom: e.target.value })} style={{ ...inputStyle, width: 130 }} /></td>
+                <td style={td}><input type="date" aria-label="Valid to" value={r.validTo} onChange={e => patch(r.key, { validTo: e.target.value })} style={{ ...inputStyle, width: 130 }} /></td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{r.resourceIds.length ? r.resourceIds.map(codeOf).join(", ") : "All"}</td>
+                <td style={td}>{r.manual ? <span style={{ color: C.faint }}>—</span> : r.flightCount}</td>
+                <td style={{ ...td, color: r.overdue ? C.red : undefined, fontWeight: r.overdue ? 600 : 400, fontFamily: MONO, fontSize: 11 }}>{r.fileBy ? `${r.fileBy}${r.overdue ? " · overdue" : ""}` : "—"}</td>
+                <td style={td}>
+                  <select aria-label={`Where to send the ${stateLabel(r.state)} request`} value={r.channel === "agent" && r.agentId ? r.agentId : "authority"} onChange={e => patch(r.key, e.target.value === "authority" ? { channel: "authority", agentId: "" } : { channel: "agent", agentId: e.target.value })} style={{ ...inputStyle, width: 170 }}>
+                    <option value="authority">Authority directly</option>
+                    {agents.map(a => <option key={a.id} value={a.id}>Agent: {a.name}</option>)}
+                  </select>
+                </td>
+              </tr>)}
+            </tbody>
+          </table></div>
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", margin: "12px 0" }}>
+            <FieldSm label="Add another country">
+              <select aria-label="Add another country" value={addState} onChange={e => setAddState(e.target.value)} style={{ ...inputStyle, width: 240 }}>
+                <option value="">Choose a country…</option>
+                {countries.map(([c, n]) => <option key={c} value={c}>{n} ({c})</option>)}
+              </select>
+            </FieldSm>
+            <FieldSm label="Type"><select aria-label="Type" value={addKind} onChange={e => setAddKind(e.target.value)} style={{ ...inputStyle, width: 120 }}><option value="overfly">Overfly</option><option value="landing">Landing</option></select></FieldSm>
+            <button disabled={!addState} onClick={addCountry} style={miniBtn}>Add</button>
+            <span style={{ marginLeft: "auto" }} />
+            <button disabled={picked.length === 0 || picked.some(dateBad)} onClick={toReview} title={picked.some(dateBad) ? "Every ticked country needs From and To dates" : ""} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Next: check e-mails ({picked.length})</button>
+          </div>
+          {picked.some(dateBad) && <div style={{ fontSize: 11.5, color: C.red }}>Fill in From and To for every ticked country (To must not be before From).</div>}
+        </>}
+
+        {step === "review" && <>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Check each e-mail and edit it if needed. <b>Create requests and drafts</b> makes one request per country (status Draft) and puts each e-mail into Gmail → Drafts. Nothing is sent: you open Gmail, check and press Send.</div>
+          {picked.map(r => {
+            const warn = [];
+            if (!extractEmails(r.to).length) warn.push(r.channel === "agent" ? "No e-mail address for this agent (Permits → Agents & forms)." : "No authority e-mail for this country (Permits → States → Contact). The draft will have no recipient.");
+            if (r.listed === 0) warn.push("No upcoming flights match this country and period — the flight list will say 'to be confirmed'.");
+            if (r.unknown?.length) warn.push(`The form has unknown fields: ${r.unknown.map(u => `{{${u}}}`).join(", ")}.`);
+            return <div key={r.key} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", marginBottom: 6 }}>
+                <b style={{ fontSize: 13 }}>{stateLabel(r.state)}</b><span style={{ fontSize: 12, color: C.muted }}>{r.kind === "landing" ? "Landing" : "Overfly"} · {r.validFrom} → {r.validTo} · {r.listed} flight(s)</span>
+                <Badge color={r.channel === "agent" ? C.amber : C.muted}>{r.channel === "agent" ? `VIA ${r.agentName.toUpperCase()}` : "DIRECT"}</Badge>
+                <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{r.source}</span>
+              </div>
+              {warn.map((w, i) => <div key={i} style={{ fontSize: 12, color: C.red, marginBottom: 4 }}>⚠ {w}</div>)}
+              <FieldSm label="To"><input value={r.to} onChange={e => patch(r.key, { to: e.target.value })} style={inputStyle} /></FieldSm>
+              <div style={{ height: 6 }} />
+              <FieldSm label="Subject"><input value={r.subject} onChange={e => patch(r.key, { subject: e.target.value })} style={inputStyle} /></FieldSm>
+              <div style={{ height: 6 }} />
+              <FieldSm label="Text"><textarea value={r.text} onChange={e => patch(r.key, { text: e.target.value })} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12, resize: "vertical" }} /></FieldSm>
+              <div style={{ marginTop: 6 }}><button onClick={() => copy(`${r.subject}\n\n${r.text}`)} style={miniBtn}>Copy text</button></div>
+            </div>;
+          })}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, margin: "8px 0" }}>
+            <input type="checkbox" checked={markSubmitted} onChange={e => setMarkSubmitted(e.target.checked)} />
+            Mark the requests as <b>Submitted</b> now (leave off to keep them as Draft until you have sent the e-mails)
+          </label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={busy} onClick={() => setStep("choose")} style={miniBtn}>Back</button>
+            <button disabled={busy || picked.some(r => !r.subject.trim() || !r.text.trim())} onClick={createAll} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Creating…" : `Create ${picked.length} request${picked.length === 1 ? "" : "s"} and drafts`}</button>
+          </div>
+        </>}
+
+        {step === "done" && <>
+          {results.map(r => <div key={r.key} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "6px 0", fontSize: 12.5, color: r.error ? C.red : r.draftError ? C.amber : C.text }}>
+            <b>{stateLabel(r.state)}</b> ({r.kind}): {r.error ? `not created — ${r.error}` : r.drafted ? "request created and e-mail drafted in Gmail." : `request created, but the e-mail was not drafted — ${r.draftError} Use "Copy text" from the permit, or draft it again from the permit.`}
+          </div>)}
+          <div style={{ fontSize: 12, color: C.muted, margin: "10px 0" }}>Open Gmail → Drafts to check and send. When the authority or agent answers, e-mails with the permit label are filed on the request automatically; enter the permit number and mark it approved in the request.</div>
+          <button onClick={onClose} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Close</button>
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpToFlight, pushToast }) {
   const [sub, setSub] = useState("requests");
   const [statusFilter, setStatusFilter] = useState("active");
@@ -7138,11 +7466,12 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [deleting, setDeleting] = useState(false);
   const [stateTableFilter, setStateTableFilter] = useState("");
   const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
-  const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
+  const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "", channel: "authority", agentId: "" });
   const todayStr = iso(new Date());
   const canEdit = !!perms.editFlight;
   const { permits, routes, states, error } = permitData;
   const emails = permitData.emails || [];
+  const agentsList = permitData.agents || [];
   const unassignedMail = emails.filter(m => m.status === "unassigned" || m.status === "error" || (m.status === "filed" && !m.permit_id));
   const routeMap = useMemo(() => buildRouteMap(routes.map(r => ({ origin: r.origin, destination: r.destination, states: r.states }))), [routes]);
   const settings = useMemo(() => new Map(states.map(s => [normState(s.state), s])), [states]);
@@ -7255,9 +7584,9 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   async function saveState() {
     const st = normState(stateForm.state);
     if (!st) { pushToast("Enter a State code or name.", "warn"); return; }
-    const { error: e } = await supabase.from("overfly_states").upsert({ state: st, lead_days: Math.max(0, Math.round(+stateForm.leadDays || 0)), authority: stateForm.authority.trim() || null, contact: stateForm.contact.trim() || null, note: stateForm.note.trim() || null }, { onConflict: "state" });
+    const { error: e } = await supabase.from("overfly_states").upsert({ state: st, lead_days: Math.max(0, Math.round(+stateForm.leadDays || 0)), authority: stateForm.authority.trim() || null, contact: stateForm.contact.trim() || null, note: stateForm.note.trim() || null, ...(permitData.agentsReady ? { channel: stateForm.channel === "agent" && stateForm.agentId ? "agent" : "authority", agent_id: stateForm.channel === "agent" && stateForm.agentId ? stateForm.agentId : null } : {}) }, { onConflict: "state" });
     if (e) { pushToast(`Not saved: ${e.message}`, "warn"); return; }
-    setStateForm({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" });
+    setStateForm({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "", channel: "authority", agentId: "" });
     pushToast(`${st} saved.`, "ok"); onReload();
   }
 
@@ -7393,8 +7722,12 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         <button onClick={() => setSub("received")} style={subBtn("received")}>Received ({receivedGroups.length})</button>
         <button onClick={() => setSub("routes")} style={subBtn("routes")}>Routes → States ({routes.length}{unmapped.length ? `, ${unmapped.length} unmapped` : ""})</button>
         <button onClick={() => setSub("states")} style={subBtn("states")}>States ({states.length})</button>
+        <button onClick={() => setSub("agents")} style={subBtn("agents")}>Agents & forms ({agentsList.length})</button>
         <button onClick={() => setSub("inbox")} style={subBtn("inbox")}>Mail inbox ({unassignedMail.length})</button>
-        {canEdit && <button onClick={() => setModal({ prefill: {} })} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>+ New request</button>}
+        {canEdit && <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button onClick={() => setModal({ wizard: true })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Request permits…</button>
+          <button onClick={() => setModal({ prefill: {} })} style={miniBtn} title="Enter one request by hand">+ Manual entry</button>
+        </span>}
       </div>
 
       {sub === "requests" && <>
@@ -7414,20 +7747,21 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
           <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>
             {canEdit && <th style={{ ...th, width: 28 }}><input type="checkbox" aria-label="Select all shown requests" checked={rows.length > 0 && rows.every(p => picked.has(p.id))} onChange={e => setPicked(e.target.checked ? new Set(rows.map(p => p.id)) : new Set())} /></th>}
-            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Submitted</th><th style={th}>Docs</th>{canEdit && <th style={th}></th>}
+            <th style={th}>State</th><th style={th}>Aircraft</th><th style={th}>Valid</th><th style={th}>Status</th><th style={th}>Permit no.</th><th style={th}>Authority ref.</th><th style={th}>Via</th><th style={th}>Submitted</th><th style={th}>Docs</th>{canEdit && <th style={th}></th>}
           </tr></thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={canEdit ? 10 : 8} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Map your routes first (Routes → States), then use Gaps to see what needs requesting." : "No requests match these filters."}</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={canEdit ? 11 : 9} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{permits.length === 0 ? "No permit requests yet. Press Request permits… to start, or map your routes first (Routes → States)." : "No requests match these filters."}</td></tr>}
             {rows.map(p => {
               const eff = effectiveStatus(p, todayStr);
               return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer", background: picked.has(p.id) ? C.amberSoft : undefined }}>
                 {canEdit && <td style={td} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${normState(p.state)} request`} checked={picked.has(p.id)} onChange={e => setPicked(prev => { const n = new Set(prev); e.target.checked ? n.add(p.id) : n.delete(p.id); return n; })} /></td>}
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
-                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}</td>
+                <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}{eff === "approved" && p.validTo && daysBetween(todayStr, p.validTo) <= 30 ? <div style={{ color: daysBetween(todayStr, p.validTo) <= 7 ? C.red : C.amber, fontFamily: SANS }}>ends in {daysBetween(todayStr, p.validTo)} day(s)</div> : null}</td>
                 <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
                 <td style={td}>{p.permitNumber || <span style={{ color: C.faint }}>—</span>}</td>
                 <td style={td}>{p.authorityRef || <span style={{ color: C.faint }}>—</span>}</td>
+                <td style={td}>{p.agentId ? (agentsList.find(a => a.id === p.agentId)?.name || "agent") : <span style={{ color: C.faint }}>direct</span>}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.submittedAt ? p.submittedAt.slice(0, 10) : "—"}</td>
                 <td style={td}>{permitData.docs.filter(d => d.permit_id === p.id).length || <span style={{ color: C.faint }}>0</span>}</td>
                 {canEdit && <td style={{ ...td, textAlign: "right" }} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><button disabled={deleting} onClick={() => deletePermits([p.id])} aria-label={`Delete ${normState(p.state)} request`} style={{ ...miniBtn, color: C.red, padding: "2px 8px", fontSize: 11 }}>Delete</button></td>}
@@ -7640,7 +7974,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         const countries = allCountries();
         const pickedCode = normState(stateForm.state);
         const inList = countries.some(([c]) => c === pickedCode);
-        const pickCountry = c => { const cfg = setUp.get(c); setStateForm(cfg ? { state: c, leadDays: cfg.leadDays, authority: cfg.authority || "", contact: cfg.contact || "", note: cfg.note || "" } : { state: c, leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "" }); };
+        const pickCountry = c => { const cfg = setUp.get(c); setStateForm(cfg ? { state: c, leadDays: cfg.leadDays, authority: cfg.authority || "", contact: cfg.contact || "", note: cfg.note || "", channel: cfg.channel || "authority", agentId: cfg.agentId || "" } : { state: c, leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "", channel: "authority", agentId: "" }); };
         return <>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Countries you overfly or land in, with the processing time (days before the first flight that a request must be filed) and authority contact for each. A country that routes or permits use but has no settings here uses {DEFAULT_LEAD_DAYS} days. Pick a country to add it or change its settings.</div>
           {canEdit && <div style={{ display: "flex", gap: 8, marginBottom: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -7654,6 +7988,12 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             <FieldSm label="Lead days"><input type="number" min="0" value={stateForm.leadDays} onChange={e => setStateForm({ ...stateForm, leadDays: e.target.value })} style={{ ...inputStyle, width: 80 }} /></FieldSm>
             <FieldSm label="Authority"><input value={stateForm.authority} onChange={e => setStateForm({ ...stateForm, authority: e.target.value })} style={{ ...inputStyle, width: 180 }} /></FieldSm>
             <FieldSm label="Contact"><input value={stateForm.contact} onChange={e => setStateForm({ ...stateForm, contact: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+            <FieldSm label="Request goes to">
+              <select aria-label="Request channel" value={stateForm.channel === "agent" && stateForm.agentId ? stateForm.agentId : "authority"} onChange={e => setStateForm({ ...stateForm, channel: e.target.value === "authority" ? "authority" : "agent", agentId: e.target.value === "authority" ? "" : e.target.value })} style={{ ...inputStyle, width: 200 }}>
+                <option value="authority">Authority directly</option>
+                {agentsList.map(a => <option key={a.id} value={a.id}>Via agent: {a.name}</option>)}
+              </select>
+            </FieldSm>
             <FieldSm label="Note"><input value={stateForm.note} onChange={e => setStateForm({ ...stateForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
             <button disabled={!pickedCode} onClick={saveState} style={{ ...miniBtn, background: pickedCode ? GRADIENT_PRIMARY : C.faint, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{setUp.has(pickedCode) ? "Save changes" : "Add country"}</button>
           </div>}
@@ -7662,15 +8002,15 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{tableRows.length} countr{tableRows.length === 1 ? "y" : "ies"} · {tableRows.filter(r => r.cfg).length} with settings</span>
           </div>
           <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Country</th><th style={th}>Code</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Note</th><th style={th}>Routes</th><th style={th}>Active requests</th><th style={th}></th></tr></thead>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Country</th><th style={th}>Code</th><th style={th}>Lead days</th><th style={th}>Authority</th><th style={th}>Contact</th><th style={th}>Request goes to</th><th style={th}>Note</th><th style={th}>Routes</th><th style={th}>Active requests</th><th style={th}></th></tr></thead>
             <tbody>
-              {tableRows.length === 0 && <tr><td colSpan={9} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{codes.length === 0 ? `No countries yet. Pick one above, or map your routes first (Routes → States). Every country uses the ${DEFAULT_LEAD_DAYS}-day default until you set it.` : "No countries match."}</td></tr>}
+              {tableRows.length === 0 && <tr><td colSpan={10} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>{codes.length === 0 ? `No countries yet. Pick one above, or map your routes first (Routes → States). Every country uses the ${DEFAULT_LEAD_DAYS}-day default until you set it.` : "No countries match."}</td></tr>}
               {tableRows.map(r => (
                 <tr key={r.code} style={{ borderTop: `1px solid ${C.borderSoft}`, opacity: r.cfg ? 1 : 0.75 }}>
                   <td style={{ ...td, fontWeight: 600 }}>{r.name}</td>
                   <td style={{ ...td, fontFamily: MONO }}>{r.code}</td>
                   <td style={td}>{r.cfg ? r.cfg.leadDays : <span style={{ color: C.faint }}>{DEFAULT_LEAD_DAYS} (default)</span>}</td>
-                  <td style={td}>{r.cfg?.authority || "—"}</td><td style={td}>{r.cfg?.contact || "—"}</td><td style={td}>{r.cfg?.note || "—"}</td>
+                  <td style={td}>{r.cfg?.authority || "—"}</td><td style={td}>{r.cfg?.contact || "—"}</td><td style={td}>{r.cfg?.channel === "agent" ? <span>Agent: <b>{agentsList.find(a => a.id === r.cfg.agentId)?.name || "?"}</b></span> : "Authority"}</td><td style={td}>{r.cfg?.note || "—"}</td>
                   <td style={td}>{routeCount.get(r.code) || <span style={{ color: C.faint }}>0</span>}</td>
                   <td style={td}>{permitCount.get(r.code) || <span style={{ color: C.faint }}>0</span>}</td>
                   <td style={{ ...td, textAlign: "right" }}>{canEdit && <button onClick={() => pickCountry(r.code)} style={miniBtn}>{r.cfg ? "Edit" : "Set up"}</button>}</td>
@@ -7680,6 +8020,8 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
           </table></div>
         </>;
       })()}
+
+      {sub === "agents" && <AgentsFormsPanel permitData={permitData} canEdit={canEdit} onReload={onReload} pushToast={pushToast} />}
 
       {sub === "inbox" && <>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>E-mails carrying the permit label in Gmail are read (never changed or deleted) once a day and when you press the button. An e-mail that mentions a permit number or authority reference of exactly one permit is filed on it as a note, with its PDF and TXT attachments (images, Word, Excel and other files are not picked up; open the e-mail in Gmail for those). Anything else waits here for you. <b>Status changes are always made by you</b> — an e-mail never approves a permit by itself, and the sender is not verified.</div>
@@ -7710,7 +8052,8 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         ))}
       </>}
 
-      {modal && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} flights={flights} routeMap={routeMap} airportMap={airportMap} settings={settings} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+      {modal?.wizard && <RequestWizard permitData={permitData} permits={permits} flights={flights} resources={resources} routeMap={routeMap} airportMap={airportMap} settings={settings} gaps={gaps} todayStr={todayStr} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
+      {modal && !modal.wizard && (!modal.permit || modalPermit) && <PermitModal permit={modalPermit} prefill={modal.prefill} resources={resources} knownStates={knownStates} canEdit={canEdit} permitData={permitData} flights={flights} routeMap={routeMap} airportMap={airportMap} settings={settings} onClose={() => setModal(null)} onSaved={onReload} pushToast={pushToast} />}
     </div>
   );
 }
