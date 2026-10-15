@@ -6867,6 +6867,7 @@ async function fetchPermitData() {
     supabase.from("permit_proposals").select("*").order("created_at", { ascending: false }).limit(200),
     supabase.from("permit_agents").select("*").order("name"),
     supabase.from("permit_templates").select("*"),
+    supabase.from("route_overfly_states").select("route_detail").limit(1),
   ]);
   const agRes = results[8], tplRes = results[9]; // migration 00036: absence must not break the rest
   const apRes = results[6], propRes = results[7]; // migration 00031: their absence must not break the rest
@@ -6875,7 +6876,7 @@ async function fetchPermitData() {
   const err = results.slice(0, 5).find(r => r.error)?.error;
   if (err) return { error: err.message, loaded: true, permits: [], routes: [], states: [], docs: [], notes: [], emails: [], mailReady: false };
   const [p, r, s, d, n] = results.slice(0, 5).map(x => x.data || []);
-  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, agents: agRes.error ? [] : (agRes.data || []), templates: tplRes.error ? [] : (tplRes.data || []), agentsReady: !agRes.error && !tplRes.error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note, channel: x.channel || "authority", agentId: x.agent_id || null })), docs: d, notes: n };
+  return { error: null, loaded: true, emails: mailRes.error ? [] : (mailRes.data || []), mailReady: !mailRes.error, airports: apRes.error ? [] : (apRes.data || []), proposals: propRes.error ? [] : (propRes.data || []), briefsReady: !propRes.error && !apRes.error, agents: agRes.error ? [] : (agRes.data || []), templates: tplRes.error ? [] : (tplRes.data || []), agentsReady: !agRes.error && !tplRes.error, routeDetailReady: !results[10].error, permits: p.map(mapPermit), routes: r, states: s.map(x => ({ state: x.state, leadDays: x.lead_days, authority: x.authority, contact: x.contact, note: x.note, channel: x.channel || "authority", agentId: x.agent_id || null })), docs: d, notes: n };
 }
 function describePermitEvent(r) {
   const d = r.details || {};
@@ -6973,7 +6974,8 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
     const mail = buildFromTemplate(tpl, requestVars({
       state: st, country: countryName(st), kind: form.kind, airports: airportsFor, validFrom: form.validFrom, validTo: form.validTo, authority: form.authority.trim() || setting?.authority || "", agent: ag?.name || "",
       aircraft: form.resourceIds.map(id => resources.find(r => r.id === id)?.code).filter(Boolean),
-      flights: covered.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, aircraft: resources.find(r => r.id === f.resourceId)?.code })),
+      flights: covered.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, arrivalAt: f.arrivalAt, aircraft: resources.find(r => r.id === f.resourceId)?.code })),
+      fleet: resources, routeDetail: [...new Set(covered.map(f => (permitData.routes || []).find(x => (x.origin === f.origin && x.destination === f.destination) || (x.origin === f.destination && x.destination === f.origin))?.route_detail?.trim()).filter(Boolean))].join("\n\n"),
       signature: auth?.user?.email || "",
     }));
     const to = extractEmails(ag ? ag.contact : setting?.contact);
@@ -7276,6 +7278,7 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
   const [busy, setBusy] = useState(false);
   const [markSubmitted, setMarkSubmitted] = useState(false);
   const [results, setResults] = useState([]);
+  const [msgs, setMsgs] = useState([]);
   const [addState, setAddState] = useState("");
   const [addKind, setAddKind] = useState("overfly");
   const codeOf = id => resources.find(r => r.id === id)?.code;
@@ -7287,7 +7290,6 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
       const r = m.get(key) || { key, kind: g.kind, state: g.state, airports: [], validFrom: g.firstDay, validTo: g.lastDay, resourceIds: [], flightCount: 0, fileBy: null, overdue: false, leadDays: g.leadDays, picked: true, ...channelFor(g.state) };
       if (g.firstDay < r.validFrom) r.validFrom = g.firstDay;
       if (g.lastDay > r.validTo) r.validTo = g.lastDay;
-      if (g.resourceId && !r.resourceIds.includes(g.resourceId)) r.resourceIds.push(g.resourceId);
       g.airports.forEach(a => { if (!r.airports.includes(a)) r.airports.push(a); });
       r.flightCount += g.flightCount;
       if (g.fileBy && (!r.fileBy || g.fileBy < r.fileBy)) r.fileBy = g.fileBy;
@@ -7317,21 +7319,43 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
 
   async function toReview() {
     const { data: auth } = await supabase.auth.getUser();
-    const built = rows.filter(r => r.picked).map(r => {
-      const fl = flightsFor(r);
-      const ag = r.channel === "agent" ? agents.find(a => a.id === r.agentId) : null;
-      const cfg = settings.get(normState(r.state));
-      const tpl = pickTemplate({ templates, state: r.state, agentId: r.agentId, kind: r.kind, channel: r.channel });
-      const vars = requestVars({ state: r.state, country: countryName(r.state), kind: r.kind, airports: r.kind === "landing" ? (r.airports.length ? r.airports : [...new Set(fl.map(f => normAirport(f.destination)))]) : [],
-        validFrom: r.validFrom, validTo: r.validTo, aircraft: r.resourceIds.map(codeOf).filter(Boolean), agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || ""), signature: auth?.user?.email || "",
-        flights: fl.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, aircraft: codeOf(f.resourceId) })) });
+    const groups = new Map();
+    rows.filter(r => r.picked).forEach(r => {
+      const k = r.channel === "agent" && r.agentId ? `agent|${r.agentId}|${r.kind}` : `auth|${normState(r.state)}|${r.kind}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    });
+    const built = [...groups.entries()].map(([id, grp]) => {
+      const first = grp[0];
+      const byId = new Map();
+      grp.forEach(r => flightsFor(r).forEach(f => byId.set(f.id, f)));
+      const fl = [...byId.values()].sort((a, b) => a.start - b.start);
+      const ag = first.channel === "agent" ? agents.find(a => a.id === first.agentId) : null;
+      const cfg = settings.get(normState(first.state));
+      const tpl = pickTemplate({ templates, state: grp.length === 1 ? first.state : "", agentId: first.agentId, kind: first.kind, channel: ag ? "agent" : "authority" });
+      const pairs = new Set(fl.map(f => `${f.origin}-${f.destination}`));
+      const details = [], missing = [];
+      [...pairs].forEach(p => {
+        const [o, d] = p.split("-");
+        const rt = (permitData.routes || []).find(x => (x.origin === o && x.destination === d) || (x.origin === d && x.destination === o));
+        const text = rt?.route_detail?.trim();
+        if (text) { if (!details.includes(text)) details.push(text); } else if (!missing.includes(`${o}-${d}`) && !missing.includes(`${d}-${o}`)) missing.push(`${o}-${d}`);
+      });
+      const vFrom = grp.map(r => r.validFrom).filter(Boolean).sort()[0] || "", vTo = grp.map(r => r.validTo).filter(Boolean).sort().slice(-1)[0] || "";
+      const vars = requestVars({ state: grp.map(r => normState(r.state)).join(", "), country: grp.map(r => countryName(r.state)).join(", "), kind: first.kind,
+        airports: first.kind === "landing" ? [...new Set(fl.map(f => normAirport(f.destination)))] : [], validFrom: vFrom, validTo: vTo,
+        aircraft: grp.some(r => !r.resourceIds.length) ? [] : [...new Set(grp.flatMap(r => r.resourceIds))].map(codeOf).filter(Boolean), fleet: resources,
+        agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || ""), signature: auth?.user?.email || "", routeDetail: details.join("\n\n"),
+        flights: fl.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, arrivalAt: f.arrivalAt, aircraft: codeOf(f.resourceId) })) });
       const mail = buildFromTemplate(tpl, vars);
       const to = extractEmails(ag ? ag.contact : cfg?.contact);
-      return { ...r, to: to.join(", "), subject: mail.subject, text: mail.body, source: tpl.source, listed: fl.length, agentName: ag?.name || "", unknown: unknownPlaceholders(tpl.subject + " " + tpl.body) };
+      return { id, rows: grp, kind: first.kind, channel: ag ? "agent" : "authority", agentName: ag?.name || "", to: to.join(", "), subject: mail.subject, text: mail.body, source: tpl.source, listed: fl.length,
+        missingRoutes: /\{\{\s*route_detail\s*\}\}/i.test(tpl.body) ? missing : [], unknown: unknownPlaceholders(tpl.subject + " " + tpl.body) };
     });
-    setRows(rs => rs.map(r => built.find(b => b.key === r.key) || r));
+    setMsgs(built);
     setStep("review");
   }
+  const patchMsg = (id, p) => setMsgs(ms => ms.map(m => m.id === id ? { ...m, ...p } : m));
   const picked = rows.filter(r => r.picked);
   const dateBad = r => (r.validFrom && r.validTo && r.validTo < r.validFrom) || !r.validFrom || !r.validTo;
 
@@ -7340,19 +7364,21 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
     const out = [];
     const { data: { session } } = await supabase.auth.getSession();
     const { data: auth } = await supabase.auth.getUser();
-    for (const r of picked) {
-      const res = { key: r.key, state: r.state, kind: r.kind };
+    for (const m of msgs) {
+      const res = { key: m.id, states: m.rows.map(r => r.state), kind: m.kind, created: [], errors: [] };
       try {
-        const row = { kind: r.kind, airport: r.kind === "landing" && r.airports.length === 1 ? r.airports[0] : null, state: normState(r.state), valid_from: r.validFrom || null, valid_to: r.validTo || null, resource_ids: r.resourceIds, status: markSubmitted ? "submitted" : "draft", ...(markSubmitted ? { submitted_at: new Date().toISOString() } : {}), ...(permitData.agentsReady ? { agent_id: r.channel === "agent" ? r.agentId : null } : {}) };
-        const ins = await retryNetwork(() => supabase.from("overfly_permits").insert(row).select("id"));
-        if (ins.error || !ins.data?.length) throw new Error(ins.error?.message || "request not created");
-        res.permitId = ins.data[0].id;
-        const resp = await fetch("/api/permits/draft", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ to: extractEmails(r.to), subject: r.subject, body: r.text }) });
-        const j = await resp.json().catch(() => ({}));
-        if (!resp.ok || j.error) res.draftError = j.error || `Draft failed (${resp.status}).`;
-        else res.drafted = true;
-        await supabase.from("permit_notes").insert({ permit_id: res.permitId, body: res.drafted ? `Request e-mail drafted in Gmail${r.agentName ? ` for agent ${r.agentName}` : ""} (${r.listed} flight(s) listed). Subject: ${r.subject}` : `Request created from the wizard${r.agentName ? ` (via agent ${r.agentName})` : ""}; the e-mail was not drafted: ${res.draftError}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
-      } catch (e) { res.error = e.message; }
+        for (const r of m.rows) {
+          const row = { kind: r.kind, airport: r.kind === "landing" && r.airports.length === 1 ? r.airports[0] : null, state: normState(r.state), valid_from: r.validFrom || null, valid_to: r.validTo || null, resource_ids: r.resourceIds, status: markSubmitted ? "submitted" : "draft", ...(markSubmitted ? { submitted_at: new Date().toISOString() } : {}), ...(permitData.agentsReady ? { agent_id: r.channel === "agent" ? r.agentId : null } : {}) };
+          const ins = await retryNetwork(() => supabase.from("overfly_permits").insert(row).select("id"));
+          if (ins.error || !ins.data?.length) res.errors.push(`${r.state}: ${ins.error?.message || "request not created"}`); else res.created.push(ins.data[0].id);
+        }
+        if (res.created.length) {
+          const resp = await fetch("/api/permits/draft", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ to: extractEmails(m.to), subject: m.subject, body: m.text }) });
+          const j = await resp.json().catch(() => ({}));
+          if (!resp.ok || j.error) res.draftError = j.error || `Draft failed (${resp.status}).`; else res.drafted = true;
+          for (const id of res.created) await supabase.from("permit_notes").insert({ permit_id: id, body: res.drafted ? `Request e-mail drafted in Gmail${m.agentName ? ` for agent ${m.agentName}` : ""} (${m.listed} flight(s) listed${m.rows.length > 1 ? `, covers ${m.rows.length} countries` : ""}). Subject: ${m.subject}` : `Request created from the wizard${m.agentName ? ` (via agent ${m.agentName})` : ""}; the e-mail was not drafted: ${res.draftError}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
+        }
+      } catch (e) { res.errors.push(e.message); }
       out.push(res);
     }
     setBusy(false); setResults(out); setStep("done"); onSaved();
@@ -7412,24 +7438,26 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
 
         {step === "review" && <>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>Check each e-mail and edit it if needed. <b>Create requests and drafts</b> makes one request per country (status Draft) and puts each e-mail into Gmail → Drafts. Nothing is sent: you open Gmail, check and press Send.</div>
-          {picked.map(r => {
+          {msgs.map(m => {
             const warn = [];
-            if (!extractEmails(r.to).length) warn.push(r.channel === "agent" ? "No e-mail address for this agent (Permits → Agents & forms)." : "No authority e-mail for this country (Permits → States → Contact). The draft will have no recipient.");
-            if (r.listed === 0) warn.push("No upcoming flights match this country and period — the flight list will say 'to be confirmed'.");
-            if (r.unknown?.length) warn.push(`The form has unknown fields: ${r.unknown.map(u => `{{${u}}}`).join(", ")}.`);
-            return <div key={r.key} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
+            if (!extractEmails(m.to).length) warn.push(m.channel === "agent" ? "No e-mail address for this agent (Permits → Agents & forms). The draft will have no recipient." : "No authority e-mail for this country (Permits → States → Contact). The draft will have no recipient.");
+            if (m.listed === 0) warn.push("No upcoming flights match these countries and periods — the schedule will say 'to be confirmed'.");
+            if (m.missingRoutes.length) warn.push(`No airways entered for ${m.missingRoutes.join(", ")} (Permits → Routes → States). The ROUTE part will be incomplete.`);
+            if (m.unknown?.length) warn.push(`The form has unknown fields: ${m.unknown.map(u => `{{${u}}}`).join(", ")}.`);
+            return <div key={m.id} style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 10 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap", marginBottom: 6 }}>
-                <b style={{ fontSize: 13 }}>{stateLabel(r.state)}</b><span style={{ fontSize: 12, color: C.muted }}>{r.kind === "landing" ? "Landing" : "Overfly"} · {r.validFrom} → {r.validTo} · {r.listed} flight(s)</span>
-                <Badge color={r.channel === "agent" ? C.amber : C.muted}>{r.channel === "agent" ? `VIA ${r.agentName.toUpperCase()}` : "DIRECT"}</Badge>
-                <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{r.source}</span>
+                <b style={{ fontSize: 13 }}>{m.rows.map(r => stateLabel(r.state)).join(", ")}</b>
+                <span style={{ fontSize: 12, color: C.muted }}>{m.kind === "landing" ? "Landing" : "Overfly"} · {m.listed} flight(s){m.rows.length > 1 ? ` · one request covering ${m.rows.length} countries` : ""}</span>
+                <Badge color={m.channel === "agent" ? C.amber : C.muted}>{m.channel === "agent" ? `VIA ${m.agentName.toUpperCase()}` : "DIRECT"}</Badge>
+                <span style={{ fontSize: 11, color: C.faint, marginLeft: "auto" }}>{m.source}</span>
               </div>
-              {warn.map((w, i) => <div key={i} style={{ fontSize: 12, color: C.red, marginBottom: 4 }}>⚠ {w}</div>)}
-              <FieldSm label="To"><input value={r.to} onChange={e => patch(r.key, { to: e.target.value })} style={inputStyle} /></FieldSm>
+              {warn.map((x, i) => <div key={i} style={{ fontSize: 12, color: C.red, marginBottom: 4 }}>⚠ {x}</div>)}
+              <FieldSm label="To"><input value={m.to} onChange={e => patchMsg(m.id, { to: e.target.value })} style={inputStyle} /></FieldSm>
               <div style={{ height: 6 }} />
-              <FieldSm label="Subject"><input value={r.subject} onChange={e => patch(r.key, { subject: e.target.value })} style={inputStyle} /></FieldSm>
+              <FieldSm label="Subject"><input value={m.subject} onChange={e => patchMsg(m.id, { subject: e.target.value })} style={inputStyle} /></FieldSm>
               <div style={{ height: 6 }} />
-              <FieldSm label="Text"><textarea value={r.text} onChange={e => patch(r.key, { text: e.target.value })} rows={9} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12, resize: "vertical" }} /></FieldSm>
-              <div style={{ marginTop: 6 }}><button onClick={() => copy(`${r.subject}\n\n${r.text}`)} style={miniBtn}>Copy text</button></div>
+              <FieldSm label="Text"><textarea value={m.text} onChange={e => patchMsg(m.id, { text: e.target.value })} rows={16} style={{ ...inputStyle, fontFamily: MONO, fontSize: 12, resize: "vertical" }} /></FieldSm>
+              <div style={{ marginTop: 6 }}><button onClick={() => copy(`${m.subject}\n\n${m.text}`)} style={miniBtn}>Copy text</button></div>
             </div>;
           })}
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 12.5, margin: "8px 0" }}>
@@ -7438,13 +7466,13 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
           </label>
           <div style={{ display: "flex", gap: 8 }}>
             <button disabled={busy} onClick={() => setStep("choose")} style={miniBtn}>Back</button>
-            <button disabled={busy || picked.some(r => !r.subject.trim() || !r.text.trim())} onClick={createAll} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Creating…" : `Create ${picked.length} request${picked.length === 1 ? "" : "s"} and drafts`}</button>
+            <button disabled={busy || msgs.some(m => !m.subject.trim() || !m.text.trim())} onClick={createAll} style={{ ...miniBtn, marginLeft: "auto", background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Creating…" : `Create ${msgs.reduce((n, m) => n + m.rows.length, 0)} request${msgs.reduce((n, m) => n + m.rows.length, 0) === 1 ? "" : "s"} and ${msgs.length} draft${msgs.length === 1 ? "" : "s"}`}</button>
           </div>
         </>}
 
         {step === "done" && <>
-          {results.map(r => <div key={r.key} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "6px 0", fontSize: 12.5, color: r.error ? C.red : r.draftError ? C.amber : C.text }}>
-            <b>{stateLabel(r.state)}</b> ({r.kind}): {r.error ? `not created — ${r.error}` : r.drafted ? "request created and e-mail drafted in Gmail." : `request created, but the e-mail was not drafted — ${r.draftError} Use "Copy text" from the permit, or draft it again from the permit.`}
+          {results.map(r => <div key={r.key} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "6px 0", fontSize: 12.5, color: r.errors.length ? C.red : r.draftError ? C.amber : C.text }}>
+            <b>{r.states.map(stateLabel).join(", ")}</b> ({r.kind}): {r.created.length} request(s) created{r.errors.length ? `; not created — ${r.errors.join("; ")}` : ""}. {r.drafted ? "E-mail drafted in Gmail." : r.created.length ? `The e-mail was not drafted — ${r.draftError} Open a request and use "Draft request e-mail", or copy the text.` : ""}
           </div>)}
           <div style={{ fontSize: 12, color: C.muted, margin: "10px 0" }}>Open Gmail → Drafts to check and send. When the authority or agent answers, e-mails with the permit label are filed on the request automatically; enter the permit number and mark it approved in the request.</div>
           <button onClick={onClose} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Close</button>
@@ -7465,7 +7493,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   const [picked, setPicked] = useState(() => new Set()); // permit requests ticked for deletion
   const [deleting, setDeleting] = useState(false);
   const [stateTableFilter, setStateTableFilter] = useState("");
-  const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "" });
+  const [routeForm, setRouteForm] = useState({ origin: "", destination: "", states: "", note: "", detail: "" });
   const [stateForm, setStateForm] = useState({ state: "", leadDays: DEFAULT_LEAD_DAYS, authority: "", contact: "", note: "", channel: "authority", agentId: "" });
   const todayStr = iso(new Date());
   const canEdit = !!perms.editFlight;
@@ -7570,9 +7598,9 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
   async function saveRoute() {
     const origin = routeForm.origin.trim().toUpperCase(), destination = routeForm.destination.trim().toUpperCase();
     if (!origin || !destination || origin === destination) { pushToast("Enter two different airport codes.", "warn"); return; }
-    const { error: e } = await supabase.from("route_overfly_states").upsert({ origin, destination, states: parseStates(routeForm.states), note: routeForm.note.trim() || null }, { onConflict: "origin,destination" });
+    const { error: e } = await supabase.from("route_overfly_states").upsert({ origin, destination, states: parseStates(routeForm.states), note: routeForm.note.trim() || null, ...(permitData.routeDetailReady ? { route_detail: routeForm.detail.trim() || null } : {}) }, { onConflict: "origin,destination" });
     if (e) { pushToast(`Route not saved: ${e.message}`, "warn"); return; }
-    setRouteForm({ origin: "", destination: "", states: "", note: "" });
+    setRouteForm({ origin: "", destination: "", states: "", note: "", detail: "" });
     pushToast(`${origin}–${destination} saved.`, "ok"); onReload();
   }
   async function deleteRoute(r) {
@@ -7869,7 +7897,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         {unmapped.length > 0 && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", marginBottom: 12 }}>
           <div style={{ fontSize: 12, fontWeight: 600, color: C.red, marginBottom: 4 }}>Unmapped routes with upcoming flights ({unmapped.length})</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {unmapped.map(u => <button key={u.origin + u.destination} disabled={!canEdit} onClick={() => setRouteForm({ origin: u.origin, destination: u.destination, states: "", note: "" })} style={{ ...miniBtn, fontFamily: MONO }}>{u.origin}–{u.destination} · {u.count} flt · from {u.firstDay}</button>)}
+            {unmapped.map(u => <button key={u.origin + u.destination} disabled={!canEdit} onClick={() => setRouteForm({ origin: u.origin, destination: u.destination, states: "", note: "", detail: "" })} style={{ ...miniBtn, fontFamily: MONO }}>{u.origin}–{u.destination} · {u.count} flt · from {u.firstDay}</button>)}
           </div>
         </div>}
         <div style={{ border: `1px solid ${C.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
@@ -7939,19 +7967,23 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
             </div>
           </FieldSm>
           <FieldSm label="Note"><input value={routeForm.note} onChange={e => setRouteForm({ ...routeForm, note: e.target.value })} style={{ ...inputStyle, width: 200 }} /></FieldSm>
+          <FieldSm label={permitData.routeDetailReady ? "Route by country (for agent requests: country, then one line per direction)" : "Route by country (needs migration 00037)"}>
+            <textarea value={routeForm.detail} disabled={!permitData.routeDetailReady} onChange={e => setRouteForm({ ...routeForm, detail: e.target.value })} rows={5} placeholder={"PAKISTAN\nMOTMO P500 PS J143 NONIB L509 SULOM\nSULOM L509 NONIB J143 PS P500 MOTMO"} style={{ ...inputStyle, width: 420, fontFamily: MONO, fontSize: 11.5, resize: "vertical" }} />
+          </FieldSm>
           <button onClick={saveRoute} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save route</button>
         </div>}
         <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
-          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Route</th><th style={th}>States overflown</th><th style={th}>Note</th><th style={th}></th></tr></thead>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={th}>Route</th><th style={th}>States overflown</th><th style={th}>Airways</th><th style={th}>Note</th><th style={th}></th></tr></thead>
           <tbody>
-            {routes.length === 0 && <tr><td colSpan={4} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No routes mapped yet.</td></tr>}
+            {routes.length === 0 && <tr><td colSpan={5} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No routes mapped yet.</td></tr>}
             {routes.map(r => (
               <tr key={r.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
                 <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{r.origin}–{r.destination}</td>
                 <td style={td}>{(r.states || []).length ? r.states.map(c => <span key={c} style={{ display: "inline-block", marginRight: 10 }}>{countryName(c) !== c ? countryName(c) : c} <span style={{ fontFamily: MONO, color: C.faint }}>{c}</span></span>) : <span style={{ color: C.faint }}>none needed</span>}</td>
+                <td style={td}>{r.route_detail ? <span title={r.route_detail}>entered</span> : (r.states || []).length ? <span style={{ color: C.faint }}>—</span> : <span style={{ color: C.faint }}>n/a</span>}</td>
                 <td style={td}>{r.note || <span style={{ color: C.faint }}>—</span>}</td>
                 <td style={{ ...td, textAlign: "right" }}>{canEdit && <>
-                  <button onClick={() => setRouteForm({ origin: r.origin, destination: r.destination, states: (r.states || []).join(", "), note: r.note || "" })} style={miniBtn}>Edit</button>{" "}
+                  <button onClick={() => setRouteForm({ origin: r.origin, destination: r.destination, states: (r.states || []).join(", "), note: r.note || "", detail: r.route_detail || "" })} style={miniBtn}>Edit</button>{" "}
                   <button onClick={() => deleteRoute(r)} style={{ ...miniBtn, color: C.red }}>Remove</button></>}</td>
               </tr>
             ))}
