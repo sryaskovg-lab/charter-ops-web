@@ -6976,7 +6976,7 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
       aircraft: form.resourceIds.map(id => resources.find(r => r.id === id)?.code).filter(Boolean),
       flights: covered.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, arrivalAt: f.arrivalAt, aircraft: resources.find(r => r.id === f.resourceId)?.code })),
       fleet: resources, routeDetail: [...new Set(covered.map(f => (permitData.routes || []).find(x => (x.origin === f.origin && x.destination === f.destination) || (x.origin === f.destination && x.destination === f.origin))?.route_detail?.trim()).filter(Boolean))].join("\n\n"),
-      signature: auth?.user?.email || "",
+      
     }));
     const to = extractEmails(ag ? ag.contact : setting?.contact);
     setDrafting(true);
@@ -7158,7 +7158,7 @@ function AgentsFormsPanel({ permitData, canEdit, onReload, pushToast }) {
   const unknown = unknownPlaceholders(draft.subject + " " + draft.body);
   const sample = useMemo(() => {
     const ag = scopeKey.startsWith("agent:") ? agents.find(a => a.id === scopeKey.slice(6)) : null;
-    const v = requestVars({ state: stateCode || "TM", country: stateCode ? countryName(stateCode) : "Turkmenistan", kind, airports: kind === "landing" ? ["ASB"] : [], validFrom: "2026-11-01", validTo: "2026-11-30", aircraft: ["UP-B3748"], agent: ag?.name || "Agent name", authority: "Civil Aviation Authority", operator: "Your airline", signature: "Your name",
+    const v = requestVars({ state: stateCode || "TM", country: stateCode ? countryName(stateCode) : "Turkmenistan", kind, airports: kind === "landing" ? ["ASB"] : [], validFrom: "2026-11-01", validTo: "2026-11-30", aircraft: ["UP-B3748"], agent: ag?.name || "Agent name", authority: "Civil Aviation Authority", operator: "Your airline",
       flights: [{ ref: "DV123", origin: "ALA", destination: "ASB", start: new Date("2026-11-02T04:05:00Z"), aircraft: "UP-B3748" }] });
     return buildFromTemplate(draft, v);
   }, [draft, scopeKey, stateCode, kind, agents]);
@@ -7345,7 +7345,7 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
       const vars = requestVars({ state: grp.map(r => normState(r.state)).join(", "), country: grp.map(r => countryName(r.state)).join(", "), kind: first.kind,
         airports: first.kind === "landing" ? [...new Set(fl.map(f => normAirport(f.destination)))] : [], validFrom: vFrom, validTo: vTo,
         aircraft: grp.some(r => !r.resourceIds.length) ? [] : [...new Set(grp.flatMap(r => r.resourceIds))].map(codeOf).filter(Boolean), fleet: resources,
-        agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || ""), signature: auth?.user?.email || "", routeDetail: details.join("\n\n"),
+        agent: ag?.name || "", authority: ag ? ag.name : (cfg?.authority || ""),  routeDetail: details.join("\n\n"),
         flights: fl.map(f => ({ ref: f.ref, origin: f.origin, destination: f.destination, start: f.start, arrivalAt: f.arrivalAt, aircraft: codeOf(f.resourceId) })) });
       const mail = buildFromTemplate(tpl, vars);
       const to = extractEmails(ag ? ag.contact : cfg?.contact);
