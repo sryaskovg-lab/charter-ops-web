@@ -5,7 +5,7 @@ import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
 import { noteTextForEmail } from "../lib/permit-mail";
 import {
-  coverageFor, addDaysStr, daysBetween, normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
+  flightPermitStatus, permitImpact, coverageFor, addDaysStr, daysBetween, normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
 } from "../lib/permit-utils";
 import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, renderTemplate, unknownPlaceholders, pickTemplate, requestVars, buildFromTemplate } from "../lib/permit-request";
 import { allCountries, stateLabel, countryName } from "../lib/country-names";
@@ -861,6 +861,19 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return computePermitIssues(flights, permitRouteMap, permitData.permits, settings, iso(new Date()), 60, permitAirportMap);
   }, [flights, permitRouteMap, permitAirportMap, permitData]);
 
+  // Paperwork marks on the Gantt: flights in the next 60 days whose permits are missing, only requested, or cannot be checked.
+  const permitMarks = useMemo(() => {
+    const m = new Map();
+    if (!permitData.loaded || permitData.error) return m;
+    const today = iso(new Date()), last = addDaysStr(today, 60);
+    flights.forEach(f => {
+      if (dayOf(f.start) > last) return;
+      const st = flightPermitStatus(f, permitRouteMap, permitData.permits, permitAirportMap, today);
+      if (st && st.level !== "ok") m.set(f.id, st);
+    });
+    return m;
+  }, [flights, permitRouteMap, permitAirportMap, permitData]);
+
   // Any station code on the board that isn't in the static STATION_TZ list gets looked up via
   // /api/timezone (APIFreaks + Supabase cache) once, ever — not on every render, not per user.
   useEffect(() => {
@@ -956,10 +969,26 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     return { capacity: fl.capacity, allocated, unsold: Math.max(0, fl.capacity - allocated), oversoldBy, revenue, live: liveAllotments };
   }
 
+  const permitAnswer = useRef({ until: 0, ok: true });
   async function updateFlight(flightId, patch, opts) {
     const colorOnly = Object.keys(patch).length === 1 && "color" in patch;
     if (!perms.editFlight && !colorOnly) return;
     const current = flights.find(f => f.id === flightId);
+    // Permit check: a change that leaves a flight without an approved permit it had (or had asked for) is confirmed first.
+    // A multi-flight drag calls this once per flight, so one answer covers the calls that follow within 2 seconds.
+    if (!colorOnly && !opts?.silent && !opts?.skipPermitCheck && current && permitData.loaded && !permitData.error && patch.status !== "cancelled") {
+      if (Date.now() < permitAnswer.current.until) { if (!permitAnswer.current.ok) return "cancelled"; }
+      else {
+        const newStart = (patch.start || patch.depTime !== undefined) ? (combineDateAndTime(patch.start || current.start, patch.depTime !== undefined ? patch.depTime : current.depTime) || patch.start || current.start) : current.start;
+        const after = { ...current, resourceId: patch.resourceId || current.resourceId, start: newStart, status: patch.status || current.status };
+        const hit = permitImpact(current, after, permitRouteMap, permitData.permits, permitAirportMap, iso(new Date()));
+        if (hit.length) {
+          const ok = window.confirm(`Permit check for ${current.ref} (${current.origin}–${current.destination}, ${iso(newStart)}):\n\n${hit.map(h => `• ${h.state ? h.state + (h.kind === "landing" ? " (landing)" : "") + ": " : ""}${h.text}`).join("\n")}\n\nThis change would leave the flight without an approved permit for the above. Continue anyway?`);
+          permitAnswer.current = { until: Date.now() + 2000, ok };
+          if (!ok) return "cancelled";
+        }
+      }
+    }
     // Color is cosmetic, not an operational schedule change, so it always applies immediately
     // regardless of draft mode — only real schedule/capacity/status edits get queued.
     if (draftMode && !colorOnly && !opts?.bypassDraft) {
@@ -1139,7 +1168,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     if (newResourceId === f.resourceId) return; // dropped back on the same aircraft — nothing to do
     const conflict = checkConflict(newResourceId, f.start, flightId);
     const result = await updateFlight(flightId, { resourceId: newResourceId });
-    if (result === "drafted" || result === "failed") return; // queueDraftChange / updateFlight already showed their own toast
+    if (result === "drafted" || result === "failed" || result === "cancelled") return; // queueDraftChange / updateFlight already showed their own toast
     setSelectedFlightId(flightId);
     if (conflict) pushToast(`${f.ref} reassigned — heads up: ${resources.find(r => r.id === newResourceId)?.code} already has ${conflict.ref} that day`, "warn");
     else pushToast(`${f.ref} reassigned to ${resources.find(r => r.id === newResourceId)?.code} — date and time unchanged`, "ok");
@@ -1966,7 +1995,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
-              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues}
+              onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues} permitMarks={permitMarks}
               acknowledgedIssueIds={acknowledgedIssueIds} onAcknowledgeIssue={acknowledgeIssue} onUnacknowledgeIssue={unacknowledgeIssue}
               draftMode={draftMode} setDraftMode={setDraftMode} draftChanges={draftChanges} onApproveDraft={approveDraftChange} onDiscardDraft={discardDraftChange} onApproveAllDrafts={approveAllDrafts} onDiscardAllDrafts={discardAllDrafts} />
           </div>
@@ -2024,7 +2053,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2503,6 +2532,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                           background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
                           border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
                           borderRadius: pillRadius, cursor: (perms.editFlight && draftMode) ? "grab" : "pointer", overflow: "hidden", touchAction: (perms.editFlight && draftMode) ? "pan-y" : "auto" }}>
+                        {permitMarks?.get(f.id) && (() => { const pm = permitMarks.get(f.id); const col = pm.level === "missing" ? C.red : pm.level === "requested" ? C.amber : C.faint; return <div role="img" aria-label={`Permit: ${pm.text}`} title={`Permit: ${pm.text}`} style={{ position: "absolute", top: 2, right: 3, width: 9, height: 9, borderRadius: 999, background: pm.level === "unchecked" ? "transparent" : col, border: `1.5px solid ${col}`, zIndex: 4, pointerEvents: "auto" }} />; })()}
                         {pendingDraft && (
                           <div style={{ position: "absolute", top: -6, right: -4, width: 14, height: 14, borderRadius: 999, background: C.amber, color: ON_ACCENT, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>!</div>
                         )}
@@ -2646,6 +2676,14 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
         <LegendSwatch color={C.green} label={t("legendHealthy")} />
         <LegendSwatch color={C.amber} label={t("legendNearFull")} />
         <LegendSwatch color={C.red} label={t("legendOversold")} />
+        {permitMarks && permitMarks.size > 0 && (
+          <span style={{ display: "flex", alignItems: "center", gap: 10 }} title="Dots on flight bars, next 60 days. Hover a dot for details; the Permits tab has the full list.">
+            Permits:
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 999, background: C.red, display: "inline-block" }} />missing</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 999, background: C.amber, display: "inline-block" }} />requested</span>
+            <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 999, border: `1.5px solid ${C.faint}`, display: "inline-block" }} />cannot check</span>
+          </span>
+        )}
         {draftChanges.length > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 16, height: 10, border: `2px dashed ${C.amber}`, borderRadius: 3, background: C.amberSoft }} />
