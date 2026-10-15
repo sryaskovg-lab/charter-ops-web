@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from "react"
 import dynamic from "next/dynamic";
 import { supabase } from "../lib/supabaseClient";
 import { fetchAllPages } from "../lib/fetchAllPages";
+import { countryRows, registerRows, toCsv, toHtmlTable } from "../lib/permit-report";
 import { noteTextForEmail } from "../lib/permit-mail";
 import {
   flightPermitStatus, permitImpact, coverageFor, addDaysStr, daysBetween, normState, parseStates, buildRouteMap, routeStatesFor, dayOf, computeUrgentUncovered, ALERT_DAYS, effectiveStatus, computePermitIssues, computePermitGaps, unmappedRoutes, unmappedAirports, buildAirportMap, flightNeeds, normAirport, permitReminders, DEFAULT_LEAD_DAYS,
@@ -7520,6 +7521,67 @@ function RequestWizard({ permitData, permits, flights, resources, routeMap, airp
   );
 }
 
+// Permits -> Report: permit status by country and the register of permits, for the desk, management or an audit.
+const REPORT_COUNTRY_COLS = [["country", "Country"], ["code", "Code"], ["goesTo", "Requested via"], ["valid", "Valid permits"], ["numbers", "Permit numbers"], ["validUntil", "Valid until"], ["open", "Requests open"], ["uncovered", "Flights without permit"], ["firstUncovered", "First such flight"]];
+const REPORT_REGISTER_COLS = [["country", "Country"], ["code", "Code"], ["type", "Type"], ["number", "Permit no."], ["ref", "Authority ref."], ["status", "Status"], ["from", "Valid from"], ["to", "Valid to"], ["aircraft", "Aircraft"], ["via", "Via"], ["submitted", "Submitted"], ["decided", "Decided"]];
+function PermitReportPanel({ permitData, permits, flights, resources, routeMap, airportMap, todayStr, pushToast }) {
+  const [includeClosed, setIncludeClosed] = useState(false);
+  const agents = permitData.agents || [];
+  const countries = useMemo(() => countryRows({ permits, states: permitData.states, routes: permitData.routes, flights, routeMap, airportMap, agents, todayStr }), [permits, permitData.states, permitData.routes, flights, routeMap, airportMap, agents, todayStr]);
+  const register = useMemo(() => registerRows({ permits, agents, resources, todayStr, includeClosed }), [permits, agents, resources, todayStr, includeClosed]);
+  const download = (name, rows, cols) => {
+    try {
+      const blob = new Blob(["﻿" + toCsv(rows, cols)], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    } catch (e) { pushToast(`Download failed: ${e.message}`, "warn"); }
+  };
+  const printReport = () => {
+    const html = `<!doctype html><meta charset="utf-8"><title>Permits report ${todayStr}</title><style>body{font:12px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}h2{font-size:14px;margin:22px 0 6px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:3px 6px;text-align:left;vertical-align:top}th{background:#eee}@media print{@page{size:landscape;margin:12mm}}</style><h1>Overflight and landing permits – status ${todayStr} (UTC)</h1><h2>By country</h2>${toHtmlTable(countries, REPORT_COUNTRY_COLS)}<h2>Register${includeClosed ? " (including expired, rejected and cancelled)" : ""}</h2>${toHtmlTable(register, REPORT_REGISTER_COLS)}`;
+    try {
+      const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+      const w = window.open(url, "_blank");
+      if (!w) { pushToast("The browser blocked the new tab. Allow pop-ups for this site, then try again.", "warn"); return; }
+      setTimeout(() => { try { w.print(); } catch { /* the person can print from the tab */ } }, 600);
+    } catch (e) { pushToast(`Could not open the report: ${e.message}`, "warn"); }
+  };
+  const cell = (r, k) => {
+    if (k === "validUntil" && r.validUntil) return <span style={{ color: r.endsInDays <= 7 ? C.red : r.endsInDays <= 30 ? C.amber : undefined }}>{r.validUntil}{r.endsInDays <= 30 ? ` (${r.endsInDays} d)` : ""}</span>;
+    if (k === "uncovered") return r.uncovered ? <b style={{ color: C.red }}>{r.uncovered}</b> : <span style={{ color: C.faint }}>0</span>;
+    return r[k] === "" || r[k] == null ? <span style={{ color: C.faint }}>—</span> : r[k];
+  };
+  return <>
+    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+      <span style={{ fontSize: 12, color: C.muted }}>Status on {todayStr} (UTC). Flights without permit count upcoming flights that have no approved permit.</span>
+      <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+        <button onClick={() => download(`permits-by-country-${todayStr}.csv`, countries, REPORT_COUNTRY_COLS)} style={miniBtn}>Countries (Excel/CSV)</button>
+        <button onClick={() => download(`permit-register-${todayStr}.csv`, register, REPORT_REGISTER_COLS)} style={miniBtn}>Register (Excel/CSV)</button>
+        <button onClick={printReport} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Print / save as PDF</button>
+      </span>
+    </div>
+    <div style={{ fontSize: 12.5, fontWeight: 600, margin: "8px 0 4px" }}>By country ({countries.length})</div>
+    <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+      <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>{REPORT_COUNTRY_COLS.map(([k, h]) => <th key={k} style={th}>{h}</th>)}</tr></thead>
+      <tbody>
+        {countries.length === 0 && <tr><td colSpan={REPORT_COUNTRY_COLS.length} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No countries yet.</td></tr>}
+        {countries.map(r => <tr key={r.code} style={{ borderTop: `1px solid ${C.borderSoft}` }}>{REPORT_COUNTRY_COLS.map(([k]) => <td key={k} style={{ ...td, fontFamily: ["code", "numbers", "firstUncovered"].includes(k) ? MONO : undefined, fontWeight: k === "country" ? 600 : 400 }}>{cell(r, k)}</td>)}</tr>)}
+      </tbody>
+    </table></div>
+    <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 4px" }}>
+      <span style={{ fontSize: 12.5, fontWeight: 600 }}>Register ({register.length})</span>
+      <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center" }}><input type="checkbox" checked={includeClosed} onChange={e => setIncludeClosed(e.target.checked)} />Include expired, rejected and cancelled</label>
+    </div>
+    <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+      <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>{REPORT_REGISTER_COLS.map(([k, h]) => <th key={k} style={th}>{h}</th>)}</tr></thead>
+      <tbody>
+        {register.length === 0 && <tr><td colSpan={REPORT_REGISTER_COLS.length} style={{ ...td, color: C.faint, textAlign: "center", padding: 20 }}>No permits to show.</td></tr>}
+        {register.map((r, i) => <tr key={i} style={{ borderTop: `1px solid ${C.borderSoft}` }}>{REPORT_REGISTER_COLS.map(([k]) => <td key={k} style={{ ...td, fontFamily: ["code", "number", "ref", "from", "to"].includes(k) ? MONO : undefined, fontSize: k === "aircraft" ? 11 : undefined }}>{r[k] === "" ? <span style={{ color: C.faint }}>—</span> : r[k]}</td>)}</tr>)}
+      </tbody>
+    </table></div>
+  </>;
+}
+
 function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpToFlight, pushToast }) {
   const [sub, setSub] = useState("requests");
   const [statusFilter, setStatusFilter] = useState("active");
@@ -7789,6 +7851,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         <button onClick={() => setSub("routes")} style={subBtn("routes")}>Routes → States ({routes.length}{unmapped.length ? `, ${unmapped.length} unmapped` : ""})</button>
         <button onClick={() => setSub("states")} style={subBtn("states")}>States ({states.length})</button>
         <button onClick={() => setSub("agents")} style={subBtn("agents")}>Agents & forms ({agentsList.length})</button>
+        <button onClick={() => setSub("report")} style={subBtn("report")}>Report</button>
         <button onClick={() => setSub("inbox")} style={subBtn("inbox")}>Mail inbox ({unassignedMail.length})</button>
         {canEdit && <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button onClick={() => setModal({ wizard: true })} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Request permits…</button>
@@ -8091,6 +8154,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         </>;
       })()}
 
+      {sub === "report" && <PermitReportPanel permitData={permitData} permits={permits} flights={flights} resources={resources} routeMap={routeMap} airportMap={airportMap} todayStr={todayStr} pushToast={pushToast} />}
       {sub === "agents" && <AgentsFormsPanel permitData={permitData} canEdit={canEdit} onReload={onReload} pushToast={pushToast} />}
 
       {sub === "inbox" && <>
