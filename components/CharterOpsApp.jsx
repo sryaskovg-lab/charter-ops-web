@@ -7906,8 +7906,8 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/permits/analyze", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } });
       const j = await res.json().catch(() => ({}));
-      if (!res.ok || j.error) pushToast(j.error || `Reading failed (${res.status}).`, "warn", true);
-      else pushToast(`Read ${j.read} attachment(s): ${j.withPermits} with permits, ${j.empty} without${j.failed ? `, ${j.failed} failed (${(j.errors || []).slice(0, 1).join("; ")})` : ""}${j.waiting ? `. ${j.waiting} more waiting — press again` : ""}.`, j.failed ? "warn" : "ok", true);
+      if (!res.ok || (j.error && !j.bodies)) pushToast(j.error || `Reading failed (${res.status}).`, "warn", true);
+      else pushToast(`${j.bodies ? `Read the text of ${j.bodies} e-mail(s). ` : ""}${j.error ? j.error + " " : ""}Read ${j.read} attachment(s): ${j.withPermits} with permits, ${j.empty} without${j.failed ? `, ${j.failed} failed (${(j.errors || []).slice(0, 1).join("; ")})` : ""}${j.waiting ? `. ${j.waiting} more waiting — press again` : ""}.`, j.failed ? "warn" : "ok", true);
       onReload();
     } catch (e) { pushToast(`Reading failed: ${e.message}`, "warn"); }
     setReading(false);
@@ -7952,7 +7952,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
       permitId = data.id;
     }
     // the brief itself becomes a document of the permit, and a note records where the decision came from
-    const { error: de } = await supabase.from("permit_documents").insert({ permit_id: permitId, path: prop.attachment_path, file_name: prop.file_name || "brief" });
+    const { error: de } = prop.attachment_path === "body" ? {} : await supabase.from("permit_documents").insert({ permit_id: permitId, path: prop.attachment_path, file_name: prop.file_name || "brief" });
     if (de && de.code !== "23505") pushToast(`Applied, but the document could not be linked: ${de.message}`, "warn");
     await supabase.from("permit_notes").insert({ permit_id: permitId, body: `Applied from ${prop.file_name || "attachment"} (e-mail "${email?.subject || "?"}"): ${it.decision}${it.permitNumber ? `, number ${it.permitNumber}` : ""}${it.validFrom ? `, ${it.validFrom} to ${it.validTo || "?"}` : ""}${it.remarks ? `. ${it.remarks}` : ""}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
     if (email && !email.permit_id && email.status === "unassigned") await supabase.from("permit_emails").update({ permit_id: permitId, status: "filed", match_reason: "applied from its attachment" }).eq("id", email.id);
