@@ -1611,6 +1611,22 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   function quickCreateFlight(prefill) { setAddFlightPrefill(prefill); setShowAddFlight(true); }
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showSchedMsgs, setShowSchedMsgs] = useState(false);
+  const [showMovements, setShowMovements] = useState(false);
+  // Movement (MVT) e-mail: actual departure / arrival times, checked every 5 minutes while a coordinator has the app open.
+  // It only stores times on flights and never changes the schedule.
+  useEffect(() => {
+    if (!perms.editFlight) return undefined;
+    let stop = false;
+    async function tick() {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (!session || stop) return;
+        await fetch("/api/movements/sync", { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } });
+      } catch { /* offline or not connected: try again later */ }
+    }
+    const first = setTimeout(tick, 12000), every = setInterval(tick, 5 * 60 * 1000);
+    return () => { stop = true; clearTimeout(first); clearInterval(every); };
+  }, [perms.editFlight]); // eslint-disable-line react-hooks/exhaustive-deps
   const [showAssignTails, setShowAssignTails] = useState(false);
   // While a coordinator has the app open, look for new SSIM/SSM/ASM e-mail every 15 minutes.
   // This only files the messages for review; it never changes the schedule.
@@ -1994,7 +2010,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues} permitMarks={permitMarks}
@@ -2032,6 +2048,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
       {showAssignTails && <AssignTailsModal flights={flights} resources={resources} isGrounded={isGrounded} perms={perms} onClose={() => setShowAssignTails(false)} onApply={applyTailAssignments} />}
+      {showMovements && <MovementsModal perms={perms} pushToast={pushToast} onClose={() => setShowMovements(false)} />}
       {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
       {showRotationGen && <RotationGenModal resources={resources} flights={flights} onClose={() => setShowRotationGen(false)} onCommit={commitRotationDates} onLogScr={logScrSent} />}
@@ -2055,7 +2072,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2341,6 +2358,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
                   <button onClick={() => { onBulkImport(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkImport")}</button>
                   <button onClick={() => { onScheduleMessages(); setShowMoreMenu(false); }} style={ctxMenuItem}>SSIM / SSM / ASM messages</button>
+                  <button onClick={() => { onMovements(); setShowMoreMenu(false); }} style={ctxMenuItem}>Movement messages (MVT)</button>
                   <button onClick={() => { onAssignTails(); setShowMoreMenu(false); }} style={ctxMenuItem}>Assign aircraft to flights without one</button>
                   <button onClick={() => { onBulkRetime(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("bulkRetime")}</button>
                   <button onClick={() => { onBulkDelete(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, color: C.red }}>{t("bulkDelete")}</button>
@@ -2495,13 +2513,18 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   const pillRadius = isNarrow ? 7 : BAR_H / 2;
                   const stripeW = isNarrow ? 5 : 6;
                   // already flown: arrival (scheduled, or an hour-based guess when there is none) is in the past
-                  const isFlown = f.status !== "cancelled" && (f.arrivalAt || new Date(f.start.getTime() + 2 * 3600000)) < now;
-                  const barBg = isFlown ? C.panel2 : isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
-                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
+                  // a landing / on-block message makes it flown at once; a departure message without one means it is in the air
+                  const gotAway = !!(f.actualOff || f.actualAirborne), gotBack = !!(f.actualLanding || f.actualOnBlock);
+                  const isFlown = f.status !== "cancelled" && (gotBack || (!gotAway && (f.arrivalAt || new Date(f.start.getTime() + 2 * 3600000)) < now));
+                  const inAir = f.status !== "cancelled" && gotAway && !gotBack;
+                  const barBg = isFlown ? C.panel2 : inAir ? C.green + "22" : isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
+                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : inAir ? `1.5px solid ${C.green}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
                   const pendingDraft = draftByFlightId.get(f.id);
                   const finalBorderStyle = pendingDraft ? `2px dashed ${C.amber}` : barBorderStyle;
-                  const depLabel = f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
-                  const arrLabel = f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
+                  const aHM = iso => (iso ? String(iso).slice(11, 16) : null);
+                  const depLabel = f.actualOff ? formatStationTime(new Date(f.actualOff), aHM(f.actualOff), f.origin, showLocal) : f.depTime ? formatStationTime(f.start, f.depTime, f.origin, showLocal) : null;
+                  const arrAct = f.actualOnBlock || f.actualLanding;
+                  const arrLabel = arrAct ? formatStationTime(new Date(arrAct), aHM(arrAct), f.destination, showLocal) : f.arrTime ? formatStationTime(f.start, f.arrTime, f.destination, showLocal) : null;
                   const isBeingTouchDragged = touchDrag?.flightId === f.id;
                   const isBeingResized = resizeDrag?.flightId === f.id;
                   const selected = f.id === selectedFlightId;
@@ -2688,6 +2711,10 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 999, border: `1.5px solid ${C.faint}`, display: "inline-block" }} />cannot check</span>
           </span>
         )}
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="A departure message has arrived but no landing yet.">
+          <span style={{ width: 16, height: 10, border: `1.5px solid ${C.green}`, borderRadius: 5, background: C.green + "22" }} />
+          in the air
+        </span>
         <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flights whose arrival time has passed are shown greyed out.">
           <span style={{ width: 16, height: 10, border: `1px solid ${C.border}`, borderRadius: 5, background: C.panel2, opacity: 0.62 }} />
           flown
@@ -2721,6 +2748,13 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
         return (
           <div style={{ position: "fixed", left: Math.min(hoverPos.x + 14, window.innerWidth - 260), top: hoverPos.y + 18, width: 240, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.2)", zIndex: 999, padding: 10, pointerEvents: "none", fontFamily: SANS }}>
             <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 12.5, marginBottom: 2 }}>{f.ref} · {f.origin}→{f.destination}</div>
+            {(f.actualOff || f.actualLanding || f.estArrival) && (
+              <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.text, marginBottom: 6, lineHeight: 1.5 }}>
+                {f.actualOff && <div>Off-block {String(f.actualOff).slice(11, 16)}Z{f.actualAirborne ? ` · airborne ${String(f.actualAirborne).slice(11, 16)}Z` : ""}</div>}
+                {f.actualLanding ? <div>Landed {String(f.actualLanding).slice(11, 16)}Z{f.actualOnBlock ? ` · on-block ${String(f.actualOnBlock).slice(11, 16)}Z` : ""}</div> : f.estArrival ? <div>ETA {String(f.estArrival).slice(11, 16)}Z</div> : null}
+                {f.actualReg && <div style={{ color: C.muted }}>Aircraft {f.actualReg}</div>}
+              </div>
+            )}
             <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{t("seatsSold", inv.allocated, inv.capacity)}{inv.oversoldBy > 0 ? t("oversoldBySuffix", inv.oversoldBy) : ""}</div>
             {inv.live.length === 0 ? (
               <div style={{ fontSize: 11.5, color: C.faint }}>{t("noAllotmentsYet")}</div>
@@ -3495,6 +3529,64 @@ function groupIntoPatternsAndRemaining(parsed) {
 }
 
 // ---------- SSIM / SSM / ASM messages: paste, upload, or review what arrived by e-mail ----------
+function MovementsModal({ perms, pushToast, onClose }) {
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState("");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  async function load() {
+    const { data, error } = await supabase.from("movement_messages").select("id,created_at,flight_ref,status,note,from_addr").neq("status", "ignored").order("created_at", { ascending: false }).limit(100);
+    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? "The movement table is missing: run migration 00039_actual_movements.sql in Supabase." : error.message); return; }
+    setErr(""); setRows(data || []);
+  }
+  useEffect(() => { load(); }, []);
+  async function call(path, body) {
+    setBusy(true); setResult(null);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch(path, { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}`, "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) pushToast(j.error || `Failed (${res.status}).`, "warn", true);
+      else setResult(j);
+      await load();
+      return j;
+    } catch (e) { pushToast(`Failed: ${e.message}`, "warn"); }
+    finally { setBusy(false); }
+  }
+  const ST = { applied: C.green, unmatched: C.amber, error: C.red };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(760px, 100%)", maxHeight: "88vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>Movement messages (MVT)</div>
+          <button onClick={onClose} style={miniBtn}>Close</button>
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>Actual off-block, airborne, landing and on-block times are stored on the flight and shown on the Gantt (flown flights grey out, flights in the air get a green outline). Mail with the Gmail label “Movements” is read every 5 minutes while the app is open. The schedule itself is never changed.</div>
+        {perms.editFlight && (
+          <div style={{ marginBottom: 12 }}>
+            <textarea value={text} onChange={e => setText(e.target.value)} rows={5} placeholder={"Paste a movement message, e.g.\nMVT\nDV5273/16.B3738.NQZ\nAD0225/0300 EA0810 AYT"} style={{ width: "100%", fontFamily: MONO, fontSize: 12, padding: 8, border: `1px solid ${C.border}`, borderRadius: 8, background: C.bg, color: C.text, boxSizing: "border-box" }} />
+            <div style={{ display: "flex", gap: 8, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <button disabled={busy || !text.trim()} onClick={async () => { const j = await call("/api/movements/paste", { text }); if (j && !j.error) setText(""); }} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber }}>Read pasted message</button>
+              <button disabled={busy} onClick={() => call("/api/movements/sync")} style={miniBtn}>Check mail now</button>
+              {result && <span style={{ fontSize: 12, color: C.muted }}>{result.applied != null ? `${result.applied} stored, ${result.unmatched || 0} not matched` : ""}{result.found != null ? `${result.found} message(s) in the label: ${result.applied || 0} stored, ${result.unmatched || 0} not matched${result.error ? ` — ${result.error}` : ""}` : ""}</span>}
+            </div>
+          </div>
+        )}
+        {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
+        {!err && rows.length === 0 && <div style={{ color: C.faint, fontSize: 12.5 }}>No movement messages yet.</div>}
+        {rows.map(r => (
+          <div key={r.id} style={{ display: "flex", gap: 10, padding: "6px 0", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12 }}>
+            <span style={{ width: 8, height: 8, borderRadius: 999, background: ST[r.status] || C.faint, marginTop: 5, flex: "none" }} />
+            <span style={{ flex: 1 }}>{r.note || r.flight_ref}</span>
+            <span style={{ color: C.faint, fontFamily: MONO, fontSize: 11, flex: "none" }}>{new Date(r.created_at).toISOString().slice(5, 16).replace("T", " ")}Z</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ScheduleMessagesModal({ flights, resources, allotments = [], perms, pushToast, onClose, onCreateRows, onUpdateFlight }) {
   const [tab, setTab] = useState("mail"); // mail | paste
   const [list, setList] = useState([]);
