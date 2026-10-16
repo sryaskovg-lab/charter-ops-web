@@ -7238,6 +7238,49 @@ function PermitModal({ permit, prefill, resources, knownStates, canEdit, permitD
         {!canEdit && <div style={{ fontSize: 11.5, color: C.faint, marginTop: 12 }}>Read-only: only schedule coordinators and management can change permits.</div>}
         {!isNew && permit.status === "approved" && eff === "approved" && <div style={{ fontSize: 11, color: C.faint, marginTop: 8 }}>Editing dates or aircraft on an approved permit changes which flights it covers immediately.</div>}
 
+        {!isNew && (() => {
+          const cur = flightsForPermit(permit, flights, routeMap, airportMap).sort((a, b) => a.start - b.start);
+          const asked = Array.isArray(permit.requestedFlights) ? new Set(permit.requestedFlights) : null;
+          const gone = asked ? permit.requestedFlights.filter(k => !cur.some(f => flightKey(f) === k)) : [];
+          const fl = f => `${dayOf(f.start)} ${f.ref} ${f.origin}-${f.destination} ${String(f.start.toISOString()).slice(11, 16)}${f.arrivalAt ? "–" + String(f.arrivalAt.toISOString()).slice(11, 16) : ""}Z`;
+          return <>
+            <div style={sec}>Flights this permit is about {cur.length ? `(${cur.length})` : ""}</div>
+            {cur.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No scheduled flight needs this permit right now.</div>}
+            <div style={{ maxHeight: 180, overflow: "auto", border: cur.length ? `1px solid ${C.borderSoft}` : "none", borderRadius: 8 }}>
+              {cur.map(f => {
+                const isNewer = asked && !asked.has(flightKey(f));
+                const past = dayOf(f.start) < dayOf(new Date());
+                return (
+                  <div key={f.id} style={{ display: "flex", gap: 8, fontSize: 12, fontFamily: MONO, padding: "3px 8px", borderTop: `1px solid ${C.borderSoft}`, color: past ? C.faint : C.text }}>
+                    <span style={{ flex: 1 }}>{fl(f)}</span>
+                    {isNewer && <span style={{ color: C.amber, fontFamily: "inherit" }} title="Not in the request that was sent">added since request</span>}
+                  </div>
+                );
+              })}
+            </div>
+            {gone.length > 0 && <div style={{ fontSize: 11.5, color: C.red, marginTop: 4 }}>Asked for but no longer scheduled: {gone.slice(0, 8).map(k => { const [ref, day, o, d2] = k.split("|"); return `${day} ${ref} ${o}-${d2}`; }).join("; ")}{gone.length > 8 ? ` … +${gone.length - 8}` : ""}</div>}
+            {permit.requestedAt && <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>Request e-mail prepared {fmtUtc(permit.requestedAt)}.</div>}
+          </>;
+        })()}
+        {!isNew && (() => {
+          const drafted = notes.filter(n => /e-mail drafted|amendment/i.test(n.body || "")).map(n => ({ at: n.created_at, dir: "out", who: n.created_by_name || "us", subject: n.body, text: null }));
+          const mail = permitData.emails.filter(m => m.permit_id === permit.id).map(m => ({ at: m.received_at, dir: "in", who: m.from_addr || "—", subject: m.subject || "(no subject)", text: m.body_text, id: m.id }));
+          const flow = [...drafted, ...mail].sort((a, b) => new Date(a.at) - new Date(b.at));
+          return <>
+            <div style={sec}>E-mail flow {flow.length ? `(${flow.length})` : ""}</div>
+            {flow.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>Nothing yet: drafted requests and the agent's replies appear here once the mail is filed to this permit.</div>}
+            {flow.map((e, i) => (
+              <details key={e.id || i} style={{ borderTop: `1px solid ${C.borderSoft}`, padding: "5px 0", fontSize: 12.5 }}>
+                <summary style={{ cursor: e.text ? "pointer" : "default", listStyle: e.text ? undefined : "none" }}>
+                  <span style={{ color: e.dir === "in" ? C.green : C.amber, fontWeight: 600 }}>{e.dir === "in" ? "← received" : "→ drafted"}</span>
+                  <span style={{ color: C.faint, fontFamily: MONO, fontSize: 10.5 }}> {fmtUtc(e.at)} · {e.who}</span>
+                  <div style={{ whiteSpace: "pre-wrap" }}>{e.subject}</div>
+                </summary>
+                {e.text && <div style={{ whiteSpace: "pre-wrap", fontSize: 12, color: C.muted, marginTop: 4, maxHeight: 220, overflow: "auto" }}>{e.text}</div>}
+              </details>
+            ))}
+          </>;
+        })()}
         {!isNew && <>
           <div style={sec}>Documents</div>
           {docs.length === 0 && <div style={{ fontSize: 12, color: C.faint }}>No documents yet.</div>}
@@ -7843,6 +7886,18 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
     permits.forEach(p => { if (!["draft", "submitted", "approved"].includes(p.status)) return; const ch = permitChanges(p, flights, routeMap, airportMap, todayStr); if (ch && ch.count) m.set(p.id, ch); });
     return m;
   }, [permits, flights, routeMap, airportMap, todayStr]);
+  // upcoming flights each live request is about, and how many e-mails are filed to it
+  const flightCountByPermit = useMemo(() => {
+    const m = new Map();
+    const upcoming = flights.filter(f => dayOf(f.start) >= todayStr);
+    permits.forEach(p => { if (["draft", "submitted", "approved"].includes(p.status)) m.set(p.id, flightsForPermit(p, upcoming, routeMap, airportMap).length); });
+    return m;
+  }, [permits, flights, routeMap, airportMap, todayStr]);
+  const mailCountByPermit = useMemo(() => {
+    const m = new Map();
+    emails.forEach(e => { if (e.permit_id) m.set(e.permit_id, (m.get(e.permit_id) || 0) + 1); });
+    return m;
+  }, [emails]);
   const gaps = useMemo(() => computePermitGaps(flights, routeMap, permits, settings, todayStr, airportMap), [flights, routeMap, permits, settings, todayStr, airportMap]);
   const unmappedAp = useMemo(() => unmappedAirports(flights, airportMap, todayStr), [flights, airportMap, todayStr]);
   const proposals = permitData.proposals || [];
@@ -8128,7 +8183,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
               const eff = effectiveStatus(p, todayStr);
               return <tr key={p.id} tabIndex={0} role="button" aria-label={`Open ${normState(p.state)} permit`} onClick={() => setModal({ permit: p })} onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setModal({ permit: p }); } }} style={{ borderTop: `1px solid ${C.borderSoft}`, cursor: "pointer", background: picked.has(p.id) ? C.amberSoft : undefined }}>
                 {canEdit && <td style={td} onClick={e => e.stopPropagation()} onKeyDown={e => e.stopPropagation()}><input type="checkbox" aria-label={`Select ${normState(p.state)} request`} checked={picked.has(p.id)} onChange={e => setPicked(prev => { const n = new Set(prev); e.target.checked ? n.add(p.id) : n.delete(p.id); return n; })} /></td>}
-                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}{changesByPermit.get(p.id) ? <span title="Flights added, cancelled or retimed since the request was sent" style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: C.amber, fontFamily: SANS }}>schedule changed (+{changesByPermit.get(p.id).added.length} −{changesByPermit.get(p.id).removed.length} ~{changesByPermit.get(p.id).changed.length})</span> : null}</td>
+                <td style={{ ...td, fontFamily: MONO, fontWeight: 700 }}>{stateLabel(p.state)}{p.kind === "landing" ? <span style={{ fontWeight: 500, color: C.muted, fontSize: 10.5 }}> · landing{p.airport ? ` ${p.airport}` : ""}</span> : ""}{(p.flightRefs || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.flightRefs.join("/")}</span> : ""}{(p.validDates || []).length ? <span style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {p.validDates.length} days</span> : ""}{flightCountByPermit.get(p.id) ? <span title="Upcoming flights this request covers. Open it to list them." style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · {flightCountByPermit.get(p.id)} flight{flightCountByPermit.get(p.id) === 1 ? "" : "s"}</span> : ""}{mailCountByPermit.get(p.id) ? <span title="E-mails filed to this request" style={{ fontWeight: 500, color: C.faint, fontSize: 10.5 }}> · ✉ {mailCountByPermit.get(p.id)}</span> : ""}{changesByPermit.get(p.id) ? <span title="Flights added, cancelled or retimed since the request was sent" style={{ marginLeft: 6, fontSize: 10.5, fontWeight: 600, color: C.amber, fontFamily: SANS }}>schedule changed (+{changesByPermit.get(p.id).added.length} −{changesByPermit.get(p.id).removed.length} ~{changesByPermit.get(p.id).changed.length})</span> : null}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.resourceIds.length ? p.resourceIds.map(codeOf).join(", ") : "All aircraft"}</td>
                 <td style={{ ...td, fontFamily: MONO, fontSize: 11 }}>{p.validFrom || "…"} → {p.validTo || "…"}{eff === "approved" && p.validTo && daysBetween(todayStr, p.validTo) <= 30 ? <div style={{ color: daysBetween(todayStr, p.validTo) <= 7 ? C.red : C.amber, fontFamily: SANS }}>ends in {daysBetween(todayStr, p.validTo)} day(s)</div> : null}</td>
                 <td style={td}><Badge color={PERMIT_STATUS_META[eff][1]}>{PERMIT_STATUS_META[eff][0].toUpperCase()}</Badge></td>
