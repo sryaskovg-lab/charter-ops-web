@@ -2494,7 +2494,9 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   const stripeColor = f.status === "cancelled" ? C.red : destColor;
                   const pillRadius = isNarrow ? 7 : BAR_H / 2;
                   const stripeW = isNarrow ? 5 : 6;
-                  const barBg = isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
+                  // already flown: arrival (scheduled, or an hour-based guess when there is none) is in the past
+                  const isFlown = f.status !== "cancelled" && (f.arrivalAt || new Date(f.start.getTime() + 2 * 3600000)) < now;
+                  const barBg = isFlown ? C.panel2 : isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
                   const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
                   const pendingDraft = draftByFlightId.get(f.id);
                   const finalBorderStyle = pendingDraft ? `2px dashed ${C.amber}` : barBorderStyle;
@@ -2531,7 +2533,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                           }
                         }}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
-                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
+                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : (isFlown && !selected ? 0.62 : 1))),
                           border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
                           borderRadius: pillRadius, cursor: (perms.editFlight && draftMode) ? "grab" : "pointer", overflow: "hidden", touchAction: (perms.editFlight && draftMode) ? "pan-y" : "auto" }}>
                         {permitMarks?.get(f.id) && (() => { const pm = permitMarks.get(f.id); const col = pm.level === "missing" ? C.red : pm.level === "requested" ? C.amber : C.faint; return <div role="img" aria-label={`Permit: ${pm.text}`} title={`Permit: ${pm.text}`} style={{ position: "absolute", top: 2, right: 3, width: 9, height: 9, borderRadius: 999, background: pm.level === "unchecked" ? "transparent" : col, border: `1.5px solid ${col}`, zIndex: 4, pointerEvents: "auto" }} />; })()}
@@ -2686,6 +2688,10 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 9, height: 9, borderRadius: 999, border: `1.5px solid ${C.faint}`, display: "inline-block" }} />cannot check</span>
           </span>
         )}
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flights whose arrival time has passed are shown greyed out.">
+          <span style={{ width: 16, height: 10, border: `1px solid ${C.border}`, borderRadius: 5, background: C.panel2, opacity: 0.62 }} />
+          flown
+        </span>
         {draftChanges.length > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ width: 16, height: 10, border: `2px dashed ${C.amber}`, borderRadius: 3, background: C.amberSoft }} />
