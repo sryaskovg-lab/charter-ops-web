@@ -2132,6 +2132,18 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
   const [resizeDrag, setResizeDrag] = useState(null); // { flightId, edge, startClientX, origDep, origArr, deltaMin }
   const panDragRef = useRef(null);
   const boardRef = useRef(null);
+  // "Today" (and the first view) scrolls the board so today's column is the first one you see.
+  const [scrollTodayKey, setScrollTodayKey] = useState(1);
+  useEffect(() => {
+    if (!scrollTodayKey) return undefined;
+    const id = setTimeout(() => {
+      const el = boardRef.current;
+      if (!el) return;
+      const col = colFor(new Date());
+      el.scrollLeft = col > 0 && col < DAYS ? Math.max(0, col * COL) : 0;
+    }, 60);
+    return () => clearTimeout(id);
+  }, [scrollTodayKey, viewStart]); // eslint-disable-line react-hooks/exhaustive-deps
   const [touchDrag, setTouchDrag] = useState(null); // { flightId, ref, x, y }
   const touchDragRef = useRef(null);
   const longPressTimerRef = useRef(null);
@@ -2313,7 +2325,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
           )}
           <div style={{ display: "flex", gap: 4, borderLeft: `1px solid ${C.borderSoft}`, paddingLeft: 12 }}>
             <button onClick={() => onShiftView(-1)} style={navBtn}>◀</button>
-            <button onClick={onJumpToday} style={navBtn}>{t("today")}</button>
+            <button onClick={() => { onJumpToday(); setScrollTodayKey(k => k + 1); }} style={navBtn}>{t("today")}</button>
             <button onClick={() => onShiftView(1)} style={navBtn}>▶</button>
           </div>
         </div>
@@ -2517,8 +2529,8 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                   const gotAway = !!(f.actualOff || f.actualAirborne), gotBack = !!(f.actualLanding || f.actualOnBlock);
                   const isFlown = f.status !== "cancelled" && (gotBack || (!gotAway && (f.arrivalAt || new Date(f.start.getTime() + 2 * 3600000)) < now));
                   const inAir = f.status !== "cancelled" && gotAway && !gotBack;
-                  const barBg = isFlown ? C.panel2 : inAir ? C.green + "22" : isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "14";
-                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : inAir ? `1.5px solid ${C.green}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
+                  const barBg = isFlown ? stripeColor + "55" : inAir ? C.green + "44" : isFerry ? `repeating-linear-gradient(45deg, ${C.panel}, ${C.panel} 5px, ${C.panel2} 5px, ${C.panel2} 10px)` : stripeColor + "30";
+                  const barBorderStyle = f.status === "cancelled" ? `1.5px solid ${C.red}` : inAir ? `2px solid ${C.green}` : isFlown ? `1.5px solid ${stripeColor}` : (isFerry || f.status === "tentative") ? `1px dashed ${C.border}` : `1px solid ${C.border}`;
                   const pendingDraft = draftByFlightId.get(f.id);
                   const finalBorderStyle = pendingDraft ? `2px dashed ${C.amber}` : barBorderStyle;
                   const aHM = iso => (iso ? String(iso).slice(11, 16) : null);
@@ -2556,9 +2568,10 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
                           }
                         }}
                         style={{ position: "absolute", left: leftPx, top: barTop, width: widthPx, height: BAR_H,
-                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : (isFlown && !selected ? 0.62 : 1))),
+                          background: multiSelected ? C.amberSoft : barBg, opacity: isBeingTouchDragged ? 0.35 : (dimmed ? 0.22 : (pendingDraft?.changeType === "delete" ? 0.45 : 1)),
                           border: multiSelected ? `1.5px solid ${C.amber}` : finalBorderStyle,
                           borderRadius: pillRadius, cursor: (perms.editFlight && draftMode) ? "grab" : "pointer", overflow: "hidden", touchAction: (perms.editFlight && draftMode) ? "pan-y" : "auto" }}>
+                        {isFlown && <div aria-label="Flown" title={gotBack ? "Flown (landing reported)" : "Flown (by schedule)"} style={{ position: "absolute", bottom: 1, right: 4, fontSize: 11, fontWeight: 800, lineHeight: 1, color: gotBack ? C.green : C.muted, zIndex: 4 }}>✓</div>}
                         {permitMarks?.get(f.id) && (() => { const pm = permitMarks.get(f.id); const col = pm.level === "missing" ? C.red : pm.level === "requested" ? C.amber : C.faint; return <div role="img" aria-label={`Permit: ${pm.text}`} title={`Permit: ${pm.text}`} style={{ position: "absolute", top: 2, right: 3, width: 9, height: 9, borderRadius: 999, background: pm.level === "unchecked" ? "transparent" : col, border: `1.5px solid ${col}`, zIndex: 4, pointerEvents: "auto" }} />; })()}
                         {pendingDraft && (
                           <div style={{ position: "absolute", top: -6, right: -4, width: 14, height: 14, borderRadius: 999, background: C.amber, color: ON_ACCENT, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 5 }}>!</div>
@@ -2715,9 +2728,9 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
           <span style={{ width: 16, height: 10, border: `1.5px solid ${C.green}`, borderRadius: 5, background: C.green + "22" }} />
           in the air
         </span>
-        <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flights whose arrival time has passed are shown greyed out.">
-          <span style={{ width: 16, height: 10, border: `1px solid ${C.border}`, borderRadius: 5, background: C.panel2, opacity: 0.62 }} />
-          flown
+        <span style={{ display: "flex", alignItems: "center", gap: 6 }} title="Flights whose arrival time has passed (or whose landing was reported) are shaded and carry a ✓.">
+          <span style={{ width: 16, height: 10, border: `1.5px solid ${C.muted}`, borderRadius: 5, background: C.muted + "55" }} />
+          flown ✓
         </span>
         {draftChanges.length > 0 && (
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
