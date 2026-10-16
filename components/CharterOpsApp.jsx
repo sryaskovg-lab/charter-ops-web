@@ -8088,33 +8088,38 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
     const items = prop.items.map((x, k) => k === i ? { ...x, itemState: "dismissed" } : x);
     if (await saveItems(prop, items)) onReload();
   }
-  async function applyItem(prop, i) {
-    const it = prop.items[i];
+  // batch (Confirm all): { items: Map proposalId -> items so far, fresh: Map permitId -> latest updated_at/status, skipped: [] }; returns true when applied
+  async function applyItem(prop, i, batch) {
+    const warn = (msg, long) => { if (batch) batch.skipped.push(msg); else pushToast(msg, "warn", long); return false; };
+    const base = batch?.items.get(prop.id) || prop.items;
+    const it = base[i];
     const next = { granted: "approved", rejected: "rejected", pending: "submitted", cancelled: "cancelled" }[it.decision];
     const email = emails.find(m => m.id === prop.email_id);
-    if (it.match?.how === "ambiguous") { pushToast("Several open requests match this item. Cancel the duplicate in Requests first, or dismiss this item and edit the right request by hand.", "warn", true); return; }
-    if (it.decision === "granted" && (!it.validFrom || !it.validTo)) { pushToast(`The brief gives no validity dates for ${it.state}. Dismiss this item and enter the permit by hand.`, "warn", true); return; }
+    if (it.match?.how === "ambiguous") return warn(`${normState(it.state)}: several open requests match; cancel the duplicate first`, true);
+    if (it.decision === "granted" && (!it.validFrom || !it.validTo)) return warn(`${normState(it.state)}: no validity dates in the brief`, true);
     const aircraftIds = (it.aircraft || []).map(code => resources.find(r => r.code === code)?.id).filter(Boolean);
     const { data: auth } = await supabase.auth.getUser();
     let permitId = it.match?.permitId || null;
     const nowIso = new Date().toISOString();
     if (permitId) {
-      const p = permits.find(x => x.id === permitId);
-      if (!p) { pushToast("The matched request no longer exists. Reload and try again.", "warn"); return; }
+      const p0 = permits.find(x => x.id === permitId);
+      if (!p0) return warn("The matched request no longer exists. Reload and try again.");
+      const p = { ...p0, ...(batch?.fresh.get(permitId) || {}) };
       const patch = { permit_number: it.permitNumber || p.permitNumber || null, authority_ref: it.authorityRef || p.authorityRef || null,
         valid_from: it.validFrom || p.validFrom || null, valid_to: it.validTo || p.validTo || null,
         resource_ids: aircraftIds.length ? aircraftIds : p.resourceIds, flight_refs: (it.flights || []).length ? it.flights : (p.flightRefs || []), valid_dates: (it.dates || []).length ? it.dates : (p.validDates || []) };
       if (next !== p.status) { patch.status = next; if (next === "submitted") patch.submitted_at = p.submittedAt || nowIso; if (next === "approved" || next === "rejected") patch.decided_at = nowIso; }
-      const { data, error: e } = await supabase.from("overfly_permits").update(patch).eq("id", permitId).eq("updated_at", p.updatedAt).select("id");
-      if (e || !data?.length) { pushToast(`Not applied: ${e?.message || "the request was changed by someone else, deleted, or you don't have permission"}. Reload and try again.`, "warn", true); onReload(); return; }
+      const { data, error: e } = await supabase.from("overfly_permits").update(patch).eq("id", permitId).eq("updated_at", p.updatedAt).select("id,updated_at");
+      if (e || !data?.length) { if (!batch) onReload(); return warn(`Not applied: ${e?.message || "the request was changed by someone else, deleted, or you don't have permission"}. Reload and try again.`, true); }
+      batch?.fresh.set(permitId, { updatedAt: data[0].updated_at, status: patch.status || p.status, permitNumber: patch.permit_number, authorityRef: patch.authority_ref, validFrom: patch.valid_from, validTo: patch.valid_to, resourceIds: patch.resource_ids, flightRefs: patch.flight_refs, validDates: patch.valid_dates });
     } else {
-      if (it.decision === "cancelled") { pushToast("Nothing to cancel: no matching request exists. Dismiss this item.", "warn"); return; }
+      if (it.decision === "cancelled") return warn(`${normState(it.state)}: nothing to cancel, no matching request exists`);
       const row = { kind: it.kind, airport: it.airport || null, state: normState(it.state), status: next, valid_from: it.validFrom || null, valid_to: it.validTo || null, resource_ids: aircraftIds,
         flight_refs: it.flights || [], valid_dates: it.dates || [], permit_number: it.permitNumber || null, authority_ref: it.authorityRef || null };
       if (next === "submitted") row.submitted_at = nowIso;
       if (next === "approved" || next === "rejected") row.decided_at = nowIso;
       const { data, error: e } = await supabase.from("overfly_permits").insert(row).select("id").single();
-      if (e || !data) { pushToast(`Not applied: ${e?.message || "could not create the permit"}`, "warn", true); return; }
+      if (e || !data) return warn(`Not applied: ${e?.message || "could not create the permit"}`, true);
       permitId = data.id;
     }
     // the brief itself becomes a document of the permit, and a note records where the decision came from
@@ -8122,9 +8127,26 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
     if (de && de.code !== "23505") pushToast(`Applied, but the document could not be linked: ${de.message}`, "warn");
     await supabase.from("permit_notes").insert({ permit_id: permitId, body: `Applied from ${prop.file_name || "attachment"} (e-mail "${email?.subject || "?"}"): ${it.decision}${it.permitNumber ? `, number ${it.permitNumber}` : ""}${it.validFrom ? `, ${it.validFrom} to ${it.validTo || "?"}` : ""}${it.remarks ? `. ${it.remarks}` : ""}`, created_by: auth?.user?.id, created_by_name: auth?.user?.email });
     if (email && !email.permit_id && email.status === "unassigned") await supabase.from("permit_emails").update({ permit_id: permitId, status: "filed", match_reason: "applied from its attachment" }).eq("id", email.id);
-    const items = prop.items.map((x, k) => k === i ? { ...x, itemState: "applied", appliedPermitId: permitId } : x);
+    const items = base.map((x, k) => k === i ? { ...x, itemState: "applied", appliedPermitId: permitId } : x);
     await saveItems(prop, items);
+    if (batch) { batch.items.set(prop.id, items); return true; }
     pushToast(`${normState(it.state)} ${it.kind} permit set to ${PERMIT_STATUS_META[next][0].toLowerCase()}.`, "ok");
+    onReload();
+    return true;
+  }
+  const [confirmingAll, setConfirmingAll] = useState(false);
+  async function confirmAll() {
+    const todo = proposals.filter(x => x.status === "pending").flatMap(prop => (prop.items || []).map((it, i) => ({ prop, it, i })).filter(x => x.it.itemState === "open"));
+    if (!todo.length) return;
+    const cnt = d => todo.filter(x => x.it.decision === d).length;
+    if (!window.confirm(`Apply ${todo.length} open item(s) at once?\n\n${cnt("granted")} approved · ${cnt("rejected")} refused · ${cnt("pending")} requested · ${cnt("cancelled")} cancelled\n\nItems that cannot be applied safely (several matching requests, approval without dates) are skipped and stay open. Dismissed items are not touched.`)) return;
+    setConfirmingAll(true);
+    const batch = { items: new Map(), fresh: new Map(), skipped: [] };
+    let ok = 0;
+    try { for (const { prop, i } of todo) { if (await applyItem(prop, i, batch)) ok++; } }
+    catch (e) { batch.skipped.push(e.message); }
+    setConfirmingAll(false);
+    pushToast(`Applied ${ok} of ${todo.length} item(s).${batch.skipped.length ? ` Skipped ${batch.skipped.length}: ${[...new Set(batch.skipped)].slice(0, 3).join("; ")}${batch.skipped.length > 3 ? "…" : ""}` : ""}`, batch.skipped.length ? "warn" : "ok", true);
     onReload();
   }
   async function ignoreMail(m) {
@@ -8212,6 +8234,7 @@ function PermitsPanel({ permitData, flights, resources, perms, onReload, onJumpT
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>PDF and TXT attachments (for example the Commander's Brief from Access Support) are read automatically after each mail check. What the app found is listed here as a <b>proposal</b>. Nothing changes and no flight counts as covered until you press <b>Confirm</b>. Check the numbers and dates against the document: open it from the permit afterwards.</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "center", flexWrap: "wrap" }}>
           {canEdit && <button disabled={reading} onClick={readBriefs} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{reading ? "Reading…" : "Read attachments now"}</button>}
+          {canEdit && openItemCount > 0 && <button disabled={confirmingAll} onClick={confirmAll} style={{ ...miniBtn, color: C.green, borderColor: C.green, fontWeight: 600 }}>{confirmingAll ? "Applying…" : `Confirm all (${openItemCount})`}</button>}
           <span style={{ fontSize: 11, color: C.faint }}>{proposals.filter(x => x.status === "pending").length} document(s) waiting · {proposals.filter(x => x.status === "done").length} done · {proposals.filter(x => x.status === "empty").length} without permits · {proposals.filter(x => x.status === "error").length} unreadable</span>
         </div>
         {!permitData.briefsReady && <div style={{ border: `1px solid ${C.red}55`, background: C.redSoft, borderRadius: 12, padding: "8px 12px", fontSize: 12.5, marginBottom: 10 }}>Run migration <b>00031_landing_permits_and_briefs.sql</b> in Supabase first.</div>}
