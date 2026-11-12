@@ -1261,8 +1261,10 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   async function repriceAllotment(id, newPrice) {
     const current = allotments.find(a => a.id === id);
     if (!current || !newPrice || newPrice <= 0 || newPrice === current.pricePerSeat) return;
-    const { error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).eq("id", id);
-    if (error) { pushToast(`Could not change price: ${error.message}`, "warn"); return; }
+    const { data: saved, error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).eq("id", id).select("id,price_per_seat");
+    if (error) { pushToast(`Could not change price: ${error.message}`, "warn", true); return; }
+    if (!saved?.length) { pushToast("The price was not saved: the database changed no rows (no permission, or the allotment no longer exists). Reload the page and try again.", "warn", true); return; }
+    if (Number(saved[0].price_per_seat) !== newPrice) { pushToast(`The database kept $${saved[0].price_per_seat} instead of $${newPrice}. Tell the developer.`, "warn", true); return; }
     setAllotmentsRaw(as => as.map(a => a.id === id ? { ...a, pricePerSeat: newPrice } : a));
     const op = operators.find(o => o.id === current.operatorId);
     pushToast(`Price changed to $${newPrice}/seat — ${current.seatsAllocated} already-allocated seat${current.seatsAllocated === 1 ? "" : "s"} repriced retroactively`, "warn");
@@ -1275,19 +1277,21 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // side effect of editing a rate. Chunked at 150 ids for PostgREST's URL-length limit.
   async function repriceAllotmentsBulk(ids, newPrice) {
     if (!ids.length || !(newPrice > 0)) return;
-    let done = 0, failed = 0;
+    let done = 0, failed = 0, lastErr = "";
     for (let i = 0; i < ids.length; i += 150) {
       const chunk = ids.slice(i, i + 150);
-      const { error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).in("id", chunk);
-      if (error) { failed += chunk.length; continue; }
-      const chunkSet = new Set(chunk);
-      setAllotmentsRaw(as => as.map(a => chunkSet.has(a.id) ? { ...a, pricePerSeat: newPrice } : a));
-      done += chunk.length;
+      const { data: saved, error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).in("id", chunk).select("id");
+      if (error) { failed += chunk.length; lastErr = error.message; continue; }
+      const okIds = new Set((saved || []).map(r => r.id));
+      if (okIds.size < chunk.length) { failed += chunk.length - okIds.size; lastErr = "some rows were not changed (permission?)"; }
+      if (!okIds.size) continue;
+      setAllotmentsRaw(as => as.map(a => okIds.has(a.id) ? { ...a, pricePerSeat: newPrice } : a));
+      done += okIds.size;
     }
     if (done) {
-      pushToast(`Repriced ${done} allotment${done === 1 ? "" : "s"} to $${newPrice}/seat${failed ? ` — ${failed} failed` : ""}`, failed ? "warn" : "ok");
+      pushToast(`Repriced ${done} allotment${done === 1 ? "" : "s"} to $${newPrice}/seat${failed ? ` — ${failed} failed (${lastErr})` : ""}`, failed ? "warn" : "ok", true);
       pushNotification("Allotments repriced", `${done} allotment${done === 1 ? "" : "s"} → $${newPrice}/seat`, "allotment");
-    } else pushToast("Could not reprice allotments", "warn");
+    } else pushToast(`Could not reprice allotments${lastErr ? `: ${lastErr}` : ""}`, "warn", true);
   }
 
   async function removeAllotment(id) {
