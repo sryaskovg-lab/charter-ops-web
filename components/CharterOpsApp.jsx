@@ -1277,7 +1277,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // rule as repriceAllotment — only ever called from an explicit, confirmed click, never as a
   // side effect of editing a rate. Chunked at 150 ids for PostgREST's URL-length limit.
   async function repriceAllotmentsBulk(ids, newPrice) {
-    if (!ids.length || !(newPrice > 0)) return;
+    if (!ids.length || !(newPrice >= 0)) return;
     let done = 0, failed = 0, lastErr = "";
     for (let i = 0; i < ids.length; i += 150) {
       const chunk = ids.slice(i, i + 150);
@@ -5862,7 +5862,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                                 if (price === 0 && !window.confirm(`Set the ${isRtKey(route) ? route.slice(RT_PREFIX.length) : route} rate to $0?`)) return;
                                 setRouteRate(o, route, price);
                                 // the rate card only prices seats allocated later: offer to move the seats already allocated on this route too
-                                if (perms.approveContracts && price > 0) {
+                                if (perms.approveContracts) {
                                   const { target, list } = allocationsForRate(opAllotments, route, price);
                                   if (list.length && window.confirm(`Also set the ${list.length} existing allocation(s) on this route (${list.reduce((n, x) => n + x.seatsAllocated, 0)} seats, future flights) to $${target} per seat?\n\nOK = reprice them now. Cancel = only new allocations use the new rate.`)) onRepriceAllotmentsBulk(list.map(x => x.id), target);
                                 }
