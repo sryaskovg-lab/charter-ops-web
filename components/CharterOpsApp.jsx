@@ -1260,7 +1260,8 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // editing a rate card or adding more seats.
   async function repriceAllotment(id, newPrice) {
     const current = allotments.find(a => a.id === id);
-    if (!current || !newPrice || newPrice <= 0 || newPrice === current.pricePerSeat) return;
+    if (!current || !Number.isFinite(newPrice) || newPrice < 0 || newPrice === current.pricePerSeat) return;
+    if (newPrice === 0 && !window.confirm(`Set these ${current.seatsAllocated} seats to $0 per seat (free of charge)?`)) return;
     const { data: saved, error } = await supabase.from("allotments").update({ price_per_seat: newPrice }).eq("id", id).select("id,price_per_seat");
     if (error) { pushToast(`Could not change price: ${error.message}`, "warn", true); return; }
     if (!saved?.length) { pushToast("The price was not saved: the database changed no rows (no permission, or the allotment no longer exists). Reload the page and try again.", "warn", true); return; }
@@ -3109,7 +3110,7 @@ function FlightDrawer({ flight, resources, operators, allotments, inventory, per
                   <>
                     <span style={{ fontFamily: MONO }}>{a.seatsAllocated} seats @ $</span>
                     <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 70, padding: "2px 5px" }} />
-                    <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10.5, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                    <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={String(repricingValue).trim() === "" || !(+repricingValue >= 0) || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10.5, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
                     <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10.5 }}>{t("cancel")}</button>
                   </>
                 ) : (
@@ -5982,7 +5983,7 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                                 <>
                                   <span>{a.seatsAllocated} seats @ $</span>
                                   <input type="number" min={0} autoFocus value={repricingValue} onChange={e => setRepricingValue(e.target.value)} style={{ ...inputStyle, width: 65, padding: "2px 5px" }} />
-                                  <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={!repricingValue || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
+                                  <button onClick={() => { onRepriceAllotment(a.id, +repricingValue); setRepricingId(null); }} disabled={String(repricingValue).trim() === "" || !(+repricingValue >= 0) || +repricingValue === a.pricePerSeat} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{t("confirm")}</button>
                                   <button onClick={() => setRepricingId(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
                                 </>
                               ) : (
