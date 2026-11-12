@@ -5850,7 +5850,19 @@ function OperatorsPanel({ operators, setOperators, flights, allotments, perms, c
                           {editingRoute === route ? (
                             <>
                               <input type="number" min={0} autoFocus value={editingRouteValue} onChange={e => setEditingRouteValue(e.target.value)} style={{ ...inputStyle, width: 90 }} />
-                              <button onClick={() => { setRouteRate(o, route, editingRouteValue === "" ? 0 : +editingRouteValue); setEditingRoute(null); }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{perms.approveContracts ? t("confirm") : t("proposeBtn")}</button>
+                              <button onClick={() => {
+                                const v = String(editingRouteValue).trim().replace(",", ".");
+                                const price = +v;
+                                if (v === "" || !Number.isFinite(price) || price < 0) { window.alert("Enter the price per seat as a number, for example 150."); return; }
+                                if (price === 0 && !window.confirm(`Set the ${isRtKey(route) ? route.slice(RT_PREFIX.length) : route} rate to $0?`)) return;
+                                setRouteRate(o, route, price);
+                                // the rate card only prices seats allocated later: offer to move the seats already allocated on this route too
+                                if (perms.approveContracts && price > 0) {
+                                  const { target, list } = allocationsForRate(opAllotments, route, price);
+                                  if (list.length && window.confirm(`Also set the ${list.length} existing allocation(s) on this route (${list.reduce((n, x) => n + x.seatsAllocated, 0)} seats, future flights) to $${target} per seat?\n\nOK = reprice them now. Cancel = only new allocations use the new rate.`)) onRepriceAllotmentsBulk(list.map(x => x.id), target);
+                                }
+                                setEditingRoute(null);
+                              }} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10, background: C.amber, color: ON_ACCENT, borderColor: C.amber }}>{perms.approveContracts ? t("confirm") : t("proposeBtn")}</button>
                               <button onClick={() => setEditingRoute(null)} style={{ ...miniBtn, padding: "2px 7px", fontSize: 10 }}>{t("cancel")}</button>
                             </>
                           ) : (
