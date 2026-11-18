@@ -1616,6 +1616,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showSchedMsgs, setShowSchedMsgs] = useState(false);
   const [showMovements, setShowMovements] = useState(false);
+  const [showFuel, setShowFuel] = useState(false);
   // Movement (MVT) e-mail: actual departure / arrival times, checked every 5 minutes while a coordinator has the app open.
   // It only stores times on flights and never changes the schedule.
   useEffect(() => {
@@ -2014,7 +2015,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onFuel={() => setShowFuel(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues} permitMarks={permitMarks}
@@ -2052,6 +2053,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
       {showAssignTails && <AssignTailsModal flights={flights} resources={resources} isGrounded={isGrounded} perms={perms} onClose={() => setShowAssignTails(false)} onApply={applyTailAssignments} />}
+      {showFuel && <FuelPricesModal flights={flights} perms={perms} pushToast={pushToast} onClose={() => setShowFuel(false)} />}
       {showMovements && <MovementsModal perms={perms} pushToast={pushToast} onClose={() => setShowMovements(false)} />}
       {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
@@ -2076,7 +2078,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onFuel, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2369,6 +2371,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             {showMoreMenu && (
               <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.16)", zIndex: 60, minWidth: 170, padding: 6 }}>
                 <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
+                <button onClick={() => { onFuel(); setShowMoreMenu(false); }} style={ctxMenuItem}>Fuel prices by airport</button>
                 {perms.editFlight && <>
                   <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("generateRotation")}</button>
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
@@ -3546,6 +3549,114 @@ function groupIntoPatternsAndRemaining(parsed) {
 }
 
 // ---------- SSIM / SSM / ASM messages: paste, upload, or review what arrived by e-mail ----------
+const FUEL_UNITS = ["USD/tonne", "USD/kg", "USD/USG", "USD/litre"];
+// One current fuel price per airport, listed for every airport (origin or destination) that appears in the schedule.
+function FuelPricesModal({ flights, perms, pushToast, onClose }) {
+  const [rows, setRows] = useState(new Map()); // airport -> saved row
+  const [edits, setEdits] = useState({});      // airport -> { price, unit, supplier, valid_from }
+  const [names, setNames] = useState(new Map());
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [filter, setFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [fill, setFill] = useState({ price: "", unit: "USD/tonne" });
+  const canEdit = !!perms.editFlight;
+  async function load() {
+    const { data, error } = await supabase.from("airport_fuel_prices").select("airport,price,unit,supplier,valid_from,updated_at");
+    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? "The fuel price table is missing: run migration 00040_airport_fuel_prices.sql in Supabase." : error.message); return; }
+    setErr(""); setRows(new Map((data || []).map(r => [r.airport, r])));
+  }
+  useEffect(() => {
+    load();
+    fetch("/data/airports.json").then(r => r.json()).then(a => setNames(new Map(a.map(x => [x[0], `${x[5]} (${x[4]})`])))).catch(() => {});
+  }, []);
+  const airports = useMemo(() => {
+    const m = new Map();
+    const add = (code, f) => { if (!code) return; const c = String(code).toUpperCase(); const e = m.get(c) || { code: c, n: 0, next: null }; e.n++; if (f.start && f.start >= new Date() && (!e.next || f.start < e.next)) e.next = f.start; m.set(c, e); };
+    flights.forEach(f => { add(f.origin, f); add(f.destination, f); });
+    return [...m.values()].sort((a, b) => a.code.localeCompare(b.code));
+  }, [flights]);
+  const val = (code, k) => edits[code]?.[k] !== undefined ? edits[code][k] : (rows.get(code)?.[k] ?? (k === "unit" ? "USD/tonne" : ""));
+  const dirty = code => edits[code] && Object.keys(edits[code]).some(k => String(edits[code][k] ?? "") !== String(rows.get(code)?.[k] ?? (k === "unit" ? "USD/tonne" : "")));
+  const setEdit = (code, k, v) => setEdits(e => ({ ...e, [code]: { ...(e[code] || {}), [k]: v } }));
+  const priced = airports.filter(a => rows.has(a.code)).length;
+  const shown = airports.filter(a => (filter === "all" || (filter === "missing" ? !rows.has(a.code) : rows.has(a.code))) && (!search.trim() || `${a.code} ${names.get(a.code) || ""}`.toLowerCase().includes(search.trim().toLowerCase())));
+  function toRow(code, src) {
+    const price = String(src.price).trim().replace(",", ".");
+    if (price === "" || !Number.isFinite(+price) || +price < 0) return null;
+    return { airport: code, price: +price, unit: src.unit || "USD/tonne", supplier: (src.supplier || "").trim() || null, valid_from: src.valid_from || null };
+  }
+  async function save(codes) {
+    const payload = []; const bad = [];
+    codes.forEach(c => { const r = toRow(c, { price: val(c, "price"), unit: val(c, "unit"), supplier: val(c, "supplier"), valid_from: val(c, "valid_from") }); if (r) payload.push(r); else bad.push(c); });
+    if (!payload.length) { pushToast(`Enter the price as a number${bad.length ? ` (${bad.slice(0, 5).join(", ")})` : ""}.`, "warn"); return; }
+    setBusy(true);
+    const { data, error } = await supabase.from("airport_fuel_prices").upsert(payload, { onConflict: "airport" }).select("airport");
+    setBusy(false);
+    if (error) { pushToast(`Fuel prices not saved: ${error.message}`, "warn", true); return; }
+    if ((data || []).length < payload.length) { pushToast("Some prices were not saved (no permission?). Reload and try again.", "warn", true); }
+    else pushToast(`Saved ${payload.length} fuel price${payload.length === 1 ? "" : "s"}.${bad.length ? ` Skipped ${bad.length} without a valid number.` : ""}`, "ok");
+    setEdits(e => { const n = { ...e }; payload.forEach(r => delete n[r.airport]); return n; });
+    load();
+  }
+  async function fillMissing() {
+    const price = String(fill.price).trim().replace(",", ".");
+    const missing = airports.filter(a => !rows.has(a.code));
+    if (price === "" || !(+price >= 0) || !missing.length) return;
+    setBusy(true);
+    const { error } = await supabase.from("airport_fuel_prices").upsert(missing.map(a => ({ airport: a.code, price: +price, unit: fill.unit })), { onConflict: "airport" });
+    setBusy(false);
+    if (error) { pushToast(`Fuel prices not saved: ${error.message}`, "warn", true); return; }
+    pushToast(`Set ${price} ${fill.unit} at ${missing.length} airport(s) that had no price. Adjust the individual airports below.`, "ok", true);
+    setFill(f => ({ ...f, price: "" })); load();
+  }
+  const dirtyCodes = airports.filter(a => dirty(a.code)).map(a => a.code);
+  const cell = { padding: "4px 6px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(920px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>Fuel prices by airport</div>
+          <button onClick={onClose} style={miniBtn}>Close</button>
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>One current price for every airport in the schedule (departure or arrival). {priced} of {airports.length} airports have a price. {canEdit ? "Type a price and press Save. The unit is kept per airport." : "Only schedule coordinators and management can change prices."}</div>
+        {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+          {[["all", `All (${airports.length})`], ["missing", `No price (${airports.length - priced})`], ["priced", `Priced (${priced})`]].map(([k, l]) => <button key={k} onClick={() => setFilter(k)} style={{ ...miniBtn, background: filter === k ? C.amberSoft : C.panel, borderColor: filter === k ? C.amber : C.border, fontWeight: filter === k ? 600 : 400 }}>{l}</button>)}
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search code or name" style={{ ...inputStyle, width: 170 }} />
+          {canEdit && dirtyCodes.length > 0 && <button disabled={busy} onClick={() => save(dirtyCodes)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save {dirtyCodes.length} change{dirtyCodes.length === 1 ? "" : "s"}</button>}
+        </div>
+        {canEdit && airports.length > priced && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10, fontSize: 12, color: C.muted }}>
+            <span>Start quickly: give the {airports.length - priced} airports without a price the same price</span>
+            <input value={fill.price} onChange={e => setFill(f => ({ ...f, price: e.target.value }))} placeholder="price" style={{ ...inputStyle, width: 80 }} />
+            <select value={fill.unit} onChange={e => setFill(f => ({ ...f, unit: e.target.value }))} style={{ ...inputStyle, width: 110 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select>
+            <button disabled={busy || fill.price === ""} onClick={fillMissing} style={miniBtn}>Apply to airports without a price</button>
+          </div>
+        )}
+        <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={cell}>Airport</th><th style={cell}>Flights</th><th style={cell}>Price</th><th style={cell}>Unit</th><th style={cell}>Supplier</th><th style={cell}>Valid from</th><th style={cell}></th></tr></thead>
+          <tbody>
+            {shown.map(a => {
+              const has = rows.has(a.code);
+              return <tr key={a.code} style={{ background: dirty(a.code) ? C.amberSoft : "transparent" }}>
+                <td style={cell}><b style={{ fontFamily: MONO }}>{a.code}</b><div style={{ fontSize: 10.5, color: C.faint }}>{names.get(a.code) || ""}</div></td>
+                <td style={{ ...cell, color: C.muted }}>{a.n}</td>
+                <td style={cell}>{canEdit ? <input value={val(a.code, "price")} onChange={e => setEdit(a.code, "price", e.target.value)} placeholder={has ? "" : "no price"} inputMode="decimal" style={{ ...inputStyle, width: 80, borderColor: has ? undefined : C.amber }} /> : (has ? rows.get(a.code).price : <span style={{ color: C.faint }}>—</span>)}</td>
+                <td style={cell}>{canEdit ? <select value={val(a.code, "unit")} onChange={e => setEdit(a.code, "unit", e.target.value)} style={{ ...inputStyle, width: 105 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select> : (has ? rows.get(a.code).unit : "")}</td>
+                <td style={cell}>{canEdit ? <input value={val(a.code, "supplier")} onChange={e => setEdit(a.code, "supplier", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.supplier}</td>
+                <td style={cell}>{canEdit ? <input type="date" value={val(a.code, "valid_from") || ""} onChange={e => setEdit(a.code, "valid_from", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.valid_from}</td>
+                <td style={{ ...cell, whiteSpace: "nowrap" }}>{canEdit && <button disabled={busy || !dirty(a.code)} onClick={() => save([a.code])} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Save</button>}</td>
+              </tr>;
+            })}
+            {shown.length === 0 && <tr><td colSpan={7} style={{ ...cell, color: C.faint, textAlign: "center", padding: 16 }}>{airports.length ? "No airports match." : "No flights in the schedule yet."}</td></tr>}
+          </tbody>
+        </table></div>
+      </div>
+    </div>
+  );
+}
+
 function MovementsModal({ perms, pushToast, onClose }) {
   const [rows, setRows] = useState([]);
   const [err, setErr] = useState("");
