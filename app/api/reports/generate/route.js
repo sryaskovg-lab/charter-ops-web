@@ -26,7 +26,7 @@ export async function POST(request) {
     const startISO = new Date(startDate + "T00:00:00Z").toISOString();
     const endISO = new Date(endDate + "T23:59:59Z").toISOString();
 
-    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }, { data: maintenanceRows }] = await Promise.all([
+    const [{ data: flights }, { data: resources }, { data: operators }, { data: allotments }, { data: scrLog }, { data: slotRequests }, { data: maintenanceRows }, { data: fuelRows }] = await Promise.all([
       fetchAllPages(() => supabase.from("flights").select("*").gte("scheduled_departure", startISO).lte("scheduled_departure", endISO).order("scheduled_departure").order("id")),
       supabase.from("resources").select("*"),
       supabase.from("tour_operators").select("*"),
@@ -34,6 +34,7 @@ export async function POST(request) {
       supabase.from("scr_log").select("*").gte("created_at", startISO).lte("created_at", endISO).order("created_at"),
       fetchAllPages(() => supabase.from("slot_requests").select("*").order("id")),
       supabase.from("maintenance_blocks").select("*"),
+      sections.includes("fuel") ? supabase.from("airport_fuel_prices").select("airport,price,unit,supplier,valid_from") : Promise.resolve({ data: [] }),
     ]);
 
     const flightList = flights || [];
@@ -73,12 +74,18 @@ export async function POST(request) {
     const mappedBlocks = (maintenanceRows || []).map(m => ({ id: m.id, resourceId: m.resource_id, start: new Date(m.start_at), end: new Date(m.end_at), reason: m.reason }));
     const issues = computeScheduleIssues(mappedFlights, mappedResources, mappedSlotRequests, mappedBlocks);
 
+    // Fuel prices for the airports the flights of this range use (departure or arrival).
+    const fuelCount = new Map();
+    flightList.forEach(f => [f.origin, f.destination].forEach(c => { if (c) { const k = String(c).toUpperCase(); fuelCount.set(k, (fuelCount.get(k) || 0) + 1); } }));
+    const fuelByCode = new Map((fuelRows || []).map(p => [p.airport, p]));
+    const fuel = [...fuelCount.keys()].sort().map(code => { const p = fuelByCode.get(code); return { code, flights: fuelCount.get(code), price: p ? Number(p.price) : null, unit: p?.unit, supplier: p?.supplier, valid_from: p?.valid_from }; });
+
     const pdfBuffer = await renderToBuffer(
       React.createElement(ReportDocument, {
         startDate, endDate, sections,
         data: {
           flights: flightList, resourceCodeById, allotments: allotmentsInRange, operatorNameById, flightRefById, flightDateById,
-          totalRevenue, totalSeatsSold, revenueByOperator, utilization, issues, scrLog: scrLog || [],
+          totalRevenue, totalSeatsSold, revenueByOperator, utilization, issues, scrLog: scrLog || [], fuel,
         },
       })
     );

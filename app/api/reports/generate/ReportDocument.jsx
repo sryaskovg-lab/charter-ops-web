@@ -126,6 +126,27 @@ export default function ReportDocument({ startDate, endDate, sections, data }) {
             ))}
           </View>
         )}
+        {sections.includes("fuel") && (
+          <View>
+            <Text style={styles.h2}>Fuel prices by airport</Text>
+            {(data.fuel || []).length === 0 ? <Text style={styles.empty}>No flights in this range.</Text> : (
+              <View>
+                <View style={styles.headerRow}>
+                  <Text style={styles.cell}>Airport</Text><Text style={styles.cell}>Flights</Text><Text style={styles.cell}>Price</Text>
+                  <Text style={styles.cell}>Unit</Text><Text style={styles.cellWide}>Supplier</Text><Text style={styles.cell}>Valid from</Text>
+                </View>
+                {data.fuel.map(r => (
+                  <View key={r.code} style={r.price == null ? { ...styles.row, backgroundColor: "#FFF6E5" } : styles.row} wrap={false}>
+                    <Text style={styles.cell}>{r.code}</Text><Text style={styles.cell}>{r.flights}</Text>
+                    <Text style={styles.cell}>{r.price == null ? "no price" : String(r.price)}</Text>
+                    <Text style={styles.cell}>{r.price == null ? "" : r.unit}</Text>
+                    <Text style={styles.cellWide}>{r.supplier || ""}</Text><Text style={styles.cell}>{r.valid_from || ""}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </View>
+        )}
       </Page>
     </Document>
   );

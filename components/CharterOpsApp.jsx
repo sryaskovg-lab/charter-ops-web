@@ -5536,11 +5536,11 @@ function SCRModal({ resources, flights, onClose, seedFlights, seedRole, onLogScr
 }
 
 // ---------- reports: schedule / revenue / allotments / utilization / issues / SCR archive, as a PDF ----------
-const REPORT_SECTION_KEYS = ["schedule", "revenue", "allotments", "utilization", "issues", "scr"];
+const REPORT_SECTION_KEYS = ["schedule", "revenue", "allotments", "utilization", "issues", "scr", "fuel"];
 function reportSectionsFor(t) {
   return [
     ["schedule", t("reportSectionSchedule")], ["revenue", t("reportSectionRevenue")], ["allotments", t("reportSectionAllotments")],
-    ["utilization", t("reportSectionUtilization")], ["issues", t("reportSectionIssues")], ["scr", t("reportSectionScrArchive")],
+    ["utilization", t("reportSectionUtilization")], ["issues", t("reportSectionIssues")], ["scr", t("reportSectionScrArchive")], ["fuel", t("reportSectionFuel")],
   ];
 }
 function ReportsModal({ onClose, pushToast }) {
