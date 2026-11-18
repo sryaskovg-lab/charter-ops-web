@@ -3611,13 +3611,28 @@ function FuelPricesModal({ flights, perms, pushToast, onClose }) {
     setFill(f => ({ ...f, price: "" })); load();
   }
   const dirtyCodes = airports.filter(a => dirty(a.code)).map(a => a.code);
+  async function downloadPdf() {
+    setBusy(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/reports/fuel", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `PDF failed (${res.status})`); }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a"); a.href = url; a.download = `fuel-prices-${new Date().toISOString().slice(0, 10)}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { pushToast(`Fuel price PDF failed: ${e.message}`, "warn", true); }
+    finally { setBusy(false); }
+  }
   const cell = { padding: "4px 6px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(920px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Fuel prices by airport</div>
-          <button onClick={onClose} style={miniBtn}>Close</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button disabled={busy || airports.length === 0} onClick={downloadPdf} style={{ ...miniBtn, color: C.amber, borderColor: C.amber }}>Download PDF report</button>
+            <button onClick={onClose} style={miniBtn}>Close</button>
+          </div>
         </div>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>One current price for every airport in the schedule (departure or arrival). {priced} of {airports.length} airports have a price. {canEdit ? "Type a price and press Save. The unit is kept per airport." : "Only schedule coordinators and management can change prices."}</div>
         {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
