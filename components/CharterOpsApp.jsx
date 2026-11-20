@@ -13,6 +13,7 @@ import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, ren
 import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
+import { computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
@@ -1617,6 +1618,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [showSchedMsgs, setShowSchedMsgs] = useState(false);
   const [showMovements, setShowMovements] = useState(false);
   const [showFuel, setShowFuel] = useState(false);
+  const [showQuote, setShowQuote] = useState(false);
   // Movement (MVT) e-mail: actual departure / arrival times, checked every 5 minutes while a coordinator has the app open.
   // It only stores times on flights and never changes the schedule.
   useEffect(() => {
@@ -2015,7 +2017,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onFuel={() => setShowFuel(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onFuel={() => setShowFuel(true)} onQuote={() => setShowQuote(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues} permitMarks={permitMarks}
@@ -2053,6 +2055,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
       {showAssignTails && <AssignTailsModal flights={flights} resources={resources} isGrounded={isGrounded} perms={perms} onClose={() => setShowAssignTails(false)} onApply={applyTailAssignments} />}
+      {showQuote && <CharterQuoteModal perms={perms} pushToast={pushToast} onClose={() => setShowQuote(false)} />}
       {showFuel && <FuelPricesModal flights={flights} perms={perms} pushToast={pushToast} onClose={() => setShowFuel(false)} />}
       {showMovements && <MovementsModal perms={perms} pushToast={pushToast} onClose={() => setShowMovements(false)} />}
       {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
@@ -2078,7 +2081,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onFuel, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onFuel, onQuote, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2372,6 +2375,7 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
               <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.16)", zIndex: 60, minWidth: 170, padding: 6 }}>
                 <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
                 <button onClick={() => { onFuel(); setShowMoreMenu(false); }} style={ctxMenuItem}>Fuel prices by airport</button>
+                {(perms.editAllotments || perms.editContracts) && <button onClick={() => { onQuote(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>Charter price calculator</button>}
                 {perms.editFlight && <>
                   <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("generateRotation")}</button>
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
@@ -3549,6 +3553,339 @@ function groupIntoPatternsAndRemaining(parsed) {
 }
 
 // ---------- SSIM / SSM / ASM messages: paste, upload, or review what arrived by e-mail ----------
+// ---- Charter price calculator: airport costs + navigation + flight hours, all in USD (see lib/charter-calc.js) ----
+function haversineKm(a, b) {
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dLat = rad(b[0] - a[0]), dLon = rad(b[1] - a[1]);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+const usd0 = n => "$" + Math.round(n).toLocaleString("en-US");
+const usd2 = n => "$" + (Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const FEE_SET_LABEL = { STD: "Standard", INT: "International (МВЛ)", DOM: "Domestic (ВВЛ)" };
+const QUOTE_BLANK = { title: "", acCode: "", pax: "", crew: "", legs: [{ from: "", to: "", km: "" }], hourCost: "", nav: { enroute: "", terminal: "" }, blockCfg: {} };
+
+function CharterQuoteModal({ perms, pushToast, onClose }) {
+  const [tab, setTab] = useState("calc");
+  const [aircraft, setAircraft] = useState([]);
+  const [navRates, setNavRates] = useState([]);
+  const [fuel, setFuel] = useState(new Map());
+  const [fees, setFees] = useState({});          // airport -> lines (loaded on demand)
+  const [geo, setGeo] = useState(new Map());     // IATA -> [lat, lon, name]
+  const [saved, setSaved] = useState([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [st, setSt] = useState(QUOTE_BLANK);
+  const canQuote = !!(perms.editAllotments || perms.editContracts);
+  const canFees = !!perms.editContracts;
+  const set = patch => setSt(s => ({ ...s, ...patch }));
+
+  async function loadBase() {
+    const [a, n, f] = await Promise.all([
+      supabase.from("aircraft_types").select("*").order("mtow_t"),
+      supabase.from("nav_rates").select("*").order("mtow_from"),
+      supabase.from("airport_fuel_prices").select("airport,price,unit"),
+    ]);
+    const e = a.error || n.error || f.error;
+    if (e) { setErr(/relation|schema cache|does not exist/i.test(e.message) ? "The calculator tables are missing: run migration 00041_charter_quotes.sql and 00042_charter_fee_seed.sql in Supabase." : e.message); return; }
+    setErr(""); setAircraft(a.data || []); setNavRates(n.data || []); setFuel(new Map((f.data || []).map(r => [r.airport, r])));
+    setSt(s => s.acCode || !(a.data || []).length ? s : { ...s, acCode: a.data[0].code });
+  }
+  async function loadSaved() {
+    const { data } = await supabase.from("charter_quotes").select("id,title,route,aircraft_type,pax,total_usd,per_seat_usd,per_block_hour_usd,inputs,created_at").order("created_at", { ascending: false }).limit(100);
+    setSaved(data || []);
+  }
+  useEffect(() => {
+    loadBase(); loadSaved();
+    fetch("/data/airports.json").then(r => r.json()).then(a => setGeo(new Map(a.map(x => [x[0], [x[2], x[3], `${x[5]} (${x[4]})`]])))).catch(() => {});
+  }, []);
+
+  const ac = aircraft.find(a => a.code === st.acCode);
+  const acObj = ac ? { code: ac.code, mtow: +ac.mtow_t, seats: ac.seats, cruiseKmh: +ac.cruise_kmh, burnTPerH: +ac.burn_t_per_h, hourCost: +ac.hour_cost_usd } : null;
+  const validLegs = st.legs.filter(l => l.from.trim() && l.to.trim() && +l.km > 0).map(l => ({ from: l.from.trim().toUpperCase(), to: l.to.trim().toUpperCase(), km: +l.km }));
+  const legsC = useMemo(() => acObj && validLegs.length ? computeLegs(validLegs, acObj) : [], [st.legs, st.acCode, aircraft]);
+  const stations = useMemo(() => stationsForLegs(legsC), [legsC]);
+
+  const stationKey = stations.map(s => s.airport).join(",");
+  useEffect(() => {
+    const need = stations.map(s => s.airport).filter(a => !fees[a]);
+    if (!need.length) return;
+    (async () => {
+      const { data, error } = await supabase.from("airport_fee_lines").select("*").in("airport", need).order("fee_set").order("sort");
+      if (error) { setErr(error.message); return; }
+      setFees(f => { const n = { ...f }; need.forEach(a => { n[a] = (data || []).filter(l => l.airport === a); }); return n; });
+    })();
+  }, [stationKey]);
+
+  const cfgOf = a => st.blockCfg[a] || {};
+  function setCfg(a, patch) { setSt(s => ({ ...s, blockCfg: { ...s.blockCfg, [a]: { ...(s.blockCfg[a] || {}), ...patch } } })); }
+  function setLineCfg(a, id, patch) { const c = cfgOf(a); setCfg(a, { lines: { ...(c.lines || {}), [id]: { ...((c.lines || {})[id] || {}), ...patch } } }); }
+  const setsOf = a => [...new Set((fees[a] || []).map(l => l.fee_set))];
+  const activeSet = a => { const s = setsOf(a); const want = cfgOf(a).set; return want && s.includes(want) ? want : (s.includes("STD") ? "STD" : s[0]); };
+  const baseLines = a => applicableLines((fees[a] || []).filter(l => l.fee_set === activeSet(a)).map(l => ({ ...l, aircraftType: l.aircraft_type })), st.acCode);
+
+  const blocks = stations.map(s => {
+    const c = cfgOf(s.airport);
+    const lines = baseLines(s.airport).map(l => {
+      const o = (c.lines || {})[l.id] || {};
+      return { id: l.id, name: l.name, basis: l.basis, periodMinutes: l.period_minutes, price: o.price !== undefined && o.price !== "" ? +o.price : +l.price_usd, qty: o.qty !== undefined && o.qty !== "" ? +o.qty : l.quantity, include: o.include !== false };
+    });
+    (c.extra || []).forEach((x, i) => lines.push({ id: "x" + i, name: x.name || "Other", basis: x.basis || "turnaround", price: +x.price || 0, qty: +x.qty || 1, include: x.include !== false, extra: true }));
+    const fr = fuel.get(s.airport);
+    const fuelUsdPerT = c.fuelPrice !== undefined && c.fuelPrice !== "" ? +c.fuelPrice : (fr ? fuelUsdPerTonne(fr.price, fr.unit) : null);
+    return { airport: s.airport, uplift: s.uplift, fuelUsdPerT, lines };
+  });
+  const band = acObj ? navRates.find(r => acObj.mtow >= +r.mtow_from && acObj.mtow <= +r.mtow_to) : null;
+  const nav = {
+    enroutePerKm: st.nav.enroute !== "" ? +st.nav.enroute : (band ? +band.enroute_usd_per_km : 0),
+    terminalPerLeg: st.nav.terminal !== "" ? +st.nav.terminal : (band ? +band.terminal_usd_per_leg : 0),
+  };
+  const quoteInput = acObj && legsC.length ? { aircraft: acObj, aircraftName: ac.name, pax: +st.pax || acObj.seats, crew: +st.crew || ac.crew || 7, hourCost: st.hourCost !== "" ? +st.hourCost : acObj.hourCost, legs: validLegs, blocks, nav } : null;
+  const q = quoteInput ? computeQuote(quoteInput) : null;
+  const routeText = validLegs.length ? [validLegs[0].from, ...validLegs.map(l => l.to)].join(" - ") : "";
+
+  function setLeg(i, patch) { set({ legs: st.legs.map((l, k) => k === i ? { ...l, ...patch } : l) }); }
+  function estimateKm(i) {
+    const l = st.legs[i], a = geo.get(l.from.trim().toUpperCase()), b = geo.get(l.to.trim().toUpperCase());
+    if (!a || !b) { pushToast("Airport code not found: enter valid IATA codes first.", "warn"); return; }
+    setLeg(i, { km: String(Math.round(haversineKm(a, b) * 1.12 / 5) * 5) });
+  }
+  async function save() {
+    if (!q) return;
+    setBusy(true);
+    const title = st.title.trim() || routeText;
+    const { error } = await supabase.from("charter_quotes").insert({ title, aircraft_type: st.acCode, route: routeText, pax: q.pax, inputs: st, result: q, total_usd: Math.round(q.total * 100) / 100, per_seat_usd: Math.round(q.perSeat * 100) / 100, per_block_hour_usd: Math.round(q.perBlockHour * 100) / 100 });
+    setBusy(false);
+    if (error) { pushToast(`Quote not saved: ${error.message}`, "warn", true); return; }
+    pushToast("Quote saved.", "ok"); loadSaved();
+  }
+  async function pdf(lang) {
+    if (!quoteInput) return;
+    setBusy(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/reports/quote", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token}` }, body: JSON.stringify({ input: quoteInput, lang }) });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `PDF failed (${res.status})`); }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a"); a.href = url; a.download = `charter-quote-${routeText.replace(/ - /g, "-")}.pdf`; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { pushToast(`Quote PDF failed: ${e.message}`, "warn", true); }
+    finally { setBusy(false); }
+  }
+  async function removeSaved(id) {
+    const { error } = await supabase.from("charter_quotes").delete().eq("id", id);
+    if (error) pushToast(`Not deleted: ${error.message}`, "warn"); else loadSaved();
+  }
+
+  const lab = { fontSize: 11, color: C.muted, marginBottom: 2 };
+  const tdc = { padding: "3px 5px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
+  const tabBtn = (k, l) => <button key={k} onClick={() => setTab(k)} style={{ ...miniBtn, background: tab === k ? C.amberSoft : C.panel, borderColor: tab === k ? C.amber : C.border, fontWeight: tab === k ? 600 : 400 }}>{l}</button>;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(1040px, 100%)", maxHeight: "92vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>Charter price calculator</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{tabBtn("calc", "Calculator")}{tabBtn("saved", `Saved quotes (${saved.length})`)}{tabBtn("fees", "Airport fees")}<button onClick={onClose} style={miniBtn}>Close</button></div>
+        </div>
+        {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
+
+        {tab === "calc" && <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
+            <div style={{ gridColumn: "span 2" }}><div style={lab}>Quote name</div><input value={st.title} onChange={e => set({ title: e.target.value })} placeholder={routeText || "e.g. Shymkent - Vienna - Shymkent"} style={inputStyle} /></div>
+            <div><div style={lab}>Aircraft</div><select value={st.acCode} onChange={e => set({ acCode: e.target.value })} style={inputStyle}>{aircraft.map(a => <option key={a.code} value={a.code}>{a.name}</option>)}</select></div>
+            <div><div style={lab}>Passengers{ac ? ` (${ac.seats} seats)` : ""}</div><input inputMode="numeric" value={st.pax} onChange={e => set({ pax: e.target.value })} placeholder={ac ? String(ac.seats) : ""} style={inputStyle} /></div>
+            <div><div style={lab}>Crew</div><input inputMode="numeric" value={st.crew} onChange={e => set({ crew: e.target.value })} placeholder={String(ac?.crew || 7)} style={inputStyle} /></div>
+            <div><div style={lab}>Flight hour cost, USD</div><input inputMode="decimal" value={st.hourCost} onChange={e => set({ hourCost: e.target.value })} placeholder={ac ? String(+ac.hour_cost_usd) : ""} style={inputStyle} /></div>
+          </div>
+          {ac && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>{ac.name}: MTOW {+ac.mtow_t} t, cruise {+ac.cruise_kmh} km/h, burn {+ac.burn_t_per_h} t/h. {ac.note ? `(${ac.note})` : ""}</div>}
+
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Route</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 6 }}>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>From</th><th style={tdc}>To</th><th style={tdc}>Distance, km</th><th style={tdc}>Time, h</th><th style={tdc}>Fuel, t</th><th style={tdc}></th></tr></thead>
+            <tbody>{st.legs.map((l, i) => { const c = legsC[validLegs.findIndex((v, k) => k === st.legs.slice(0, i + 1).filter(x => x.from.trim() && x.to.trim() && +x.km > 0).length - 1)]; const ok = l.from.trim() && l.to.trim() && +l.km > 0;
+              return <tr key={i}>
+                <td style={tdc}><input value={l.from} onChange={e => setLeg(i, { from: e.target.value.toUpperCase() })} placeholder="CIT" style={{ ...inputStyle, width: 80, fontFamily: MONO }} /><div style={{ fontSize: 10, color: C.faint }}>{geo.get(l.from.trim().toUpperCase())?.[2] || ""}</div></td>
+                <td style={tdc}><input value={l.to} onChange={e => setLeg(i, { to: e.target.value.toUpperCase() })} placeholder="VIE" style={{ ...inputStyle, width: 80, fontFamily: MONO }} /><div style={{ fontSize: 10, color: C.faint }}>{geo.get(l.to.trim().toUpperCase())?.[2] || ""}</div></td>
+                <td style={tdc}><input inputMode="numeric" value={l.km} onChange={e => setLeg(i, { km: e.target.value })} style={{ ...inputStyle, width: 90 }} /> <button onClick={() => estimateKm(i)} title="Straight line + 12%" style={{ ...miniBtn, fontSize: 10 }}>estimate</button></td>
+                <td style={{ ...tdc, color: C.muted }}>{ok && c ? c.hours.toFixed(2) : "—"}</td><td style={{ ...tdc, color: C.muted }}>{ok && c ? c.fuelT.toFixed(2) : "—"}</td>
+                <td style={tdc}>{st.legs.length > 1 && <button onClick={() => set({ legs: st.legs.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>Remove</button>}</td>
+              </tr>; })}</tbody>
+          </table>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+            <button onClick={() => set({ legs: [...st.legs, { from: st.legs[st.legs.length - 1]?.to || "", to: "", km: "" }] })} style={miniBtn}>Add leg</button>
+            <button onClick={() => { const l = st.legs[st.legs.length - 1]; if (l?.from && l?.to) set({ legs: [...st.legs, { from: l.to, to: l.from, km: l.km }] }); }} style={miniBtn}>Add return leg</button>
+          </div>
+
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+            <div><div style={lab}>Navigation enroute, USD per km</div><input inputMode="decimal" value={st.nav.enroute} onChange={e => set({ nav: { ...st.nav, enroute: e.target.value } })} placeholder={band ? String(+band.enroute_usd_per_km) : "no rate"} style={{ ...inputStyle, width: 130 }} /></div>
+            <div><div style={lab}>Navigation aerodrome area, USD per leg</div><input inputMode="decimal" value={st.nav.terminal} onChange={e => set({ nav: { ...st.nav, terminal: e.target.value } })} placeholder={band ? String(+band.terminal_usd_per_leg) : "no rate"} style={{ ...inputStyle, width: 130 }} /></div>
+            {acObj && !band && <div style={{ fontSize: 11.5, color: C.amber }}>No navigation rate for {acObj.mtow} t in the table: enter the rates here.</div>}
+            {band && band.note && <div style={{ fontSize: 11, color: C.faint }}>Table rate: {band.note}</div>}
+          </div>
+
+          {blocks.map(b => {
+            const s = b.airport, c = cfgOf(s), sets = setsOf(s), res = q?.blocks.find(x => x.airport === s);
+            return <div key={s} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
+                <div><b style={{ fontFamily: MONO }}>{s}</b> <span style={{ fontSize: 11.5, color: C.muted }}>{geo.get(s)?.[2] || ""}</span></div>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                  {sets.length > 1 && <select value={activeSet(s)} onChange={e => setCfg(s, { set: e.target.value })} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{FEE_SET_LABEL[x]}</option>)}</select>}
+                  <span>Fuel {b.uplift.toFixed(2)} t at</span>
+                  <input inputMode="decimal" value={c.fuelPrice ?? ""} onChange={e => setCfg(s, { fuelPrice: e.target.value })} placeholder={b.fuelUsdPerT == null ? "no price" : String(Math.round(b.fuelUsdPerT * 100) / 100)} style={{ ...inputStyle, width: 90, borderColor: b.fuelUsdPerT == null && b.uplift > 0 ? C.amber : undefined }} /><span>USD/t</span>
+                </div>
+              </div>
+              {!fees[s] ? <div style={{ fontSize: 12, color: C.faint }}>Loading fees…</div> : b.lines.length === 0 && !(c.extra || []).length ? <div style={{ fontSize: 12, color: C.amber }}>No fee list for {s} yet. Add lines below or in the Airport fees tab.</div> :
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}></th><th style={tdc}>Item</th><th style={tdc}>Charged</th><th style={tdc}>Qty</th><th style={tdc}>Price USD</th><th style={{ ...tdc, textAlign: "right" }}>Sum USD</th></tr></thead>
+                <tbody>{b.lines.map((l, i) => { const r = res?.lines.find((_, k) => k === b.lines.filter(x => x.include).indexOf(l)); const editQty = ["turnaround", "time", "litre"].includes(l.basis);
+                  return <tr key={l.id} style={{ opacity: l.include ? 1 : 0.45 }}>
+                    <td style={tdc}><input type="checkbox" checked={l.include} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, include: e.target.checked } : x) }) : setLineCfg(s, l.id, { include: e.target.checked })} /></td>
+                    <td style={tdc}>{l.name}</td>
+                    <td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{BASIS_LABEL[l.basis]}{l.basis === "time" && l.periodMinutes ? ` (${l.periodMinutes} min)` : ""}</td>
+                    <td style={tdc}>{editQty ? <input inputMode="decimal" value={l.extra ? ((c.extra || [])[+l.id.slice(1)]?.qty ?? "") : ((c.lines || {})[l.id]?.qty ?? "")} placeholder={String(l.qty ?? 1)} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, qty: e.target.value } : x) }) : setLineCfg(s, l.id, { qty: e.target.value })} style={{ ...inputStyle, width: 64 }} /> : <span style={{ color: C.muted }}>{l.basis === "pax" ? q?.pax : l.basis === "crew" ? q?.crew : l.basis === "mtow_t" ? q?.mtow : l.basis === "fuel_t" ? b.uplift.toFixed(2) : ""}</span>}</td>
+                    <td style={tdc}><input inputMode="decimal" value={l.extra ? ((c.extra || [])[+l.id.slice(1)]?.price ?? "") : ((c.lines || {})[l.id]?.price ?? "")} placeholder={String(Math.round(l.price * 100) / 100)} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, price: e.target.value } : x) }) : setLineCfg(s, l.id, { price: e.target.value })} style={{ ...inputStyle, width: 84 }} /></td>
+                    <td style={{ ...tdc, textAlign: "right", fontFamily: MONO }}>{l.include ? usd0((res?.lines || []).find(x => x.name === l.name && x.price === l.price && x.basis === l.basis)?.total ?? 0) : "—"}</td>
+                  </tr>; })}
+                  {b.uplift > 0 && <tr><td style={tdc}></td><td style={tdc}><b>Fuel (kerosene)</b></td><td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{b.uplift.toFixed(2)} t uplift</td><td style={tdc}></td><td style={tdc}>{b.fuelUsdPerT == null ? <span style={{ color: C.amber }}>no price</span> : usd2(b.fuelUsdPerT)}</td><td style={{ ...tdc, textAlign: "right", fontFamily: MONO }}>{usd0(res?.fuel.total || 0)}</td></tr>}
+                </tbody>
+              </table>}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
+                <button onClick={() => setCfg(s, { extra: [...(c.extra || []), { name: "", basis: "turnaround", price: "", qty: "1" }] })} style={miniBtn}>Add a line</button>
+                <div style={{ fontWeight: 700 }}>{s} total {usd0(res?.total || 0)}</div>
+              </div>
+              {(c.extra || []).map((x, i) => <div key={i} style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                <input value={x.name} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, name: e.target.value } : y) })} placeholder="Item name" style={{ ...inputStyle, width: 200 }} />
+                <select value={x.basis} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, basis: e.target.value } : y) })} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{BASIS_LABEL[k]}</option>)}</select>
+                <button onClick={() => setCfg(s, { extra: c.extra.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>Remove</button>
+              </div>)}
+            </div>;
+          })}
+
+          {q && <div style={{ position: "sticky", bottom: 0, background: C.panel, borderTop: `2px solid ${C.border}`, paddingTop: 10, marginTop: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, fontSize: 12.5 }}>
+              <div><div style={lab}>Airports</div><b>{usd0(q.airports)}</b></div>
+              <div><div style={lab}>Navigation</div><b>{usd0(q.nav.enroute + q.nav.terminal)}</b> <span style={{ color: C.faint, fontSize: 11 }}>({usd0(q.nav.enroute)} + {usd0(q.nav.terminal)})</span></div>
+              <div><div style={lab}>Flight hours ({q.hours.toFixed(2)} h)</div><b>{usd0(q.flightHours.total)}</b></div>
+              <div><div style={lab}>Total, USD</div><b style={{ fontSize: 18, color: C.green }}>{usd0(q.total)}</b></div>
+              <div><div style={lab}>Per seat ({q.pax})</div><b style={{ fontSize: 15 }}>{usd0(q.perSeat)}</b></div>
+              <div><div style={lab}>Per block hour</div><b style={{ fontSize: 15 }}>{usd0(q.perBlockHour)}</b></div>
+            </div>
+            {q.missingFuel.length > 0 && <div style={{ fontSize: 12, color: C.amber, marginTop: 6 }}>No fuel price for {q.missingFuel.join(", ")}: the total is missing that fuel. Set it in Fuel prices or type it above.</div>}
+            <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              {canQuote && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save quote</button>}
+              <button disabled={busy} onClick={() => pdf("ru")} style={miniBtn}>PDF (Russian)</button>
+              <button disabled={busy} onClick={() => pdf("en")} style={miniBtn}>PDF (English)</button>
+              <button onClick={() => setSt({ ...QUOTE_BLANK, acCode: aircraft[0]?.code || "" })} style={miniBtn}>New quote</button>
+            </div>
+          </div>}
+          {!q && <div style={{ fontSize: 12.5, color: C.faint }}>Choose the aircraft and enter at least one leg (from, to and distance) to see the price.</div>}
+        </>}
+
+        {tab === "saved" && <div>
+          {saved.length === 0 && <div style={{ color: C.faint, fontSize: 12.5 }}>No saved quotes yet.</div>}
+          {saved.map(x => <div key={x.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", padding: "8px 0", borderTop: `1px solid ${C.borderSoft}`, flexWrap: "wrap" }}>
+            <div><b>{x.title}</b><div style={{ fontSize: 11.5, color: C.muted }}>{x.route} · {x.aircraft_type} · {x.pax} pax · {String(x.created_at).slice(0, 10)}</div></div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12.5 }}><span><b>{usd0(+x.total_usd)}</b> total</span><span>{usd0(+x.per_seat_usd)} per seat</span><span>{usd0(+x.per_block_hour_usd)} per block hour</span>
+              <button onClick={() => { setSt({ ...QUOTE_BLANK, ...x.inputs }); setTab("calc"); }} style={miniBtn}>Open</button>
+              {canQuote && <button onClick={() => { if (window.confirm("Delete this saved quote?")) removeSaved(x.id); }} style={{ ...miniBtn, color: C.red }}>Delete</button>}</div>
+          </div>)}
+        </div>}
+
+        {tab === "fees" && <AirportFeesEditor canEdit={canFees} aircraft={aircraft} geo={geo} pushToast={pushToast} onChanged={a => setFees(f => { const n = { ...f }; delete n[a]; return n; })} />}
+      </div>
+    </div>
+  );
+}
+
+// Airport fee lists: view and edit the lines the calculator uses (all prices in USD).
+function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
+  const [airports, setAirports] = useState([]);
+  const [airport, setAirport] = useState("");
+  const [feeSet, setFeeSet] = useState("STD");
+  const [lines, setLines] = useState([]);
+  const [edits, setEdits] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [newCode, setNewCode] = useState("");
+  async function loadAirports() {
+    const { data } = await supabase.from("airport_fee_lines").select("airport").limit(5000);
+    const list = [...new Set((data || []).map(r => r.airport))].sort();
+    setAirports(list); setAirport(a => a || list[0] || "");
+  }
+  async function loadLines(a) {
+    if (!a) { setLines([]); return; }
+    const { data } = await supabase.from("airport_fee_lines").select("*").eq("airport", a).order("fee_set").order("sort");
+    setLines(data || []); setEdits({});
+  }
+  useEffect(() => { loadAirports(); }, []);
+  useEffect(() => { loadLines(airport); }, [airport]);
+  const sets = [...new Set(lines.map(l => l.fee_set))];
+  useEffect(() => { if (sets.length && !sets.includes(feeSet)) setFeeSet(sets[0]); }, [airport, lines.length]);
+  const shown = lines.filter(l => l.fee_set === feeSet);
+  const val = (l, k) => edits[l.id]?.[k] !== undefined ? edits[l.id][k] : (l[k] ?? "");
+  const setE = (l, k, v) => setEdits(e => ({ ...e, [l.id]: { ...(e[l.id] || {}), [k]: v } }));
+  async function saveLine(l) {
+    const p = edits[l.id]; if (!p) return;
+    const patch = {};
+    if (p.name !== undefined) patch.name = String(p.name).trim();
+    if (p.basis !== undefined) patch.basis = p.basis;
+    if (p.price_usd !== undefined) { const n = +String(p.price_usd).replace(",", "."); if (!Number.isFinite(n) || n < 0) { pushToast("Enter the price as a number.", "warn"); return; } patch.price_usd = n; }
+    if (p.quantity !== undefined) patch.quantity = p.quantity === "" ? null : +String(p.quantity).replace(",", ".");
+    if (p.period_minutes !== undefined) patch.period_minutes = p.period_minutes === "" ? null : +p.period_minutes;
+    if (p.aircraft_type !== undefined) patch.aircraft_type = p.aircraft_type || null;
+    setBusy(true);
+    const { data, error } = await supabase.from("airport_fee_lines").update(patch).eq("id", l.id).select("id");
+    setBusy(false);
+    if (error || !data?.length) { pushToast(`Not saved: ${error?.message || "no row changed (permission?)"}`, "warn", true); return; }
+    pushToast("Fee saved.", "ok"); onChanged(airport); loadLines(airport);
+  }
+  async function delLine(l) {
+    if (!window.confirm(`Delete "${l.name}" at ${airport}?`)) return;
+    const { error } = await supabase.from("airport_fee_lines").delete().eq("id", l.id);
+    if (error) { pushToast(`Not deleted: ${error.message}`, "warn"); return; }
+    onChanged(airport); loadLines(airport);
+  }
+  async function addLine() {
+    if (!airport) return;
+    setBusy(true);
+    const { error } = await supabase.from("airport_fee_lines").insert({ airport, fee_set: feeSet, sort: (shown[shown.length - 1]?.sort ?? -1) + 1, name: "New fee", basis: "turnaround", price_usd: 0, quantity: 1, source: "app" });
+    setBusy(false);
+    if (error) { pushToast(`Not added: ${error.message}`, "warn", true); return; }
+    onChanged(airport); loadLines(airport);
+  }
+  function startAirport() {
+    const c = newCode.trim().toUpperCase();
+    if (!/^[A-Z]{3,4}$/.test(c)) { pushToast("Enter a 3 or 4 letter airport code.", "warn"); return; }
+    setAirports(a => [...new Set([...a, c])].sort()); setAirport(c); setNewCode("");
+  }
+  const tdc = { padding: "3px 5px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+        <select value={airport} onChange={e => setAirport(e.target.value)} style={{ ...inputStyle, width: 220 }}>{airports.map(a => <option key={a} value={a}>{a} {geo.get(a)?.[2] || ""}</option>)}</select>
+        {sets.length > 1 && <select value={feeSet} onChange={e => setFeeSet(e.target.value)} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{FEE_SET_LABEL[x]}</option>)}</select>}
+        {canEdit && <><input value={newCode} onChange={e => setNewCode(e.target.value.toUpperCase())} placeholder="new airport code" style={{ ...inputStyle, width: 130, fontFamily: MONO }} /><button onClick={startAirport} style={miniBtn}>Add airport</button></>}
+      </div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{canEdit ? "Change a value and press Save on that line. All prices are in USD; \"time\" lines are charged per period of the length shown." : "Only management and the tour operator liaison can change fees."}</div>
+      <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>Item</th><th style={tdc}>Charged</th><th style={tdc}>Price USD</th><th style={tdc}>Qty</th><th style={tdc}>Period, min</th><th style={tdc}>Only for</th><th style={tdc}></th></tr></thead>
+        <tbody>{shown.map(l => <tr key={l.id} style={{ background: edits[l.id] ? C.amberSoft : "transparent" }}>
+          <td style={tdc}>{canEdit ? <input value={val(l, "name")} onChange={e => setE(l, "name", e.target.value)} style={{ ...inputStyle, minWidth: 220 }} /> : l.name}</td>
+          <td style={tdc}>{canEdit ? <select value={val(l, "basis")} onChange={e => setE(l, "basis", e.target.value)} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{BASIS_LABEL[k]}</option>)}</select> : BASIS_LABEL[l.basis]}</td>
+          <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "price_usd")} onChange={e => setE(l, "price_usd", e.target.value)} style={{ ...inputStyle, width: 90 }} /> : +l.price_usd}</td>
+          <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "quantity")} onChange={e => setE(l, "quantity", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.quantity}</td>
+          <td style={tdc}>{canEdit ? <input inputMode="numeric" value={val(l, "period_minutes")} onChange={e => setE(l, "period_minutes", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.period_minutes}</td>
+          <td style={tdc}>{canEdit ? <select value={val(l, "aircraft_type") || ""} onChange={e => setE(l, "aircraft_type", e.target.value)} style={{ ...inputStyle, width: 90 }}><option value="">all</option>{aircraft.map(a => <option key={a.code} value={a.code}>{a.code}</option>)}</select> : (l.aircraft_type || "all")}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !edits[l.id]} onClick={() => saveLine(l)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Save</button> <button onClick={() => delLine(l)} style={{ ...miniBtn, color: C.red }}>Delete</button></>}</td>
+        </tr>)}
+        {shown.length === 0 && <tr><td colSpan={7} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 14 }}>No fee lines for this airport yet.</td></tr>}
+        </tbody>
+      </table></div>
+      {canEdit && airport && <button disabled={busy} onClick={addLine} style={{ ...miniBtn, marginTop: 8 }}>Add a fee line</button>}
+    </div>
+  );
+}
+
 const FUEL_UNITS = ["USD/tonne", "USD/kg", "USD/USG", "USD/litre"];
 // One current fuel price per airport, listed for every airport (origin or destination) that appears in the schedule.
 function FuelPricesModal({ flights, perms, pushToast, onClose }) {
