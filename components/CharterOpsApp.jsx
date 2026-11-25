@@ -419,6 +419,8 @@ function IconChart() { return <svg width="18" height="18" viewBox="0 0 24 24" fi
 function IconUsers() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>; }
 function IconPlaneLogo({ size = 22 }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2 L3 14l4-1 2 6 3-7 3 7 2-6 4 1z" /></svg>; }
 function IconPlane() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-3 2v1.5l4.5-1.5 4.5 1.5V21l-3-2v-5.5z" /></svg>; }
+function IconCoin() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9"/><path d="M14.5 9.2c-.4-.8-1.4-1.2-2.5-1.2-1.4 0-2.5.7-2.5 1.8 0 2.5 5 1.2 5 3.7 0 1.1-1.1 1.8-2.5 1.8-1.2 0-2.2-.5-2.6-1.4M12 6.5V8m0 8v1.5"/></svg>; }
+function IconChevron({ open }) { return <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }}><polyline points="9 6 15 12 9 18"/></svg>; }
 function IconGauge() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3a9 9 0 1 0 9 9" /><path d="M12 12 16 8" /><path d="M12 3v2" /></svg>; }
 function IconSearch() { return <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>; }
 function IconBell() { return <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>; }
@@ -1618,8 +1620,9 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   const [showBulkImport, setShowBulkImport] = useState(false);
   const [showSchedMsgs, setShowSchedMsgs] = useState(false);
   const [showMovements, setShowMovements] = useState(false);
-  const [showFuel, setShowFuel] = useState(false);
-  const [showQuote, setShowQuote] = useState(false);
+  const [pricingOpen, setPricingOpen] = useState(true);
+  const [quoteVisited, setQuoteVisited] = useState(false);
+  const [quotePage, setQuotePage] = useState("calc");
   // Movement (MVT) e-mail: actual departure / arrival times, checked every 5 minutes while a coordinator has the app open.
   // It only stores times on flights and never changes the schedule.
   useEffect(() => {
@@ -1851,8 +1854,27 @@ function CharterOpsAppInner({ profile, onSignOut }) {
     ["operators", t("nav_operators"), IconBuilding],
     ["slots", "Slots", IconSlot], // left in English on purpose — the Slots tab's own content (coordination statuses, SCR) is English-only, so an un-translated tab name is the honest signal
     ["permits", "Permits", IconPermit], // English-only like Slots: authority/permit wording is used verbatim
-    ...(perms.manageUsers ? [["team", t("nav_team"), IconUsers]] : []),
   ];
+  const TEAM_ITEM = perms.manageUsers ? ["team", t("nav_team"), IconUsers] : null;
+  // Pricing folder: everything for quoting a charter (English labels like Slots and Permits)
+  const canPrice = !!(perms.editAllotments || perms.editContracts);
+  const PRICING_ITEMS = [
+    ...(canPrice ? [["pricing_calc", "Price calculator", IconCoin], ["pricing_saved", "Saved quotes", IconCalendar]] : []),
+    ["pricing_fuel", "Fuel prices", IconGauge],
+    ...(canPrice ? [["pricing_fees", "Airport fees", IconBuilding], ["pricing_times", "Route times", IconPlane]] : []),
+  ];
+  const QUOTE_TABS = { pricing_calc: "calc", pricing_saved: "saved", pricing_fees: "fees", pricing_times: "times" };
+  useEffect(() => { if (QUOTE_TABS[tab]) { setQuoteVisited(true); setQuotePage(QUOTE_TABS[tab]); } }, [tab]);
+  const inPricing = tab.startsWith("pricing_");
+
+  const sideBtn = (k, l, Icon, indent) => (
+    <button key={k} className="sidebar-nav-item" onClick={() => { setTab(k); if (isMobile) setMobileSidebarOpen(false); }} title={(sidebarCollapsed && !isMobile) ? l : undefined}
+      style={{ display: "flex", alignItems: "center", gap: 10, padding: (sidebarCollapsed && !isMobile) ? "9px 0" : `9px 10px 9px ${indent ? 26 : 10}px`, justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", borderRadius: 8, border: "none",
+        background: tab === k ? SIDEBAR.bgActive : "transparent", color: tab === k ? SIDEBAR.text : SIDEBAR.muted,
+        fontSize: 13, fontWeight: tab === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%" }}>
+      <Icon /> {!(sidebarCollapsed && !isMobile) && l}
+    </button>
+  );
 
   return (
     <div style={{ background: C.bg, color: C.text, fontFamily: SANS, height: "100vh", width: "100vw", overflow: "hidden", display: "flex", flexDirection: "row" }}>
@@ -1918,14 +1940,17 @@ function CharterOpsAppInner({ profile, onSignOut }) {
           {!(sidebarCollapsed && !isMobile) && <div style={{ fontFamily: SANS, fontWeight: 700, letterSpacing: 0.2, fontSize: 14, color: SIDEBAR.text, whiteSpace: "nowrap" }}>CHARTER OPS</div>}
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1 }}>
-          {NAV_ITEMS.map(([k, l, Icon]) => (
-            <button key={k} className="sidebar-nav-item" onClick={() => { setTab(k); if (isMobile) setMobileSidebarOpen(false); }} title={(sidebarCollapsed && !isMobile) ? l : undefined}
-              style={{ display: "flex", alignItems: "center", gap: 10, padding: (sidebarCollapsed && !isMobile) ? "9px 0" : "9px 10px", justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", borderRadius: 8, border: "none",
-                background: tab === k ? SIDEBAR.bgActive : "transparent", color: tab === k ? SIDEBAR.text : SIDEBAR.muted,
-                fontSize: 13, fontWeight: tab === k ? 600 : 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%" }}>
-              <Icon /> {!(sidebarCollapsed && !isMobile) && l}
-            </button>
-          ))}
+          {NAV_ITEMS.map(([k, l, Icon]) => sideBtn(k, l, Icon, false))}
+          {PRICING_ITEMS.length > 0 && (sidebarCollapsed && !isMobile
+            ? <div style={{ borderTop: `1px solid ${SIDEBAR.border}`, margin: "6px 0", paddingTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>{PRICING_ITEMS.map(([k, l, Icon]) => sideBtn(k, l, Icon, false))}</div>
+            : <>
+              <button className="sidebar-nav-item" onClick={() => setPricingOpen(v => !v)} aria-expanded={pricingOpen || inPricing}
+                style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 8, border: "none", background: "transparent", color: inPricing ? SIDEBAR.text : SIDEBAR.muted, fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%", marginTop: 6 }}>
+                <IconCoin /> <span style={{ flex: 1 }}>Pricing</span> <IconChevron open={pricingOpen || inPricing} />
+              </button>
+              {(pricingOpen || inPricing) && PRICING_ITEMS.map(([k, l, Icon]) => sideBtn(k, l, Icon, true))}
+            </>)}
+          {TEAM_ITEM && sideBtn(TEAM_ITEM[0], TEAM_ITEM[1], TEAM_ITEM[2], false)}
         </nav>
         <div style={{ borderTop: `1px solid ${SIDEBAR.border}`, paddingTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: (sidebarCollapsed && !isMobile) ? "0" : "0 10px", justifyContent: (sidebarCollapsed && !isMobile) ? "center" : "flex-start", fontFamily: SANS, fontWeight: 500, fontSize: 11.5, color: live ? C.green : SIDEBAR.muted }} title="Synced live via Supabase Realtime">
@@ -2018,7 +2043,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
               viewMode={viewMode} setViewMode={setViewMode} rangeFrom={rangeFrom} setRangeFrom={setRangeFrom} rangeTo={rangeTo} setRangeTo={setRangeTo} DAYS={DAYS}
               showLocal={showLocal} setShowLocal={setShowLocal} onDropFlight={dropFlight} slotRequests={slotRequests}
               selectedFlightId={selectedFlightId} setSelectedFlightId={setSelectedFlightId} flightInventory={flightInventory}
-              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onFuel={() => setShowFuel(true)} onQuote={() => setShowQuote(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
+              perms={perms} onNewFlight={() => { setAddFlightPrefill(null); setShowAddFlight(true); }} onBulkImport={() => setShowBulkImport(true)} onScheduleMessages={() => setShowSchedMsgs(true)} onMovements={() => setShowMovements(true)} onAssignTails={() => setShowAssignTails(true)} onRotationGen={() => setShowRotationGen(true)}
               onBulkRetime={() => setShowBulkRetime(true)} onBulkDelete={() => setShowBulkDelete(true)} onGenSCR={() => openSCR(null, null)}
               onUpdateFlight={updateFlight} onDeleteFlight={deleteFlight} onDuplicateFlight={duplicateFlight} onSetFlightColor={setFlightColor} onQuickCreate={quickCreateFlight}
               onSchedulingEngine={() => setShowSchedulingEngine(true)} ganttScale={ganttScale} onGanttScaleChange={persistGanttScale} maintenanceBlocks={maintenanceBlocks} permitIssues={permitIssues} permitMarks={permitMarks}
@@ -2051,13 +2076,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       {tab === "aircraft" && <AircraftPanel resources={resources} flights={flights} perms={perms} onAddResource={addResource} onUpdateResource={updateResource} onDeleteResource={deleteResource}
         maintenanceBlocks={maintenanceBlocks} onAddMaintenanceBlock={addMaintenanceBlock} onDeleteMaintenanceBlock={deleteMaintenanceBlock} />}
       {tab === "slots" && <SlotsPanel flights={flights} slotRequests={slotRequests} onJumpToFlight={id => { setSelectedFlightId(id); setTab("schedule"); }} />}
+      {quoteVisited && canPrice && <div style={{ display: QUOTE_TABS[tab] ? "block" : "none" }}><CharterQuoteModal embedded page={quotePage} perms={perms} pushToast={pushToast} onClose={() => {}} /></div>}
+      {tab === "pricing_fuel" && <FuelPricesModal embedded flights={flights} perms={perms} pushToast={pushToast} onClose={() => {}} />}
       {tab === "permits" && <PermitsPanel permitData={permitData} flights={flights} resources={resources} perms={perms} onReload={reloadPermitData} onJumpToFlight={id => { setSelectedFlightId(id); setTab("schedule"); }} pushToast={pushToast} />}
       </div>
 
       {showAddFlight && <AddFlightModal resources={resources} prefill={addFlightPrefill} onClose={() => { setShowAddFlight(false); setAddFlightPrefill(null); }} onCreate={insertSingleFlight} checkConflict={checkConflict} onLogScr={logScrSent} />}
       {showAssignTails && <AssignTailsModal flights={flights} resources={resources} isGrounded={isGrounded} perms={perms} onClose={() => setShowAssignTails(false)} onApply={applyTailAssignments} />}
-      {showQuote && <CharterQuoteModal perms={perms} pushToast={pushToast} onClose={() => setShowQuote(false)} />}
-      {showFuel && <FuelPricesModal flights={flights} perms={perms} pushToast={pushToast} onClose={() => setShowFuel(false)} />}
       {showMovements && <MovementsModal perms={perms} pushToast={pushToast} onClose={() => setShowMovements(false)} />}
       {showSchedMsgs && <ScheduleMessagesModal flights={flights} resources={resources} allotments={allotments} perms={perms} pushToast={pushToast} onClose={() => setShowSchedMsgs(false)} onCreateRows={rows => commitBulkRows(rows, { keepOpen: true })} onUpdateFlight={updateFlight} />}
       {showBulkImport && <BulkImportModal resources={resources} flights={flights} onClose={() => setShowBulkImport(false)} onCommit={commitBulkRows} onLogScr={logScrSent} />}
@@ -2082,7 +2107,7 @@ function hourTickLabel(h) { return String(h).padStart(2, "0") + "00"; }
 // computeScheduleIssues now lives in lib/scheduling-utils.js (imported at the top) — extracted
 // alongside the other pure logic so it can be unit tested directly.
 
-function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onFuel, onQuote, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
+function ScheduleBoard({ resources, flights, operators, days, viewStart, onShiftView, onJumpToday, onJumpToDate, selectedFlightId, setSelectedFlightId, flightInventory, perms, onNewFlight, onBulkImport, onScheduleMessages, onMovements, onAssignTails, onRotationGen, showLocal, setShowLocal, onDropFlight, slotRequests, onBulkRetime, onBulkDelete, onGenSCR, viewMode, setViewMode, rangeFrom, setRangeFrom, rangeTo, setRangeTo, DAYS, onUpdateFlight, onDeleteFlight, onDuplicateFlight, onSetFlightColor, onQuickCreate, onSchedulingEngine, ganttScale, onGanttScaleChange, maintenanceBlocks, permitIssues, permitMarks, acknowledgedIssueIds, onAcknowledgeIssue, onUnacknowledgeIssue, draftMode, setDraftMode, draftChanges, onApproveDraft, onDiscardDraft, onApproveAllDrafts, onDiscardAllDrafts }) {
   const { t } = useLanguage();
   // ---- back to hand-rolled rendering ----
   // vis-timeline gave us native pan/zoom/resize, but every bug we hit in it (the async
@@ -2375,8 +2400,6 @@ function ScheduleBoard({ resources, flights, operators, days, viewStart, onShift
             {showMoreMenu && (
               <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: "calc(100% + 6px)", right: 0, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, boxShadow: "0 12px 32px rgba(30,42,61,0.16)", zIndex: 60, minWidth: 170, padding: 6 }}>
                 <button onClick={() => { onGenSCR(); setShowMoreMenu(false); }} style={ctxMenuItem}>Generate SCR</button>
-                <button onClick={() => { onFuel(); setShowMoreMenu(false); }} style={ctxMenuItem}>Fuel prices by airport</button>
-                {(perms.editAllotments || perms.editContracts) && <button onClick={() => { onQuote(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>Charter price calculator</button>}
                 {perms.editFlight && <>
                   <button onClick={() => { onRotationGen(); setShowMoreMenu(false); }} style={ctxMenuItem}>{t("generateRotation")}</button>
                   <button onClick={() => { onSchedulingEngine(); setShowMoreMenu(false); }} style={{ ...ctxMenuItem, fontWeight: 600 }}>{t("schedulingEngine")}</button>
@@ -3564,10 +3587,20 @@ function haversineKm(a, b) {
 const usd0 = n => "$" + Math.round(n).toLocaleString("en-US");
 const usd2 = n => "$" + (Math.round(n * 100) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const FEE_SET_LABEL = { STD: "Standard", INT: "International (МВЛ)", DOM: "Domestic (ВВЛ)" };
+// Pricing screens open as pages from the left bar (embedded) and still work as pop-ups.
+function shellStyles(embedded, width, maxH) {
+  if (embedded) return { outer: { padding: 20 }, inner: { background: C.panel, borderRadius: 12, padding: 18, border: `1px solid ${C.border}`, maxWidth: 1180, margin: "0 auto" } };
+  return {
+    outer: { position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
+    inner: { background: C.panel, borderRadius: 12, width: `min(${width}px, 100%)`, maxHeight: maxH, overflow: "auto", padding: 18, border: `1px solid ${C.border}` },
+  };
+}
 const QUOTE_BLANK = { title: "", acCode: "", pax: "", crew: "", fuelMonth: "", legs: [{ from: "", to: "", km: "", min: "" }], hourCost: "", nav: { enroute: "", terminal: "" }, blockCfg: {} };
 
-function CharterQuoteModal({ perms, pushToast, onClose }) {
-  const [tab, setTab] = useState("calc");
+const QUOTE_PAGE_TITLE = { calc: "Charter price calculator", saved: "Saved quotes", fees: "Airport fees", times: "Route times" };
+function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page = "calc" }) {
+  const [tabState, setTab] = useState("calc");
+  const tab = embedded ? page : tabState;
   const [aircraft, setAircraft] = useState([]);
   const [navRates, setNavRates] = useState([]);
   const [fuel, setFuel] = useState(new Map());
@@ -3611,6 +3644,7 @@ function CharterQuoteModal({ perms, pushToast, onClose }) {
     fetch("/data/airports.json").then(r => r.json()).then(a => setGeo(new Map(a.map(x => [x[0], [x[2], x[3], `${x[5]} (${x[4]})`]])))).catch(() => {});
   }, []);
 
+  useEffect(() => { if (embedded && page === "calc") { loadBase(); loadFuelHist(); loadRoutes(); } }, [page]);
   const ac = aircraft.find(a => a.code === st.acCode);
   const acObj = ac ? { code: ac.code, mtow: +ac.mtow_t, seats: ac.seats, cruiseKmh: +ac.cruise_kmh, burnTPerH: +ac.burn_t_per_h, hourCost: +ac.hour_cost_usd } : null;
   const validLegs = st.legs.filter(l => l.from.trim() && l.to.trim() && +l.km > 0).map(l => ({ from: l.from.trim().toUpperCase(), to: l.to.trim().toUpperCase(), km: +l.km, ...(+l.min > 0 ? { hours: Math.round(+l.min / 60 * 100) / 100 } : {}) }));
@@ -3707,11 +3741,11 @@ function CharterQuoteModal({ perms, pushToast, onClose }) {
   const tabBtn = (k, l) => <button key={k} onClick={() => setTab(k)} style={{ ...miniBtn, background: tab === k ? C.amberSoft : C.panel, borderColor: tab === k ? C.amber : C.border, fontWeight: tab === k ? 600 : 400 }}>{l}</button>;
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(1040px, 100%)", maxHeight: "92vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+    <div style={shellStyles(embedded, 1040, "92vh").outer} onClick={embedded ? undefined : onClose}>
+      <div onClick={e => e.stopPropagation()} style={shellStyles(embedded, 1040, "92vh").inner}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>Charter price calculator</div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{tabBtn("calc", "Calculator")}{tabBtn("saved", `Saved quotes (${saved.length})`)}{tabBtn("fees", "Airport fees")}{tabBtn("times", "Route times")}<button onClick={onClose} style={miniBtn}>Close</button></div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{embedded ? QUOTE_PAGE_TITLE[page] : "Charter price calculator"}</div>
+          {!embedded && <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{tabBtn("calc", "Calculator")}{tabBtn("saved", `Saved quotes (${saved.length})`)}{tabBtn("fees", "Airport fees")}{tabBtn("times", "Route times")}<button onClick={onClose} style={miniBtn}>Close</button></div>}
         </div>
         {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
 
@@ -3919,7 +3953,7 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
 
 const FUEL_UNITS = ["USD/tonne", "USD/kg", "USD/USG", "USD/litre"];
 // One current fuel price per airport, listed for every airport (origin or destination) that appears in the schedule.
-function FuelPricesModal({ flights, perms, pushToast, onClose }) {
+function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false }) {
   const [rows, setRows] = useState(new Map()); // airport -> saved row
   const [edits, setEdits] = useState({});      // airport -> { price, unit, supplier, valid_from }
   const [names, setNames] = useState(new Map());
@@ -3996,14 +4030,14 @@ function FuelPricesModal({ flights, perms, pushToast, onClose }) {
   }
   const cell = { padding: "4px 6px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.45)", zIndex: 80, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(920px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+    <div style={shellStyles(embedded, 920, "90vh").outer} onClick={embedded ? undefined : onClose}>
+      <div onClick={e => e.stopPropagation()} style={shellStyles(embedded, 920, "90vh").inner}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Fuel prices by airport</div>
           <div style={{ display: "flex", gap: 8 }}>
             {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>Bulk load from file</button>}
             <button disabled={busy || airports.length === 0} onClick={downloadPdf} style={{ ...miniBtn, color: C.amber, borderColor: C.amber }}>Download PDF report</button>
-            <button onClick={onClose} style={miniBtn}>Close</button>
+            {!embedded && <button onClick={onClose} style={miniBtn}>Close</button>}
           </div>
         </div>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>One current price for every airport in the schedule (departure or arrival). {priced} of {airports.length} airports have a price. {canEdit ? "Type a price and press Save. The unit is kept per airport." : "Only schedule coordinators and management can change prices."}</div>
