@@ -11,7 +11,7 @@ const nextConfig = {
     // discover them itself via static analysis.
     outputFileTracingIncludes: {
       "/api/reports/generate": ["./node_modules/pdfkit/js/**/*"],
-      "/api/reports/fuel": ["./node_modules/pdfkit/js/**/*", "./public/data/airports.json"],
+      "/api/reports/fuel": ["./node_modules/pdfkit/js/**/*", "./public/data/airports.json", "./app/api/reports/quote/fonts/*"],
       "/api/reports/quote": ["./node_modules/pdfkit/js/**/*", "./app/api/reports/quote/fonts/*"],
     },
   },

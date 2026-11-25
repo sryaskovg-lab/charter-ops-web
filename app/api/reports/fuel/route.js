@@ -17,6 +17,8 @@ export async function POST(request) {
     const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY, {
       global: { headers: { Authorization: `Bearer ${token}` } },
     });
+    let lang = "en";
+    try { const b = await request.json(); if (b?.lang === "ru") lang = "ru"; } catch { /* no body: English */ }
     const [{ data: flights, error: fe }, { data: prices, error: pe }] = await Promise.all([
       fetchAllPages(() => supabase.from("flights").select("id,origin,destination").order("id")),
       supabase.from("airport_fuel_prices").select("airport,price,unit,supplier,valid_from,updated_at"),
@@ -38,7 +40,7 @@ export async function POST(request) {
     });
     const priced = rows.filter(r => r.price != null).length;
     const generated = new Date().toISOString().slice(0, 16).replace("T", " ");
-    const buf = await renderToBuffer(React.createElement(FuelDocument, { rows, generated, priced }));
+    const buf = await renderToBuffer(React.createElement(FuelDocument, { rows, generated, priced, lang }));
     return new Response(buf, { status: 200, headers: { "Content-Type": "application/pdf", "Content-Disposition": `attachment; filename="fuel-prices-${generated.slice(0, 10)}.pdf"` } });
   } catch (err) {
     console.error("Fuel report failed:", err);

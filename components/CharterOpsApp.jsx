@@ -449,7 +449,7 @@ function PendingApproval({ profile, onSignOut }) {
   );
 }
 function CharterOpsAppInner({ profile, onSignOut }) {
-  const { t, lang, setLang } = useLanguage();
+  const { t, tr, lang, setLang } = useLanguage();
   const role = profile.role;
   const [tab, setTab] = useState("schedule");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1859,9 +1859,9 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   // Pricing folder: everything for quoting a charter (English labels like Slots and Permits)
   const canPrice = !!(perms.editAllotments || perms.editContracts);
   const PRICING_ITEMS = [
-    ...(canPrice ? [["pricing_calc", "Price calculator", IconCoin], ["pricing_saved", "Saved quotes", IconCalendar]] : []),
-    ["pricing_fuel", "Fuel prices", IconGauge],
-    ...(canPrice ? [["pricing_fees", "Airport fees", IconBuilding], ["pricing_times", "Route times", IconPlane]] : []),
+    ...(canPrice ? [["pricing_calc", tr("Price calculator"), IconCoin], ["pricing_saved", tr("Saved quotes"), IconCalendar]] : []),
+    ["pricing_fuel", tr("Fuel prices"), IconGauge],
+    ...(canPrice ? [["pricing_fees", tr("Airport fees"), IconBuilding], ["pricing_times", tr("Route times"), IconPlane]] : []),
   ];
   const QUOTE_TABS = { pricing_calc: "calc", pricing_saved: "saved", pricing_fees: "fees", pricing_times: "times" };
   useEffect(() => { if (QUOTE_TABS[tab]) { setQuoteVisited(true); setQuotePage(QUOTE_TABS[tab]); } }, [tab]);
@@ -1946,7 +1946,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
             : <>
               <button className="sidebar-nav-item" onClick={() => setPricingOpen(v => !v)} aria-expanded={pricingOpen || inPricing}
                 style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 8, border: "none", background: "transparent", color: inPricing ? SIDEBAR.text : SIDEBAR.muted, fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: SANS, textAlign: "left", width: "100%", marginTop: 6 }}>
-                <IconCoin /> <span style={{ flex: 1 }}>Pricing</span> <IconChevron open={pricingOpen || inPricing} />
+                <IconCoin /> <span style={{ flex: 1 }}>{tr("Pricing")}</span> <IconChevron open={pricingOpen || inPricing} />
               </button>
               {(pricingOpen || inPricing) && PRICING_ITEMS.map(([k, l, Icon]) => sideBtn(k, l, Icon, true))}
             </>)}
@@ -3599,6 +3599,7 @@ const QUOTE_BLANK = { title: "", acCode: "", pax: "", crew: "", fuelMonth: "", l
 
 const QUOTE_PAGE_TITLE = { calc: "Charter price calculator", saved: "Saved quotes", fees: "Airport fees", times: "Route times" };
 function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page = "calc" }) {
+  const { tr } = useLanguage();
   const [tabState, setTab] = useState("calc");
   const tab = embedded ? page : tabState;
   const [aircraft, setAircraft] = useState([]);
@@ -3623,7 +3624,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
       supabase.from("airport_fuel_prices").select("airport,price,unit"),
     ]);
     const e = a.error || n.error || f.error;
-    if (e) { setErr(/relation|schema cache|does not exist/i.test(e.message) ? "The calculator tables are missing: run migration 00041_charter_quotes.sql and 00042_charter_fee_seed.sql in Supabase." : e.message); return; }
+    if (e) { setErr(/relation|schema cache|does not exist/i.test(e.message) ? tr("The calculator tables are missing: run migration 00041_charter_quotes.sql and 00042_charter_fee_seed.sql in Supabase.") : e.message); return; }
     setErr(""); setAircraft(a.data || []); setNavRates(n.data || []); setFuel(new Map((f.data || []).map(r => [r.airport, r])));
     setSt(s => s.acCode || !(a.data || []).length ? s : { ...s, acCode: a.data[0].code });
   }
@@ -3706,7 +3707,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     const l = st.legs[i], f = l.from.trim().toUpperCase(), t = l.to.trim().toUpperCase(), r = savedRoute(f, t);
     const a = geo.get(f), b = geo.get(t);
     if (r) { setLeg(i, { min: String(r.avg_minutes), km: r.km ? String(+r.km) : (a && b ? String(Math.round(haversineKm(a, b) * 1.12 / 5) * 5) : l.km) }); return; }
-    if (!a || !b) { pushToast("Airport code not found: enter valid IATA codes first.", "warn"); return; }
+    if (!a || !b) { pushToast(tr("Airport code not found: enter valid IATA codes first."), "warn"); return; }
     setLeg(i, { km: String(Math.round(haversineKm(a, b) * 1.12 / 5) * 5) });
   }
   async function save() {
@@ -3715,8 +3716,8 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     const title = st.title.trim() || routeText;
     const { error } = await supabase.from("charter_quotes").insert({ title, aircraft_type: st.acCode, route: routeText, pax: q.pax, inputs: st, result: q, total_usd: Math.round(q.total * 100) / 100, per_seat_usd: Math.round(q.perSeat * 100) / 100, per_block_hour_usd: Math.round(q.perBlockHour * 100) / 100 });
     setBusy(false);
-    if (error) { pushToast(`Quote not saved: ${error.message}`, "warn", true); return; }
-    pushToast("Quote saved.", "ok"); loadSaved();
+    if (error) { pushToast(tr("Quote not saved: {m}", { m: error.message }), "warn", true); return; }
+    pushToast(tr("Quote saved."), "ok"); loadSaved();
   }
   async function pdf(lang) {
     if (!quoteInput) return;
@@ -3728,12 +3729,12 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement("a"); a.href = url; a.download = `charter-quote-${routeText.replace(/ - /g, "-")}.pdf`; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch (e) { pushToast(`Quote PDF failed: ${e.message}`, "warn", true); }
+    } catch (e) { pushToast(tr("Quote PDF failed: {m}", { m: e.message }), "warn", true); }
     finally { setBusy(false); }
   }
   async function removeSaved(id) {
     const { error } = await supabase.from("charter_quotes").delete().eq("id", id);
-    if (error) pushToast(`Not deleted: ${error.message}`, "warn"); else loadSaved();
+    if (error) pushToast(tr("Not deleted: {m}", { m: error.message }), "warn"); else loadSaved();
   }
 
   const lab = { fontSize: 11, color: C.muted, marginBottom: 2 };
@@ -3744,45 +3745,45 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     <div style={shellStyles(embedded, 1040, "92vh").outer} onClick={embedded ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={shellStyles(embedded, 1040, "92vh").inner}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>{embedded ? QUOTE_PAGE_TITLE[page] : "Charter price calculator"}</div>
-          {!embedded && <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{tabBtn("calc", "Calculator")}{tabBtn("saved", `Saved quotes (${saved.length})`)}{tabBtn("fees", "Airport fees")}{tabBtn("times", "Route times")}<button onClick={onClose} style={miniBtn}>Close</button></div>}
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{tr(embedded ? QUOTE_PAGE_TITLE[page] : "Charter price calculator")}</div>
+          {!embedded && <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{tabBtn("calc", tr("Calculator"))}{tabBtn("saved", `${tr("Saved quotes")} (${saved.length})`)}{tabBtn("fees", tr("Airport fees"))}{tabBtn("times", tr("Route times"))}<button onClick={onClose} style={miniBtn}>{tr("Close")}</button></div>}
         </div>
         {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
 
         {tab === "calc" && <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
-            <div style={{ gridColumn: "span 2" }}><div style={lab}>Quote name</div><input value={st.title} onChange={e => set({ title: e.target.value })} placeholder={routeText || "e.g. Shymkent - Vienna - Shymkent"} style={inputStyle} /></div>
-            <div><div style={lab}>Aircraft</div><select value={st.acCode} onChange={e => set({ acCode: e.target.value })} style={inputStyle}>{aircraft.map(a => <option key={a.code} value={a.code}>{a.name}</option>)}</select></div>
-            <div><div style={lab}>Passengers{ac ? ` (${ac.seats} seats)` : ""}</div><input inputMode="numeric" value={st.pax} onChange={e => set({ pax: e.target.value })} placeholder={ac ? String(ac.seats) : ""} style={inputStyle} /></div>
-            <div><div style={lab}>Crew</div><input inputMode="numeric" value={st.crew} onChange={e => set({ crew: e.target.value })} placeholder={String(ac?.crew || 7)} style={inputStyle} /></div>
-            <div><div style={lab}>Fuel prices of month</div><input type="month" value={fuelMonth} onChange={e => set({ fuelMonth: e.target.value })} style={inputStyle} /></div>
-            <div><div style={lab}>Flight hour cost, USD</div><input inputMode="decimal" value={st.hourCost} onChange={e => set({ hourCost: e.target.value })} placeholder={ac ? String(+ac.hour_cost_usd) : ""} style={inputStyle} /></div>
+            <div style={{ gridColumn: "span 2" }}><div style={lab}>{tr("Quote name")}</div><input value={st.title} onChange={e => set({ title: e.target.value })} placeholder={routeText || "e.g. Shymkent - Vienna - Shymkent"} style={inputStyle} /></div>
+            <div><div style={lab}>{tr("Aircraft")}</div><select value={st.acCode} onChange={e => set({ acCode: e.target.value })} style={inputStyle}>{aircraft.map(a => <option key={a.code} value={a.code}>{a.name}</option>)}</select></div>
+            <div><div style={lab}>{ac ? tr("Passengers ({n} seats)", { n: ac.seats }) : tr("Passengers")}</div><input inputMode="numeric" value={st.pax} onChange={e => set({ pax: e.target.value })} placeholder={ac ? String(ac.seats) : ""} style={inputStyle} /></div>
+            <div><div style={lab}>{tr("Crew")}</div><input inputMode="numeric" value={st.crew} onChange={e => set({ crew: e.target.value })} placeholder={String(ac?.crew || 7)} style={inputStyle} /></div>
+            <div><div style={lab}>{tr("Fuel prices of month")}</div><input type="month" value={fuelMonth} onChange={e => set({ fuelMonth: e.target.value })} style={inputStyle} /></div>
+            <div><div style={lab}>{tr("Flight hour cost, USD")}</div><input inputMode="decimal" value={st.hourCost} onChange={e => set({ hourCost: e.target.value })} placeholder={ac ? String(+ac.hour_cost_usd) : ""} style={inputStyle} /></div>
           </div>
-          {ac && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>{ac.name}: MTOW {+ac.mtow_t} t, cruise {+ac.cruise_kmh} km/h, burn {+ac.burn_t_per_h} t/h. {ac.note ? `(${ac.note})` : ""}</div>}
+          {ac && <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 10 }}>{tr("{ac}: MTOW {mtow} t, cruise {kmh} km/h, burn {burn} t/h.", { ac: ac.name, mtow: +ac.mtow_t, kmh: +ac.cruise_kmh, burn: +ac.burn_t_per_h })} {ac.note ? `(${ac.note})` : ""}</div>}
 
-          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>Route</div>
+          <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 4 }}>{tr("Route")}</div>
           <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 6 }}>
-            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>From</th><th style={tdc}>To</th><th style={tdc}>Distance, km</th><th style={tdc}>Time, min</th><th style={tdc}>Time, h</th><th style={tdc}>Fuel, t</th><th style={tdc}></th></tr></thead>
+            <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("From")}</th><th style={tdc}>{tr("To")}</th><th style={tdc}>{tr("Distance, km")}</th><th style={tdc}>{tr("Time, min")}</th><th style={tdc}>{tr("Time, h")}</th><th style={tdc}>{tr("Fuel, t")}</th><th style={tdc}></th></tr></thead>
             <tbody>{st.legs.map((l, i) => { const c = legsC[validLegs.findIndex((v, k) => k === st.legs.slice(0, i + 1).filter(x => x.from.trim() && x.to.trim() && +x.km > 0).length - 1)]; const ok = l.from.trim() && l.to.trim() && +l.km > 0;
               return <tr key={i}>
                 <td style={tdc}><input value={l.from} onChange={e => setLeg(i, { from: e.target.value.toUpperCase() })} placeholder="CIT" style={{ ...inputStyle, width: 80, fontFamily: MONO }} /><div style={{ fontSize: 10, color: C.faint }}>{geo.get(l.from.trim().toUpperCase())?.[2] || ""}</div></td>
                 <td style={tdc}><input value={l.to} onChange={e => setLeg(i, { to: e.target.value.toUpperCase() })} placeholder="VIE" style={{ ...inputStyle, width: 80, fontFamily: MONO }} /><div style={{ fontSize: 10, color: C.faint }}>{geo.get(l.to.trim().toUpperCase())?.[2] || ""}</div></td>
-                <td style={tdc}><input inputMode="numeric" value={l.km} onChange={e => setLeg(i, { km: e.target.value })} style={{ ...inputStyle, width: 90 }} /> <button onClick={() => estimateKm(i)} title="Saved route time and distance, otherwise straight line + 12%" style={{ ...miniBtn, fontSize: 10 }}>fill</button></td>
-                <td style={tdc}><input inputMode="numeric" value={l.min || ""} onChange={e => setLeg(i, { min: e.target.value })} placeholder={ok && ac ? String(Math.round(+l.km / (+ac.cruise_kmh || 850) * 60)) : ""} title="Average flight time. Empty: distance / cruise speed" style={{ ...inputStyle, width: 70 }} /></td>
+                <td style={tdc}><input inputMode="numeric" value={l.km} onChange={e => setLeg(i, { km: e.target.value })} style={{ ...inputStyle, width: 90 }} /> <button onClick={() => estimateKm(i)} title={tr("Saved route time and distance, otherwise straight line + 12%")} style={{ ...miniBtn, fontSize: 10 }}>{tr("fill")}</button></td>
+                <td style={tdc}><input inputMode="numeric" value={l.min || ""} onChange={e => setLeg(i, { min: e.target.value })} placeholder={ok && ac ? String(Math.round(+l.km / (+ac.cruise_kmh || 850) * 60)) : ""} title={tr("Average flight time. Empty: distance / cruise speed")} style={{ ...inputStyle, width: 70 }} /></td>
                 <td style={{ ...tdc, color: C.muted }}>{ok && c ? c.hours.toFixed(2) : "—"}</td><td style={{ ...tdc, color: C.muted }}>{ok && c ? c.fuelT.toFixed(2) : "—"}</td>
-                <td style={tdc}>{st.legs.length > 1 && <button onClick={() => set({ legs: st.legs.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>Remove</button>}</td>
+                <td style={tdc}>{st.legs.length > 1 && <button onClick={() => set({ legs: st.legs.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>{tr("Remove")}</button>}</td>
               </tr>; })}</tbody>
           </table>
           <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-            <button onClick={() => set({ legs: [...st.legs, { from: st.legs[st.legs.length - 1]?.to || "", to: "", km: "", min: "" }] })} style={miniBtn}>Add leg</button>
-            <button onClick={() => { const l = st.legs[st.legs.length - 1]; if (l?.from && l?.to) set({ legs: [...st.legs, { from: l.to, to: l.from, km: l.km, min: l.min || "" }] }); }} style={miniBtn}>Add return leg</button>
+            <button onClick={() => set({ legs: [...st.legs, { from: st.legs[st.legs.length - 1]?.to || "", to: "", km: "", min: "" }] })} style={miniBtn}>{tr("Add leg")}</button>
+            <button onClick={() => { const l = st.legs[st.legs.length - 1]; if (l?.from && l?.to) set({ legs: [...st.legs, { from: l.to, to: l.from, km: l.km, min: l.min || "" }] }); }} style={miniBtn}>{tr("Add return leg")}</button>
           </div>
 
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
-            <div><div style={lab}>Navigation enroute, USD per km</div><input inputMode="decimal" value={st.nav.enroute} onChange={e => set({ nav: { ...st.nav, enroute: e.target.value } })} placeholder={band ? String(+band.enroute_usd_per_km) : "no rate"} style={{ ...inputStyle, width: 130 }} /></div>
-            <div><div style={lab}>Navigation aerodrome area, USD per leg</div><input inputMode="decimal" value={st.nav.terminal} onChange={e => set({ nav: { ...st.nav, terminal: e.target.value } })} placeholder={band ? String(+band.terminal_usd_per_leg) : "no rate"} style={{ ...inputStyle, width: 130 }} /></div>
-            {acObj && !band && <div style={{ fontSize: 11.5, color: C.amber }}>No navigation rate for {acObj.mtow} t in the table: enter the rates here.</div>}
-            {band && band.note && <div style={{ fontSize: 11, color: C.faint }}>Table rate: {band.note}</div>}
+            <div><div style={lab}>{tr("Navigation enroute, USD per km")}</div><input inputMode="decimal" value={st.nav.enroute} onChange={e => set({ nav: { ...st.nav, enroute: e.target.value } })} placeholder={band ? String(+band.enroute_usd_per_km) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
+            <div><div style={lab}>{tr("Navigation aerodrome area, USD per leg")}</div><input inputMode="decimal" value={st.nav.terminal} onChange={e => set({ nav: { ...st.nav, terminal: e.target.value } })} placeholder={band ? String(+band.terminal_usd_per_leg) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
+            {acObj && !band && <div style={{ fontSize: 11.5, color: C.amber }}>{tr("No navigation rate for {mtow} t in the table: enter the rates here.", { mtow: acObj.mtow })}</div>}
+            {band && band.note && <div style={{ fontSize: 11, color: C.faint }}>{tr("Table rate: {note}", { note: band.note })}</div>}
           </div>
 
           {blocks.map(b => {
@@ -3791,65 +3792,65 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
               <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 6 }}>
                 <div><b style={{ fontFamily: MONO }}>{s}</b> <span style={{ fontSize: 11.5, color: C.muted }}>{geo.get(s)?.[2] || ""}</span></div>
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
-                  {sets.length > 1 && <select value={activeSet(s)} onChange={e => setCfg(s, { set: e.target.value })} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{FEE_SET_LABEL[x]}</option>)}</select>}
-                  <span>Fuel {b.uplift.toFixed(2)} t at</span>
-                  <input inputMode="decimal" value={c.fuelPrice ?? ""} onChange={e => setCfg(s, { fuelPrice: e.target.value })} placeholder={b.fuelUsdPerT == null ? "no price" : String(Math.round(b.fuelUsdPerT * 100) / 100)} style={{ ...inputStyle, width: 90, borderColor: b.fuelUsdPerT == null && b.uplift > 0 ? C.amber : undefined }} /><span>USD/t</span>{b.fuelFrom && b.fuelUsdPerT != null && !c.fuelPrice && <span style={{ color: C.faint, fontSize: 11 }}>(price of {b.fuelFrom})</span>}
+                  {sets.length > 1 && <select value={activeSet(s)} onChange={e => setCfg(s, { set: e.target.value })} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{tr(FEE_SET_LABEL[x])}</option>)}</select>}
+                  <span>{tr("Fuel {t} t at", { t: b.uplift.toFixed(2) })}</span>
+                  <input inputMode="decimal" value={c.fuelPrice ?? ""} onChange={e => setCfg(s, { fuelPrice: e.target.value })} placeholder={b.fuelUsdPerT == null ? tr("no price") : String(Math.round(b.fuelUsdPerT * 100) / 100)} style={{ ...inputStyle, width: 90, borderColor: b.fuelUsdPerT == null && b.uplift > 0 ? C.amber : undefined }} /><span>{tr("USD/t")}</span>{b.fuelFrom && b.fuelUsdPerT != null && !c.fuelPrice && <span style={{ color: C.faint, fontSize: 11 }}>{tr("(price of {m})", { m: b.fuelFrom })}</span>}
                 </div>
               </div>
-              {!fees[s] ? <div style={{ fontSize: 12, color: C.faint }}>Loading fees…</div> : b.lines.length === 0 && !(c.extra || []).length ? <div style={{ fontSize: 12, color: C.amber }}>No fee list for {s} yet. Add lines below or in the Airport fees tab.</div> :
+              {!fees[s] ? <div style={{ fontSize: 12, color: C.faint }}>{tr("Loading fees…")}</div> : b.lines.length === 0 && !(c.extra || []).length ? <div style={{ fontSize: 12, color: C.amber }}>{tr("No fee list for {s} yet. Add lines below or in the Airport fees tab.", { s })}</div> :
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}></th><th style={tdc}>Item</th><th style={tdc}>Charged</th><th style={tdc}>Qty</th><th style={tdc}>Price USD</th><th style={{ ...tdc, textAlign: "right" }}>Sum USD</th></tr></thead>
+                <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}></th><th style={tdc}>{tr("Item")}</th><th style={tdc}>{tr("Charged")}</th><th style={tdc}>{tr("Qty")}</th><th style={tdc}>{tr("Price USD")}</th><th style={{ ...tdc, textAlign: "right" }}>{tr("Sum USD")}</th></tr></thead>
                 <tbody>{b.lines.map((l, i) => { const r = res?.lines.find((_, k) => k === b.lines.filter(x => x.include).indexOf(l)); const editQty = ["turnaround", "time", "litre"].includes(l.basis);
                   return <tr key={l.id} style={{ opacity: l.include ? 1 : 0.45 }}>
                     <td style={tdc}><input type="checkbox" checked={l.include} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, include: e.target.checked } : x) }) : setLineCfg(s, l.id, { include: e.target.checked })} /></td>
                     <td style={tdc}>{l.name}</td>
-                    <td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{BASIS_LABEL[l.basis]}{l.basis === "time" && l.periodMinutes ? ` (${l.periodMinutes} min)` : ""}</td>
+                    <td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{l.basis === "time" && l.periodMinutes ? tr("per period ({m} min)", { m: l.periodMinutes }) : tr(BASIS_LABEL[l.basis])}</td>
                     <td style={tdc}>{editQty ? <input inputMode="decimal" value={l.extra ? ((c.extra || [])[+l.id.slice(1)]?.qty ?? "") : ((c.lines || {})[l.id]?.qty ?? "")} placeholder={String(l.qty ?? 1)} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, qty: e.target.value } : x) }) : setLineCfg(s, l.id, { qty: e.target.value })} style={{ ...inputStyle, width: 64 }} /> : <span style={{ color: C.muted }}>{l.basis === "pax" ? q?.pax : l.basis === "crew" ? q?.crew : l.basis === "mtow_t" ? q?.mtow : l.basis === "fuel_t" ? b.uplift.toFixed(2) : ""}</span>}</td>
                     <td style={tdc}><input inputMode="decimal" value={l.extra ? ((c.extra || [])[+l.id.slice(1)]?.price ?? "") : ((c.lines || {})[l.id]?.price ?? "")} placeholder={String(Math.round(l.price * 100) / 100)} onChange={e => l.extra ? setCfg(s, { extra: (c.extra || []).map((x, k) => "x" + k === l.id ? { ...x, price: e.target.value } : x) }) : setLineCfg(s, l.id, { price: e.target.value })} style={{ ...inputStyle, width: 84 }} /></td>
                     <td style={{ ...tdc, textAlign: "right", fontFamily: MONO }}>{l.include ? usd0((res?.lines || []).find(x => x.name === l.name && x.price === l.price && x.basis === l.basis)?.total ?? 0) : "—"}</td>
                   </tr>; })}
-                  {b.uplift > 0 && <tr><td style={tdc}></td><td style={tdc}><b>Fuel (kerosene)</b></td><td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{b.uplift.toFixed(2)} t uplift</td><td style={tdc}></td><td style={tdc}>{b.fuelUsdPerT == null ? <span style={{ color: C.amber }}>no price</span> : usd2(b.fuelUsdPerT)}</td><td style={{ ...tdc, textAlign: "right", fontFamily: MONO }}>{usd0(res?.fuel.total || 0)}</td></tr>}
+                  {b.uplift > 0 && <tr><td style={tdc}></td><td style={tdc}><b>{tr("Fuel (kerosene)")}</b></td><td style={{ ...tdc, color: C.muted, fontSize: 11.5 }}>{tr("{t} t uplift", { t: b.uplift.toFixed(2) })}</td><td style={tdc}></td><td style={tdc}>{b.fuelUsdPerT == null ? <span style={{ color: C.amber }}>{tr("no price")}</span> : usd2(b.fuelUsdPerT)}</td><td style={{ ...tdc, textAlign: "right", fontFamily: MONO }}>{usd0(res?.fuel.total || 0)}</td></tr>}
                 </tbody>
               </table>}
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
-                <button onClick={() => setCfg(s, { extra: [...(c.extra || []), { name: "", basis: "turnaround", price: "", qty: "1" }] })} style={miniBtn}>Add a line</button>
-                <div style={{ fontWeight: 700 }}>{s} total {usd0(res?.total || 0)}</div>
+                <button onClick={() => setCfg(s, { extra: [...(c.extra || []), { name: "", basis: "turnaround", price: "", qty: "1" }] })} style={miniBtn}>{tr("Add a line")}</button>
+                <div style={{ fontWeight: 700 }}>{tr("{s} total", { s })} {usd0(res?.total || 0)}</div>
               </div>
               {(c.extra || []).map((x, i) => <div key={i} style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                <input value={x.name} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, name: e.target.value } : y) })} placeholder="Item name" style={{ ...inputStyle, width: 200 }} />
-                <select value={x.basis} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, basis: e.target.value } : y) })} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{BASIS_LABEL[k]}</option>)}</select>
-                <button onClick={() => setCfg(s, { extra: c.extra.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>Remove</button>
+                <input value={x.name} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, name: e.target.value } : y) })} placeholder={tr("Item name")} style={{ ...inputStyle, width: 200 }} />
+                <select value={x.basis} onChange={e => setCfg(s, { extra: c.extra.map((y, k) => k === i ? { ...y, basis: e.target.value } : y) })} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{tr(BASIS_LABEL[k])}</option>)}</select>
+                <button onClick={() => setCfg(s, { extra: c.extra.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>{tr("Remove")}</button>
               </div>)}
             </div>;
           })}
 
           {q && <div style={{ position: "sticky", bottom: 0, background: C.panel, borderTop: `2px solid ${C.border}`, paddingTop: 10, marginTop: 6 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, fontSize: 12.5 }}>
-              <div><div style={lab}>Airports</div><b>{usd0(q.airports)}</b></div>
-              <div><div style={lab}>Navigation</div><b>{usd0(q.nav.enroute + q.nav.terminal)}</b> <span style={{ color: C.faint, fontSize: 11 }}>({usd0(q.nav.enroute)} + {usd0(q.nav.terminal)})</span></div>
-              <div><div style={lab}>Flight hours ({q.hours.toFixed(2)} h)</div><b>{usd0(q.flightHours.total)}</b></div>
-              <div><div style={lab}>Total, USD</div><b style={{ fontSize: 18, color: C.green }}>{usd0(q.total)}</b></div>
-              <div><div style={lab}>Per seat ({q.pax})</div><b style={{ fontSize: 15 }}>{usd0(q.perSeat)}</b></div>
-              <div><div style={lab}>Per block hour</div><b style={{ fontSize: 15 }}>{usd0(q.perBlockHour)}</b></div>
+              <div><div style={lab}>{tr("Airports")}</div><b>{usd0(q.airports)}</b></div>
+              <div><div style={lab}>{tr("Navigation")}</div><b>{usd0(q.nav.enroute + q.nav.terminal)}</b> <span style={{ color: C.faint, fontSize: 11 }}>({usd0(q.nav.enroute)} + {usd0(q.nav.terminal)})</span></div>
+              <div><div style={lab}>{tr("Flight hours ({h} h)", { h: q.hours.toFixed(2) })}</div><b>{usd0(q.flightHours.total)}</b></div>
+              <div><div style={lab}>{tr("Total, USD")}</div><b style={{ fontSize: 18, color: C.green }}>{usd0(q.total)}</b></div>
+              <div><div style={lab}>{tr("Per seat ({n})", { n: q.pax })}</div><b style={{ fontSize: 15 }}>{usd0(q.perSeat)}</b></div>
+              <div><div style={lab}>{tr("Per block hour")}</div><b style={{ fontSize: 15 }}>{usd0(q.perBlockHour)}</b></div>
             </div>
-            {q.missingFuel.length > 0 && <div style={{ fontSize: 12, color: C.amber, marginTop: 6 }}>No fuel price for {q.missingFuel.join(", ")}: the total is missing that fuel. Set it in Fuel prices or type it above.</div>}
+            {q.missingFuel.length > 0 && <div style={{ fontSize: 12, color: C.amber, marginTop: 6 }}>{tr("No fuel price for {list}: the total is missing that fuel. Set it in Fuel prices or type it above.", { list: q.missingFuel.join(", ") })}</div>}
             <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
-              {canQuote && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save quote</button>}
-              <button disabled={busy} onClick={() => pdf("ru")} style={miniBtn}>PDF (Russian)</button>
-              <button disabled={busy} onClick={() => pdf("en")} style={miniBtn}>PDF (English)</button>
-              <button onClick={() => setSt({ ...QUOTE_BLANK, acCode: aircraft[0]?.code || "" })} style={miniBtn}>New quote</button>
+              {canQuote && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save quote")}</button>}
+              <button disabled={busy} onClick={() => pdf("ru")} style={miniBtn}>{tr("PDF (Russian)")}</button>
+              <button disabled={busy} onClick={() => pdf("en")} style={miniBtn}>{tr("PDF (English)")}</button>
+              <button onClick={() => setSt({ ...QUOTE_BLANK, acCode: aircraft[0]?.code || "" })} style={miniBtn}>{tr("New quote")}</button>
             </div>
           </div>}
-          {!q && <div style={{ fontSize: 12.5, color: C.faint }}>Choose the aircraft and enter at least one leg (from, to and distance) to see the price.</div>}
+          {!q && <div style={{ fontSize: 12.5, color: C.faint }}>{tr("Choose the aircraft and enter at least one leg (from, to and distance) to see the price.")}</div>}
         </>}
 
         {tab === "saved" && <div>
-          {saved.length === 0 && <div style={{ color: C.faint, fontSize: 12.5 }}>No saved quotes yet.</div>}
+          {saved.length === 0 && <div style={{ color: C.faint, fontSize: 12.5 }}>{tr("No saved quotes yet.")}</div>}
           {saved.map(x => <div key={x.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", padding: "8px 0", borderTop: `1px solid ${C.borderSoft}`, flexWrap: "wrap" }}>
-            <div><b>{x.title}</b><div style={{ fontSize: 11.5, color: C.muted }}>{x.route} · {x.aircraft_type} · {x.pax} pax · {String(x.created_at).slice(0, 10)}</div></div>
-            <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12.5 }}><span><b>{usd0(+x.total_usd)}</b> total</span><span>{usd0(+x.per_seat_usd)} per seat</span><span>{usd0(+x.per_block_hour_usd)} per block hour</span>
-              <button onClick={() => { setSt({ ...QUOTE_BLANK, ...x.inputs }); setTab("calc"); }} style={miniBtn}>Open</button>
-              {canQuote && <button onClick={() => { if (window.confirm("Delete this saved quote?")) removeSaved(x.id); }} style={{ ...miniBtn, color: C.red }}>Delete</button>}</div>
+            <div><b>{x.title}</b><div style={{ fontSize: 11.5, color: C.muted }}>{x.route} · {x.aircraft_type} · {x.pax} {tr("pax")} · {String(x.created_at).slice(0, 10)}</div></div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center", fontSize: 12.5 }}><span><b>{usd0(+x.total_usd)}</b> {tr("total")}</span><span>{usd0(+x.per_seat_usd)} {tr("per seat")}</span><span>{usd0(+x.per_block_hour_usd)} {tr("per block hour")}</span>
+              <button onClick={() => { setSt({ ...QUOTE_BLANK, ...x.inputs }); setTab("calc"); }} style={miniBtn}>{tr("Open")}</button>
+              {canQuote && <button onClick={() => { if (window.confirm(tr("Delete this saved quote?"))) removeSaved(x.id); }} style={{ ...miniBtn, color: C.red }}>{tr("Delete")}</button>}</div>
           </div>)}
         </div>}
 
@@ -3862,6 +3863,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
 
 // Airport fee lists: view and edit the lines the calculator uses (all prices in USD).
 function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
+  const { tr } = useLanguage();
   const [airports, setAirports] = useState([]);
   const [airport, setAirport] = useState("");
   const [feeSet, setFeeSet] = useState("STD");
@@ -3892,33 +3894,33 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
     const patch = {};
     if (p.name !== undefined) patch.name = String(p.name).trim();
     if (p.basis !== undefined) patch.basis = p.basis;
-    if (p.price_usd !== undefined) { const n = +String(p.price_usd).replace(",", "."); if (!Number.isFinite(n) || n < 0) { pushToast("Enter the price as a number.", "warn"); return; } patch.price_usd = n; }
+    if (p.price_usd !== undefined) { const n = +String(p.price_usd).replace(",", "."); if (!Number.isFinite(n) || n < 0) { pushToast(tr("Enter the price as a number."), "warn"); return; } patch.price_usd = n; }
     if (p.quantity !== undefined) patch.quantity = p.quantity === "" ? null : +String(p.quantity).replace(",", ".");
     if (p.period_minutes !== undefined) patch.period_minutes = p.period_minutes === "" ? null : +p.period_minutes;
     if (p.aircraft_type !== undefined) patch.aircraft_type = p.aircraft_type || null;
     setBusy(true);
     const { data, error } = await supabase.from("airport_fee_lines").update(patch).eq("id", l.id).select("id");
     setBusy(false);
-    if (error || !data?.length) { pushToast(`Not saved: ${error?.message || "no row changed (permission?)"}`, "warn", true); return; }
-    pushToast("Fee saved.", "ok"); onChanged(airport); loadLines(airport);
+    if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
+    pushToast(tr("Fee saved."), "ok"); onChanged(airport); loadLines(airport);
   }
   async function delLine(l) {
-    if (!window.confirm(`Delete "${l.name}" at ${airport}?`)) return;
+    if (!window.confirm(tr("Delete \"{n}\" at {a}?", { n: l.name, a: airport }))) return;
     const { error } = await supabase.from("airport_fee_lines").delete().eq("id", l.id);
-    if (error) { pushToast(`Not deleted: ${error.message}`, "warn"); return; }
+    if (error) { pushToast(tr("Not deleted: {m}", { m: error.message }), "warn"); return; }
     onChanged(airport); loadLines(airport);
   }
   async function addLine() {
     if (!airport) return;
     setBusy(true);
-    const { error } = await supabase.from("airport_fee_lines").insert({ airport, fee_set: feeSet, sort: (shown[shown.length - 1]?.sort ?? -1) + 1, name: "New fee", basis: "turnaround", price_usd: 0, quantity: 1, source: "app" });
+    const { error } = await supabase.from("airport_fee_lines").insert({ airport, fee_set: feeSet, sort: (shown[shown.length - 1]?.sort ?? -1) + 1, name: tr("New fee"), basis: "turnaround", price_usd: 0, quantity: 1, source: "app" });
     setBusy(false);
-    if (error) { pushToast(`Not added: ${error.message}`, "warn", true); return; }
+    if (error) { pushToast(tr("Not added: {m}", { m: error.message }), "warn", true); return; }
     onChanged(airport); loadLines(airport);
   }
   function startAirport() {
     const c = newCode.trim().toUpperCase();
-    if (!/^[A-Z]{3,4}$/.test(c)) { pushToast("Enter a 3 or 4 letter airport code.", "warn"); return; }
+    if (!/^[A-Z]{3,4}$/.test(c)) { pushToast(tr("Enter a 3 or 4 letter airport code."), "warn"); return; }
     setAirports(a => [...new Set([...a, c])].sort()); setAirport(c); setNewCode("");
   }
   const tdc = { padding: "3px 5px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
@@ -3926,27 +3928,27 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
     <div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
         <select value={airport} onChange={e => setAirport(e.target.value)} style={{ ...inputStyle, width: 220 }}>{airports.map(a => <option key={a} value={a}>{a} {geo.get(a)?.[2] || ""}</option>)}</select>
-        {sets.length > 1 && <select value={feeSet} onChange={e => setFeeSet(e.target.value)} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{FEE_SET_LABEL[x]}</option>)}</select>}
-        {canEdit && <><input value={newCode} onChange={e => setNewCode(e.target.value.toUpperCase())} placeholder="new airport code" style={{ ...inputStyle, width: 130, fontFamily: MONO }} /><button onClick={startAirport} style={miniBtn}>Add airport</button><button onClick={() => setBulk(true)} style={miniBtn}>Bulk load from file</button></>}
-        <button onClick={() => exportAllFees(pushToast)} style={miniBtn}>Export all fees (CSV)</button>
+        {sets.length > 1 && <select value={feeSet} onChange={e => setFeeSet(e.target.value)} style={{ ...inputStyle, width: 170 }}>{sets.map(x => <option key={x} value={x}>{tr(FEE_SET_LABEL[x])}</option>)}</select>}
+        {canEdit && <><input value={newCode} onChange={e => setNewCode(e.target.value.toUpperCase())} placeholder={tr("new airport code")} style={{ ...inputStyle, width: 130, fontFamily: MONO }} /><button onClick={startAirport} style={miniBtn}>{tr("Add airport")}</button><button onClick={() => setBulk(true)} style={miniBtn}>{tr("Bulk load from file")}</button></>}
+        <button onClick={() => exportAllFees(pushToast, tr)} style={miniBtn}>{tr("Export all fees (CSV)")}</button>
       </div>
       {bulk && <FeesBulkDialog aircraft={aircraft} pushToast={pushToast} onDone={codes => { codes.forEach(c => onChanged(c)); loadAirports(); loadLines(airport); }} onClose={() => setBulk(false)} />}
-      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{canEdit ? "Change a value and press Save on that line. All prices are in USD; \"time\" lines are charged per period of the length shown." : "Only management and the tour operator liaison can change fees."}</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{canEdit ? tr("Change a value and press Save on that line. All prices are in USD; \"time\" lines are charged per period of the length shown.") : tr("Only management and the tour operator liaison can change fees.")}</div>
       <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>Item</th><th style={tdc}>Charged</th><th style={tdc}>Price USD</th><th style={tdc}>Qty</th><th style={tdc}>Period, min</th><th style={tdc}>Only for</th><th style={tdc}></th></tr></thead>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Item")}</th><th style={tdc}>{tr("Charged")}</th><th style={tdc}>{tr("Price USD")}</th><th style={tdc}>{tr("Qty")}</th><th style={tdc}>{tr("Period, min")}</th><th style={tdc}>{tr("Only for")}</th><th style={tdc}></th></tr></thead>
         <tbody>{shown.map(l => <tr key={l.id} style={{ background: edits[l.id] ? C.amberSoft : "transparent" }}>
           <td style={tdc}>{canEdit ? <input value={val(l, "name")} onChange={e => setE(l, "name", e.target.value)} style={{ ...inputStyle, minWidth: 220 }} /> : l.name}</td>
-          <td style={tdc}>{canEdit ? <select value={val(l, "basis")} onChange={e => setE(l, "basis", e.target.value)} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{BASIS_LABEL[k]}</option>)}</select> : BASIS_LABEL[l.basis]}</td>
+          <td style={tdc}>{canEdit ? <select value={val(l, "basis")} onChange={e => setE(l, "basis", e.target.value)} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{tr(BASIS_LABEL[k])}</option>)}</select> : BASIS_LABEL[l.basis]}</td>
           <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "price_usd")} onChange={e => setE(l, "price_usd", e.target.value)} style={{ ...inputStyle, width: 90 }} /> : +l.price_usd}</td>
           <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "quantity")} onChange={e => setE(l, "quantity", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.quantity}</td>
           <td style={tdc}>{canEdit ? <input inputMode="numeric" value={val(l, "period_minutes")} onChange={e => setE(l, "period_minutes", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.period_minutes}</td>
-          <td style={tdc}>{canEdit ? <select value={val(l, "aircraft_type") || ""} onChange={e => setE(l, "aircraft_type", e.target.value)} style={{ ...inputStyle, width: 90 }}><option value="">all</option>{aircraft.map(a => <option key={a.code} value={a.code}>{a.code}</option>)}</select> : (l.aircraft_type || "all")}</td>
-          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !edits[l.id]} onClick={() => saveLine(l)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Save</button> <button onClick={() => delLine(l)} style={{ ...miniBtn, color: C.red }}>Delete</button></>}</td>
+          <td style={tdc}>{canEdit ? <select value={val(l, "aircraft_type") || ""} onChange={e => setE(l, "aircraft_type", e.target.value)} style={{ ...inputStyle, width: 90 }}><option value="">{tr("all")}</option>{aircraft.map(a => <option key={a.code} value={a.code}>{a.code}</option>)}</select> : (l.aircraft_type || "all")}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !edits[l.id]} onClick={() => saveLine(l)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button> <button onClick={() => delLine(l)} style={{ ...miniBtn, color: C.red }}>{tr("Delete")}</button></>}</td>
         </tr>)}
-        {shown.length === 0 && <tr><td colSpan={7} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 14 }}>No fee lines for this airport yet.</td></tr>}
+        {shown.length === 0 && <tr><td colSpan={7} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 14 }}>{tr("No fee lines for this airport yet.")}</td></tr>}
         </tbody>
       </table></div>
-      {canEdit && airport && <button disabled={busy} onClick={addLine} style={{ ...miniBtn, marginTop: 8 }}>Add a fee line</button>}
+      {canEdit && airport && <button disabled={busy} onClick={addLine} style={{ ...miniBtn, marginTop: 8 }}>{tr("Add a fee line")}</button>}
     </div>
   );
 }
@@ -3954,6 +3956,7 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
 const FUEL_UNITS = ["USD/tonne", "USD/kg", "USD/USG", "USD/litre"];
 // One current fuel price per airport, listed for every airport (origin or destination) that appears in the schedule.
 function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false }) {
+  const { tr, lang } = useLanguage();
   const [rows, setRows] = useState(new Map()); // airport -> saved row
   const [edits, setEdits] = useState({});      // airport -> { price, unit, supplier, valid_from }
   const [names, setNames] = useState(new Map());
@@ -3968,7 +3971,7 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
   const canEdit = !!perms.editFlight;
   async function load() {
     const { data, error } = await supabase.from("airport_fuel_prices").select("airport,price,unit,supplier,valid_from,updated_at");
-    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? "The fuel price table is missing: run migration 00040_airport_fuel_prices.sql in Supabase." : error.message); return; }
+    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? tr("The fuel price table is missing: run migration 00040_airport_fuel_prices.sql in Supabase.") : error.message); return; }
     setErr(""); setRows(new Map((data || []).map(r => [r.airport, r])));
   }
   useEffect(() => {
@@ -3994,13 +3997,13 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
   async function save(codes) {
     const payload = []; const bad = [];
     codes.forEach(c => { const r = toRow(c, { price: val(c, "price"), unit: val(c, "unit"), supplier: val(c, "supplier"), valid_from: val(c, "valid_from") }); if (r) payload.push(r); else bad.push(c); });
-    if (!payload.length) { pushToast(`Enter the price as a number${bad.length ? ` (${bad.slice(0, 5).join(", ")})` : ""}.`, "warn"); return; }
+    if (!payload.length) { pushToast(tr("Enter the price as a number{list}.", { list: bad.length ? ` (${bad.slice(0, 5).join(", ")})` : "" }), "warn"); return; }
     setBusy(true);
     const { data, error } = await supabase.from("airport_fuel_prices").upsert(payload, { onConflict: "airport" }).select("airport");
     setBusy(false);
-    if (error) { pushToast(`Fuel prices not saved: ${error.message}`, "warn", true); return; }
-    if ((data || []).length < payload.length) { pushToast("Some prices were not saved (no permission?). Reload and try again.", "warn", true); }
-    else pushToast(`Saved ${payload.length} fuel price${payload.length === 1 ? "" : "s"}.${bad.length ? ` Skipped ${bad.length} without a valid number.` : ""}`, "ok");
+    if (error) { pushToast(tr("Fuel prices not saved: {m}", { m: error.message }), "warn", true); return; }
+    if ((data || []).length < payload.length) { pushToast(tr("Some prices were not saved (no permission?). Reload and try again."), "warn", true); }
+    else pushToast(tr("Fuel prices saved: {n}.{skipped}", { n: payload.length, skipped: bad.length ? tr(" Skipped without a valid number: {n}.", { n: bad.length }) : "" }), "ok");
     setEdits(e => { const n = { ...e }; payload.forEach(r => delete n[r.airport]); return n; });
     load();
   }
@@ -4011,8 +4014,8 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
     setBusy(true);
     const { error } = await supabase.from("airport_fuel_prices").upsert(missing.map(a => ({ airport: a.code, price: +price, unit: fill.unit })), { onConflict: "airport" });
     setBusy(false);
-    if (error) { pushToast(`Fuel prices not saved: ${error.message}`, "warn", true); return; }
-    pushToast(`Set ${price} ${fill.unit} at ${missing.length} airport(s) that had no price. Adjust the individual airports below.`, "ok", true);
+    if (error) { pushToast(tr("Fuel prices not saved: {m}", { m: error.message }), "warn", true); return; }
+    pushToast(tr("Set {price} {unit} at {n} airport(s) that had no price. Adjust the individual airports below.", { price, unit: fill.unit, n: missing.length }), "ok", true);
     setFill(f => ({ ...f, price: "" })); load();
   }
   const dirtyCodes = airports.filter(a => dirty(a.code)).map(a => a.code);
@@ -4020,12 +4023,12 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
     setBusy(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
-      const res = await fetch("/api/reports/fuel", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}` } });
+      const res = await fetch("/api/reports/fuel", { method: "POST", headers: { Authorization: `Bearer ${session?.access_token}`, "Content-Type": "application/json" }, body: JSON.stringify({ lang }) });
       if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `PDF failed (${res.status})`); }
       const url = URL.createObjectURL(await res.blob());
       const a = document.createElement("a"); a.href = url; a.download = `fuel-prices-${new Date().toISOString().slice(0, 10)}.pdf`; document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
-    } catch (e) { pushToast(`Fuel price PDF failed: ${e.message}`, "warn", true); }
+    } catch (e) { pushToast(tr("Fuel price PDF failed: {m}", { m: e.message }), "warn", true); }
     finally { setBusy(false); }
   }
   const cell = { padding: "4px 6px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
@@ -4033,47 +4036,47 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
     <div style={shellStyles(embedded, 920, "90vh").outer} onClick={embedded ? undefined : onClose}>
       <div onClick={e => e.stopPropagation()} style={shellStyles(embedded, 920, "90vh").inner}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>Fuel prices by airport</div>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{tr("Fuel prices by airport")}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>Bulk load from file</button>}
-            <button disabled={busy || airports.length === 0} onClick={downloadPdf} style={{ ...miniBtn, color: C.amber, borderColor: C.amber }}>Download PDF report</button>
-            {!embedded && <button onClick={onClose} style={miniBtn}>Close</button>}
+            {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>{tr("Bulk load from file")}</button>}
+            <button disabled={busy || airports.length === 0} onClick={downloadPdf} style={{ ...miniBtn, color: C.amber, borderColor: C.amber }}>{tr("Download PDF report")}</button>
+            {!embedded && <button onClick={onClose} style={miniBtn}>{tr("Close")}</button>}
           </div>
         </div>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>One current price for every airport in the schedule (departure or arrival). {priced} of {airports.length} airports have a price. {canEdit ? "Type a price and press Save. The unit is kept per airport." : "Only schedule coordinators and management can change prices."}</div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>{[["current", "Current prices"], ["history", "Monthly history"]].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...miniBtn, background: tab === k ? C.amberSoft : C.panel, borderColor: tab === k ? C.amber : C.border, fontWeight: tab === k ? 600 : 400 }}>{l}</button>)}</div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>{tr("One current price for every airport in the schedule (departure or arrival). {p} of {n} airports have a price.", { p: priced, n: airports.length })} {canEdit ? tr("Type a price and press Save. The unit is kept per airport.") : tr("Only schedule coordinators and management can change prices.")}</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>{[["current", tr("Current prices")], ["history", tr("Monthly history")]].map(([k, l]) => <button key={k} onClick={() => setTab(k)} style={{ ...miniBtn, background: tab === k ? C.amberSoft : C.panel, borderColor: tab === k ? C.amber : C.border, fontWeight: tab === k ? 600 : 400 }}>{l}</button>)}</div>
         {tab === "history" && <FuelHistoryPanel canEdit={canEdit} codes={airports.map(a => a.code)} names={names} current={rows} pushToast={pushToast} reloadKey={reloadKey} onBulk={() => setBulk(true)} onChangedCurrent={load} />}
         {tab === "current" && <>
         {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-          {[["all", `All (${airports.length})`], ["missing", `No price (${airports.length - priced})`], ["priced", `Priced (${priced})`]].map(([k, l]) => <button key={k} onClick={() => setFilter(k)} style={{ ...miniBtn, background: filter === k ? C.amberSoft : C.panel, borderColor: filter === k ? C.amber : C.border, fontWeight: filter === k ? 600 : 400 }}>{l}</button>)}
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search code or name" style={{ ...inputStyle, width: 170 }} />
-          {canEdit && dirtyCodes.length > 0 && <button disabled={busy} onClick={() => save(dirtyCodes)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save {dirtyCodes.length} change{dirtyCodes.length === 1 ? "" : "s"}</button>}
+          {[["all", tr("All ({n})", { n: airports.length })], ["missing", tr("No price ({n})", { n: airports.length - priced })], ["priced", tr("Priced ({n})", { n: priced })]].map(([k, l]) => <button key={k} onClick={() => setFilter(k)} style={{ ...miniBtn, background: filter === k ? C.amberSoft : C.panel, borderColor: filter === k ? C.amber : C.border, fontWeight: filter === k ? 600 : 400 }}>{l}</button>)}
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder={tr("Search code or name")} style={{ ...inputStyle, width: 170 }} />
+          {canEdit && dirtyCodes.length > 0 && <button disabled={busy} onClick={() => save(dirtyCodes)} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save {n} change(s)", { n: dirtyCodes.length })}</button>}
         </div>
         {canEdit && airports.length > priced && (
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10, fontSize: 12, color: C.muted }}>
-            <span>Start quickly: give the {airports.length - priced} airports without a price the same price</span>
-            <input value={fill.price} onChange={e => setFill(f => ({ ...f, price: e.target.value }))} placeholder="price" style={{ ...inputStyle, width: 80 }} />
+            <span>{tr("Start quickly: give the {n} airports without a price the same price", { n: airports.length - priced })}</span>
+            <input value={fill.price} onChange={e => setFill(f => ({ ...f, price: e.target.value }))} placeholder={tr("price")} style={{ ...inputStyle, width: 80 }} />
             <select value={fill.unit} onChange={e => setFill(f => ({ ...f, unit: e.target.value }))} style={{ ...inputStyle, width: 110 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select>
-            <button disabled={busy || fill.price === ""} onClick={fillMissing} style={miniBtn}>Apply to airports without a price</button>
+            <button disabled={busy || fill.price === ""} onClick={fillMissing} style={miniBtn}>{tr("Apply to airports without a price")}</button>
           </div>
         )}
         <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={cell}>Airport</th><th style={cell}>Flights</th><th style={cell}>Price</th><th style={cell}>Unit</th><th style={cell}>Supplier</th><th style={cell}>Valid from</th><th style={cell}></th></tr></thead>
+          <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={cell}>{tr("Airport")}</th><th style={cell}>{tr("Flights")}</th><th style={cell}>{tr("Price")}</th><th style={cell}>{tr("Unit")}</th><th style={cell}>{tr("Supplier")}</th><th style={cell}>{tr("Valid from")}</th><th style={cell}></th></tr></thead>
           <tbody>
             {shown.map(a => {
               const has = rows.has(a.code);
               return <tr key={a.code} style={{ background: dirty(a.code) ? C.amberSoft : "transparent" }}>
                 <td style={cell}><b style={{ fontFamily: MONO }}>{a.code}</b><div style={{ fontSize: 10.5, color: C.faint }}>{names.get(a.code) || ""}</div></td>
                 <td style={{ ...cell, color: C.muted }}>{a.n}</td>
-                <td style={cell}>{canEdit ? <input value={val(a.code, "price")} onChange={e => setEdit(a.code, "price", e.target.value)} placeholder={has ? "" : "no price"} inputMode="decimal" style={{ ...inputStyle, width: 80, borderColor: has ? undefined : C.amber }} /> : (has ? rows.get(a.code).price : <span style={{ color: C.faint }}>—</span>)}</td>
+                <td style={cell}>{canEdit ? <input value={val(a.code, "price")} onChange={e => setEdit(a.code, "price", e.target.value)} placeholder={has ? "" : tr("no price")} inputMode="decimal" style={{ ...inputStyle, width: 80, borderColor: has ? undefined : C.amber }} /> : (has ? rows.get(a.code).price : <span style={{ color: C.faint }}>—</span>)}</td>
                 <td style={cell}>{canEdit ? <select value={val(a.code, "unit")} onChange={e => setEdit(a.code, "unit", e.target.value)} style={{ ...inputStyle, width: 105 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select> : (has ? rows.get(a.code).unit : "")}</td>
                 <td style={cell}>{canEdit ? <input value={val(a.code, "supplier")} onChange={e => setEdit(a.code, "supplier", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.supplier}</td>
                 <td style={cell}>{canEdit ? <input type="date" value={val(a.code, "valid_from") || ""} onChange={e => setEdit(a.code, "valid_from", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.valid_from}</td>
-                <td style={{ ...cell, whiteSpace: "nowrap" }}>{canEdit && <button disabled={busy || !dirty(a.code)} onClick={() => save([a.code])} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Save</button>}</td>
+                <td style={{ ...cell, whiteSpace: "nowrap" }}>{canEdit && <button disabled={busy || !dirty(a.code)} onClick={() => save([a.code])} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button>}</td>
               </tr>;
             })}
-            {shown.length === 0 && <tr><td colSpan={7} style={{ ...cell, color: C.faint, textAlign: "center", padding: 16 }}>{airports.length ? "No airports match." : "No flights in the schedule yet."}</td></tr>}
+            {shown.length === 0 && <tr><td colSpan={7} style={{ ...cell, color: C.faint, textAlign: "center", padding: 16 }}>{airports.length ? tr("No airports match.") : tr("No flights in the schedule yet.")}</td></tr>}
           </tbody>
         </table></div>
         </>}
@@ -4091,7 +4094,11 @@ function saveCsvFile(name, text) {
 }
 const curMonthKey = () => new Date().toISOString().slice(0, 7);
 
+// text with **bold** parts
+function Rich({ s }) { return <>{String(s).split("**").map((x, i) => (i % 2 ? <b key={i}>{x}</b> : x))}</>; }
+
 function BulkLoadDialog({ title, help, parse, parseKey, columns, template, extra, canApply = true, applyHint, onApply, onClose }) {
+  const { tr } = useLanguage();
   const [grid, setGrid] = useState(null);
   const [fileName, setFileName] = useState("");
   const [paste, setPaste] = useState("");
@@ -4104,19 +4111,19 @@ function BulkLoadDialog({ title, help, parse, parseKey, columns, template, extra
       const wb = XLSX.read(await f.arrayBuffer(), { type: "array", cellDates: true });
       const ws = wb.Sheets[wb.SheetNames[0]];
       setGrid(XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null })); setFileName(`${f.name}${wb.SheetNames.length > 1 ? ` (first sheet: ${wb.SheetNames[0]})` : ""}`);
-    } catch (e) { setGrid(null); setMsg(`The file could not be read: ${e.message}`); }
+    } catch (e) { setGrid(null); setMsg(tr("The file could not be read: {m}", { m: e.message })); }
   }
   function readPaste() {
     if (!paste.trim()) return;
     const wb = XLSX.read(paste, { type: "string", cellDates: true, FS: /\t/.test(paste) ? "\t" : undefined });
-    setGrid(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null })); setFileName("pasted cells");
+    setGrid(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: null })); setFileName(tr("pasted cells"));
   }
   async function run() {
     if (!parsed?.rows.length) return;
     setBusy(true); setMsg("");
     const res = await onApply(parsed.rows);
     setBusy(false);
-    if (res?.ok) onClose(); else setMsg(res?.msg || "Nothing was loaded.");
+    if (res?.ok) onClose(); else setMsg(res?.msg || tr("Nothing was loaded."));
   }
   const tdc = { padding: "3px 6px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12 };
   return (
@@ -4124,31 +4131,31 @@ function BulkLoadDialog({ title, help, parse, parseKey, columns, template, extra
       <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(860px, 100%)", maxHeight: "90vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <div style={{ fontSize: 15, fontWeight: 700 }}>{title}</div>
-          <button onClick={onClose} style={miniBtn}>Close</button>
+          <button onClick={onClose} style={miniBtn}>{tr("Close")}</button>
         </div>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 10, lineHeight: 1.5 }}>{help}</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
           <input type="file" accept=".xlsx,.xls,.csv,.txt" onChange={e => { const f = e.target.files?.[0]; if (f) readFile(f); }} style={{ fontSize: 12.5 }} />
-          {template && <button onClick={() => saveCsvFile(template.name, template.text)} style={miniBtn}>Download a template (CSV)</button>}
+          {template && <button onClick={() => saveCsvFile(template.name, template.text)} style={miniBtn}>{tr("Download a template (CSV)")}</button>}
         </div>
-        <details style={{ marginBottom: 10 }}><summary style={{ fontSize: 12, color: C.muted, cursor: "pointer" }}>or paste cells copied from Excel</summary>
-          <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={5} placeholder="Include the header row" style={{ ...inputStyle, width: "100%", fontFamily: MONO, fontSize: 11.5, marginTop: 6 }} />
-          <button onClick={readPaste} disabled={!paste.trim()} style={{ ...miniBtn, marginTop: 4 }}>Read pasted cells</button>
+        <details style={{ marginBottom: 10 }}><summary style={{ fontSize: 12, color: C.muted, cursor: "pointer" }}>{tr("or paste cells copied from Excel")}</summary>
+          <textarea value={paste} onChange={e => setPaste(e.target.value)} rows={5} placeholder={tr("Include the header row")} style={{ ...inputStyle, width: "100%", fontFamily: MONO, fontSize: 11.5, marginTop: 6 }} />
+          <button onClick={readPaste} disabled={!paste.trim()} style={{ ...miniBtn, marginTop: 4 }}>{tr("Read pasted cells")}</button>
         </details>
         {extra}
         {msg && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{msg}</div>}
         {parsed && <>
-          <div style={{ fontSize: 12.5, marginBottom: 6 }}><b>{fileName}</b>: <span style={{ color: C.green }}>{parsed.rows.length} row{parsed.rows.length === 1 ? "" : "s"} ready</span>{parsed.errors.length > 0 && <span style={{ color: C.red }}>, {parsed.errors.length} problem{parsed.errors.length === 1 ? "" : "s"} (those lines are skipped)</span>}</div>
-          {parsed.errors.length > 0 && <div style={{ maxHeight: 110, overflow: "auto", fontSize: 11.5, color: C.red, background: C.panel2, borderRadius: 8, padding: "6px 10px", marginBottom: 8 }}>{parsed.errors.slice(0, 40).map((e, i) => <div key={i}>{e.line ? `Line ${e.line}: ` : ""}{e.reason}</div>)}{parsed.errors.length > 40 && <div>... and {parsed.errors.length - 40} more</div>}</div>}
+          <div style={{ fontSize: 12.5, marginBottom: 6 }}><b>{fileName}</b>: <span style={{ color: C.green }}>{tr("rows ready: {n}", { n: parsed.rows.length })}</span>{parsed.errors.length > 0 && <span style={{ color: C.red }}>{tr(", problems: {n} (those lines are skipped)", { n: parsed.errors.length })}</span>}</div>
+          {parsed.errors.length > 0 && <div style={{ maxHeight: 110, overflow: "auto", fontSize: 11.5, color: C.red, background: C.panel2, borderRadius: 8, padding: "6px 10px", marginBottom: 8 }}>{parsed.errors.slice(0, 40).map((e, i) => <div key={i}>{e.line ? tr("Line {n}: ", { n: e.line }) : ""}{e.reason}</div>)}{parsed.errors.length > 40 && <div>{tr("... and {n} more", { n: parsed.errors.length - 40 })}</div>}</div>}
           {parsed.rows.length > 0 && <div style={{ overflow: "auto", maxHeight: 240, border: `1px solid ${C.borderSoft}`, borderRadius: 8, marginBottom: 10 }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>{columns.map(c => <th key={c.label} style={tdc}>{c.label}</th>)}</tr></thead>
+              <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}>{columns.map(c => <th key={c.label} style={tdc}>{tr(c.label)}</th>)}</tr></thead>
               <tbody>{parsed.rows.slice(0, 60).map((r, i) => <tr key={i}>{columns.map(c => <td key={c.label} style={tdc}>{c.get(r)}</td>)}</tr>)}</tbody>
             </table>
-            {parsed.rows.length > 60 && <div style={{ fontSize: 11, color: C.faint, padding: 6 }}>Showing the first 60 of {parsed.rows.length} rows.</div>}
+            {parsed.rows.length > 60 && <div style={{ fontSize: 11, color: C.faint, padding: 6 }}>{tr("Showing the first 60 of {n} rows.", { n: parsed.rows.length })}</div>}
           </div>}
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <button disabled={busy || !canApply || !parsed.rows.length} onClick={run} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? "Loading..." : `Load ${parsed.rows.length} row${parsed.rows.length === 1 ? "" : "s"}`}</button>
+            <button disabled={busy || !canApply || !parsed.rows.length} onClick={run} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy ? tr("Loading...") : tr("Load {n} row(s)", { n: parsed.rows.length })}</button>
             {!canApply && applyHint && <span style={{ fontSize: 12, color: C.amber }}>{applyHint}</span>}
           </div>
         </>}
@@ -4170,6 +4177,7 @@ async function writeChunks(rows, fn, size = 200) {
 
 // ---- Fuel price history: one price per airport per month ----
 function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, reloadKey, onChangedCurrent }) {
+  const { tr } = useLanguage();
   const [hist, setHist] = useState([]);
   const [end, setEnd] = useState(curMonthKey());
   const [edits, setEdits] = useState({});
@@ -4178,7 +4186,7 @@ function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, r
   const [err, setErr] = useState("");
   async function load() {
     const { data, error } = await fetchAllPages(() => supabase.from("airport_fuel_price_history").select("airport,month,price,unit,supplier").order("airport").order("month"));
-    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? "The history table is missing: run migration 00043_fuel_history_route_times.sql in Supabase." : error.message); return; }
+    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? tr("The history table is missing: run migration 00043_fuel_history_route_times.sql in Supabase.") : error.message); return; }
     setErr(""); setHist(data || []);
   }
   useEffect(() => { load(); }, [reloadKey]);
@@ -4198,72 +4206,75 @@ function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, r
       if (!Number.isFinite(price) || price < 0) { bad.push(`${airport} ${month.slice(0, 7)}`); return; }
       payload.push({ airport, month, price, unit: byKey.get(k)?.unit || current.get(airport)?.unit || "USD/tonne", supplier: byKey.get(k)?.supplier || null });
     });
-    if (!payload.length) { pushToast(bad.length ? `Enter prices as numbers (${bad.slice(0, 4).join(", ")}).` : "Nothing to save.", "warn"); return; }
+    if (!payload.length) { pushToast(bad.length ? tr("Enter prices as numbers ({list}).", { list: bad.slice(0, 4).join(", ") }) : tr("Nothing to save."), "warn"); return; }
     setBusy(true);
     const r = await writeChunks(payload, rows => supabase.from("airport_fuel_price_history").upsert(rows, { onConflict: "airport,month" }).select("airport"));
     setBusy(false);
-    if (r.error) { pushToast(`History not saved: ${r.error.message}`, "warn", true); return; }
-    if (r.n < payload.length) pushToast("Some prices were not saved (no permission?).", "warn", true);
-    else pushToast(`Saved ${r.n} monthly price${r.n === 1 ? "" : "s"}.${bad.length ? ` Skipped ${bad.length} that were not numbers.` : ""}`, "ok");
+    if (r.error) { pushToast(tr("History not saved: {m}", { m: r.error.message }), "warn", true); return; }
+    if (r.n < payload.length) pushToast(tr("Some prices were not saved (no permission?)."), "warn", true);
+    else pushToast(tr("Monthly prices saved: {n}.{skipped}", { n: r.n, skipped: bad.length ? tr(" Skipped (not numbers): {n}.", { n: bad.length }) : "" }), "ok");
     setEdits({}); load(); onChangedCurrent();
   }
   function exportCsv() {
-    saveCsvFile(`fuel-price-history-${curMonthKey()}.csv`, toCsvFile(hist, [{ label: "Airport", key: "airport" }, { label: "Month", get: r => String(r.month).slice(0, 7) }, { label: "Price", get: r => +r.price }, { label: "Unit", key: "unit" }, { label: "Supplier", key: "supplier" }]));
+    saveCsvFile(`fuel-price-history-${curMonthKey()}.csv`, toCsvFile(hist, [{ label: tr("Airport"), key: "airport" }, { label: tr("Month"), get: r => String(r.month).slice(0, 7) }, { label: tr("Price"), get: r => +r.price }, { label: tr("Unit"), key: "unit" }, { label: tr("Supplier"), key: "supplier" }]));
   }
   const cell = { padding: "3px 4px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12, verticalAlign: "middle" };
   return (
     <div>
       {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-        <span style={{ fontSize: 12, color: C.muted }}>12 months up to</span>
+        <span style={{ fontSize: 12, color: C.muted }}>{tr("12 months up to")}</span>
         <input type="month" value={end} onChange={e => e.target.value && setEnd(e.target.value)} style={{ ...inputStyle, width: 140 }} />
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search code or name" style={{ ...inputStyle, width: 160 }} />
-        {canEdit && <button onClick={onBulk} style={miniBtn}>Bulk load from file</button>}
-        <button onClick={exportCsv} disabled={!hist.length} style={miniBtn}>Export history (CSV)</button>
-        {canEdit && dirtyKeys.length > 0 && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>Save {dirtyKeys.length} change{dirtyKeys.length === 1 ? "" : "s"}</button>}
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder={tr("Search code or name")} style={{ ...inputStyle, width: 160 }} />
+        {canEdit && <button onClick={onBulk} style={miniBtn}>{tr("Bulk load from file")}</button>}
+        <button onClick={exportCsv} disabled={!hist.length} style={miniBtn}>{tr("Export history (CSV)")}</button>
+        {canEdit && dirtyKeys.length > 0 && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save {n} change(s)", { n: dirtyKeys.length })}</button>}
       </div>
-      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>Prices are in each airport's unit (shown after the code). The newest month becomes the current price; the calculator uses the price of the month you pick, or the latest earlier month if that month has none.</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{tr("Prices are in each airport's unit (shown after the code). The newest month becomes the current price; the calculator uses the price of the month you pick, or the latest earlier month if that month has none.")}</div>
       <div style={{ overflow: "auto", maxHeight: "52vh" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, position: "sticky", top: 0, background: C.panel }}><th style={cell}>Airport</th>{months.map(m => <th key={m} style={cell}>{m.slice(0, 7)}</th>)}</tr></thead>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, position: "sticky", top: 0, background: C.panel }}><th style={cell}>{tr("Airport")}</th>{months.map(m => <th key={m} style={cell}>{m.slice(0, 7)}</th>)}</tr></thead>
         <tbody>{list.map(c => <tr key={c}>
           <td style={{ ...cell, whiteSpace: "nowrap" }}><b style={{ fontFamily: MONO }}>{c}</b> <span style={{ fontSize: 10, color: C.faint }}>{current.get(c)?.unit?.replace("USD/", "") || ""}</span></td>
           {months.map(m => { const k = `${c}|${m}`; const dirty = dirtyKeys.includes(k);
             return <td key={m} style={{ ...cell, background: dirty ? C.amberSoft : "transparent" }}>{canEdit ? <input inputMode="decimal" value={cellVal(c, m)} onChange={e => setEdits(x => ({ ...x, [k]: e.target.value }))} title={byKey.get(k)?.unit} style={{ ...inputStyle, width: 64, padding: "3px 5px", fontSize: 12 }} /> : (cellVal(c, m) || <span style={{ color: C.faint }}>-</span>)}</td>; })}
         </tr>)}
-        {list.length === 0 && <tr><td colSpan={13} style={{ ...cell, color: C.faint, textAlign: "center", padding: 16 }}>No airports.</td></tr>}</tbody>
+        {list.length === 0 && <tr><td colSpan={13} style={{ ...cell, color: C.faint, textAlign: "center", padding: 16 }}>{tr("No airports.")}</td></tr>}</tbody>
       </table></div>
     </div>
   );
 }
 
 function FuelBulkDialog({ names, current, pushToast, onDone, onClose }) {
+  const { tr, lang } = useLanguage();
   const [month, setMonth] = useState(curMonthKey());
   const known = useMemo(() => (names.size ? new Set([...names.keys(), ...current.keys()]) : undefined), [names, current]);
   async function apply(rows) {
     const r = await writeChunks(rows.map(x => ({ airport: x.airport, month: x.month, price: x.price, unit: x.unit, supplier: x.supplier, note: x.note })), c => supabase.from("airport_fuel_price_history").upsert(c, { onConflict: "airport,month" }).select("airport"));
-    if (r.error) return { ok: false, msg: `Not loaded: ${r.error.message}${r.n ? ` (${r.n} rows were loaded before the error)` : ""}` };
-    if (r.n < rows.length) return { ok: false, msg: `Only ${r.n} of ${rows.length} rows were saved (no permission?).` };
-    pushToast(`Loaded ${r.n} fuel price${r.n === 1 ? "" : "s"} into the history.`, "ok", true); onDone(); return { ok: true };
+    if (r.error) return { ok: false, msg: tr("Not loaded: {m}", { m: r.error.message }) + (r.n ? tr(" ({n} rows were loaded before the error)", { n: r.n }) : "") };
+    if (r.n < rows.length) return { ok: false, msg: tr("Only {n} of {total} rows were saved (no permission?).", { n: r.n, total: rows.length }) };
+    pushToast(tr("Loaded {n} fuel price(s) into the history.", { n: r.n }), "ok", true); onDone(); return { ok: true };
   }
-  return <BulkLoadDialog title="Bulk load fuel prices" parseKey={month}
-    help={<>Columns: <b>Airport</b>, <b>Price</b>, optional <b>Unit</b> (USD/tonne, USD/kg, USD/USG, USD/litre; default USD/tonne), <b>Month</b> (2026-11), <b>Supplier</b>. Or one column per month (2026-09, 2026-10, ...) with a row per airport. Existing prices for the same airport and month are replaced.</>}
-    parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known })}
+  return <BulkLoadDialog title={tr("Bulk load fuel prices")} parseKey={month + lang}
+    help={<Rich s={tr("Columns: **Airport**, **Price**, optional **Unit** (USD/tonne, USD/kg, USD/USG, USD/litre; default USD/tonne), **Month** (2026-11), **Supplier**. Or one column per month (2026-09, 2026-10, ...) with a row per airport. Existing prices for the same airport and month are replaced.")} />}
+    parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known, lang })}
     columns={[{ label: "Airport", get: r => r.airport }, { label: "Month", get: r => r.month.slice(0, 7) }, { label: "Price", get: r => r.price }, { label: "Unit", get: r => r.unit }, { label: "Supplier", get: r => r.supplier || "" }]}
-    template={{ name: "fuel-prices-template.csv", text: toCsvFile([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: "Airport", key: "a" }, { label: "Month", key: "m" }, { label: "Price", key: "p" }, { label: "Unit", key: "u" }, { label: "Supplier", key: "s" }]) }}
-    extra={<div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>Month for rows without a month: <input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>}
+    template={{ name: "fuel-prices-template.csv", text: toCsvFile([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: tr("Airport"), key: "a" }, { label: tr("Month"), key: "m" }, { label: tr("Price"), key: "p" }, { label: tr("Unit"), key: "u" }, { label: tr("Supplier"), key: "s" }]) }}
+    extra={<div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Month for rows without a month: ")}<input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>}
     onApply={apply} onClose={onClose} />;
 }
 
 // ---- Airport fees: bulk load and export ----
 function feeKey(r) { return [r.airport, r.fee_set, String(r.name).trim().toLowerCase(), r.aircraft_type || ""].join("|"); }
+const feeCols = tr => FEE_COLS.map(c => ({ label: tr(c.label), ...(c.label === "Charged per" ? { get: r => tr(BASIS_LABEL[r.basis] || r.basis) } : c.get ? { get: c.get } : { key: c.key }) }));
 const FEE_COLS = [{ label: "Airport", key: "airport" }, { label: "Fee set", key: "fee_set" }, { label: "Name", key: "name" }, { label: "Charged per", get: r => BASIS_LABEL[r.basis] || r.basis }, { label: "Price USD", get: r => +r.price_usd }, { label: "Quantity", key: "quantity" }, { label: "Period minutes", key: "period_minutes" }, { label: "Aircraft type", key: "aircraft_type" }];
-async function exportAllFees(pushToast) {
+async function exportAllFees(pushToast, tr) {
   const { data, error } = await fetchAllPages(() => supabase.from("airport_fee_lines").select("*").order("airport").order("fee_set").order("sort").order("id"));
-  if (error) { pushToast(`Export failed: ${error.message}`, "warn"); return; }
-  saveCsvFile(`airport-fees-${new Date().toISOString().slice(0, 10)}.csv`, toCsvFile(data, FEE_COLS));
+  if (error) { pushToast(tr("Export failed: {m}", { m: error.message }), "warn"); return; }
+  saveCsvFile(`airport-fees-${new Date().toISOString().slice(0, 10)}.csv`, toCsvFile(data, feeCols(tr)));
 }
 
 function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
+  const { tr, lang } = useLanguage();
   const [mode, setMode] = useState("update");
   const [sure, setSure] = useState(false);
   const [codesInFile, setCodesInFile] = useState(0);
@@ -4273,20 +4284,20 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
     const existing = [];
     for (let i = 0; i < codes.length; i += 20) {
       const { data, error } = await fetchAllPages(() => supabase.from("airport_fee_lines").select("*").in("airport", codes.slice(i, i + 20)).order("id"));
-      if (error) return { ok: false, msg: `Could not read the current fees: ${error.message}` };
+      if (error) return { ok: false, msg: tr("Could not read the current fees: {m}", { m: error.message }) };
       existing.push(...data);
     }
     if (mode === "replace") {
-      if (!sure) return { ok: false, msg: "Tick the box to confirm that the current lines of these airports are deleted first." };
+      if (!sure) return { ok: false, msg: tr("Tick the box to confirm that the current lines of these airports are deleted first.") };
       for (let i = 0; i < codes.length; i += 20) {
         const { error } = await supabase.from("airport_fee_lines").delete().in("airport", codes.slice(i, i + 20));
-        if (error) return { ok: false, msg: `Could not clear the old lines: ${error.message}. Nothing was added.` };
+        if (error) return { ok: false, msg: tr("Could not clear the old lines: {m}. Nothing was added.", { m: error.message }) };
       }
       const sortOf = new Map();
       const ins = rows.map(r => { const k = `${r.airport}|${r.fee_set}`; const s = sortOf.get(k) || 0; sortOf.set(k, s + 1); return { ...r, sort: s, source: "import" }; });
       const w = await writeChunks(ins, c => supabase.from("airport_fee_lines").insert(c).select("id"));
-      if (w.error || w.n < ins.length) return { ok: false, msg: `Old lines were deleted but only ${w.n} of ${ins.length} new lines were added${w.error ? `: ${w.error.message}` : ""}. Load the file again.` };
-      pushToast(`Replaced the fees of ${codes.length} airport(s): ${w.n} lines loaded (${existing.length} old lines removed).`, "ok", true); onDone(codes); return { ok: true };
+      if (w.error || w.n < ins.length) return { ok: false, msg: tr("Old lines were deleted but only {n} of {total} new lines were added{m}. Load the file again.", { n: w.n, total: ins.length, m: w.error ? `: ${w.error.message}` : "" }) };
+      pushToast(tr("Replaced the fees of {a} airport(s): {n} lines loaded ({o} old lines removed).", { a: codes.length, n: w.n, o: existing.length }), "ok", true); onDone(codes); return { ok: true };
     }
     const byKey = new Map(existing.map(e => [feeKey(e), e]));
     const maxSort = new Map();
@@ -4306,29 +4317,30 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
     for (let i = 0; i < toUpd.length; i += 8) {
       const res = await Promise.all(toUpd.slice(i, i + 8).map(u => supabase.from("airport_fee_lines").update(u.patch).eq("id", u.id).select("id")));
       const bad = res.find(x => x.error || !x.data?.length);
-      if (bad) return { ok: false, msg: `Stopped after ${updated} updates: ${bad.error?.message || "no row changed (permission?)"}.` };
+      if (bad) return { ok: false, msg: tr("Stopped after {n} updates: {m}.", { n: updated, m: bad.error?.message || tr("no row changed (permission?)") }) };
       updated += res.length;
     }
     const w = await writeChunks(toIns, c => supabase.from("airport_fee_lines").insert(c).select("id"));
-    if (w.error || w.n < toIns.length) return { ok: false, msg: `${updated} lines updated, but only ${w.n} of ${toIns.length} new lines were added${w.error ? `: ${w.error.message}` : ""}.` };
-    pushToast(`Fees loaded: ${updated} updated, ${w.n} added, ${same} unchanged.`, "ok", true); onDone(codes); return { ok: true };
+    if (w.error || w.n < toIns.length) return { ok: false, msg: tr("{u} lines updated, but only {n} of {total} new lines were added{m}.", { u: updated, n: w.n, total: toIns.length, m: w.error ? `: ${w.error.message}` : "" }) };
+    pushToast(tr("Fees loaded: {u} updated, {n} added, {s} unchanged.", { u: updated, n: w.n, s: same }), "ok", true); onDone(codes); return { ok: true };
   }
-  return <BulkLoadDialog title="Bulk load airport fees" parseKey={mode + aircraft.length}
-    help={<>One row per fee. Columns: <b>Airport</b>, <b>Name</b>, <b>Price USD</b>; optional <b>Fee set</b> (STD, INT or DOM; МВЛ and ВВЛ also work), <b>Charged per</b> (per turnaround, per period, per passenger, per crew member, per tonne MTOW, per tonne of fuel, per litre), <b>Quantity</b>, <b>Period minutes</b> (needed for per-period fees), <b>Aircraft type</b> (leave empty for all). Prices are in USD. Use Export in the Airport fees tab to get the current list, edit it and load it back.</>}
-    parse={g => parseFeesGrid(g, { aircraftCodes: aircraft.map(a => a.code) })}
-    columns={FEE_COLS.map(c => ({ label: c.label, get: r => (typeof c.get === "function" ? c.get(r) : r[c.key]) ?? "" }))}
-    template={{ name: "airport-fees-template.csv", text: toCsvFile([{ airport: "ALA", fee_set: "INT", name: "Landing", basis: "mtow_t", price_usd: 1.5, quantity: "", period_minutes: "", aircraft_type: "" }, { airport: "ALA", fee_set: "INT", name: "Parking", basis: "time", price_usd: 40, quantity: 1, period_minutes: 60, aircraft_type: "" }], FEE_COLS) }}
+  return <BulkLoadDialog title={tr("Bulk load airport fees")} parseKey={mode + aircraft.length + lang}
+    help={<Rich s={tr("One row per fee. Columns: **Airport**, **Name**, **Price USD**; optional **Fee set** (STD, INT or DOM; МВЛ and ВВЛ also work), **Charged per** (per turnaround, per period, per passenger, per crew member, per tonne MTOW, per tonne of fuel, per litre), **Quantity**, **Period minutes** (needed for per-period fees), **Aircraft type** (leave empty for all). Prices are in USD. Use Export in the Airport fees tab to get the current list, edit it and load it back.")} />}
+    parse={g => parseFeesGrid(g, { aircraftCodes: aircraft.map(a => a.code), lang })}
+    columns={FEE_COLS.map(c => ({ label: c.label, get: r => { const v = (typeof c.get === "function" ? c.get(r) : r[c.key]) ?? ""; return c.label === "Charged per" ? tr(v) : v; } }))}
+    template={{ name: "airport-fees-template.csv", text: toCsvFile([{ airport: "ALA", fee_set: "INT", name: "Landing", basis: "mtow_t", price_usd: 1.5, quantity: "", period_minutes: "", aircraft_type: "" }, { airport: "ALA", fee_set: "INT", name: "Parking", basis: "time", price_usd: 40, quantity: 1, period_minutes: 60, aircraft_type: "" }], feeCols(tr)) }}
     extra={<div style={{ fontSize: 12, marginBottom: 10 }}>
-      <label style={{ display: "block", marginBottom: 4 }}><input type="radio" checked={mode === "update"} onChange={() => setMode("update")} /> Update matching lines and add new ones (a line matches on airport, fee set, name and aircraft type; other lines stay)</label>
-      <label style={{ display: "block" }}><input type="radio" checked={mode === "replace"} onChange={() => setMode("replace")} /> Replace: delete all current lines of the airports in the file, then load the file</label>
-      {mode === "replace" && <label style={{ display: "block", marginTop: 4, color: C.amber }}><input type="checkbox" checked={sure} onChange={e => setSure(e.target.checked)} /> I understand that the current fee lines of every airport in the file are deleted first</label>}
+      <label style={{ display: "block", marginBottom: 4 }}><input type="radio" checked={mode === "update"} onChange={() => setMode("update")} />{tr(" Update matching lines and add new ones (a line matches on airport, fee set, name and aircraft type; other lines stay)")}</label>
+      <label style={{ display: "block" }}><input type="radio" checked={mode === "replace"} onChange={() => setMode("replace")} />{tr(" Replace: delete all current lines of the airports in the file, then load the file")}</label>
+      {mode === "replace" && <label style={{ display: "block", marginTop: 4, color: C.amber }}><input type="checkbox" checked={sure} onChange={e => setSure(e.target.checked)} />{tr(" I understand that the current fee lines of every airport in the file are deleted first")}</label>}
     </div>}
-    canApply={mode === "update" || sure} applyHint="Tick the confirmation to replace."
+    canApply={mode === "update" || sure} applyHint={tr("Tick the confirmation to replace.")}
     onApply={apply} onClose={onClose} />;
 }
 
 // ---- Average flight time per route ----
 function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
+  const { tr, lang } = useLanguage();
   const [rows, setRows] = useState([]);
   const [err, setErr] = useState("");
   const [search, setSearch] = useState("");
@@ -4338,7 +4350,7 @@ function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
   const [busy, setBusy] = useState(false);
   async function load() {
     const { data, error } = await fetchAllPages(() => supabase.from("route_times").select("origin,destination,avg_minutes,km").order("origin").order("destination"));
-    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? "The route times table is missing: run migration 00043_fuel_history_route_times.sql in Supabase." : error.message); return; }
+    if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? tr("The route times table is missing: run migration 00043_fuel_history_route_times.sql in Supabase.") : error.message); return; }
     setErr(""); setRows(data || []); setEdits({});
   }
   useEffect(() => { load(); }, []);
@@ -4350,26 +4362,26 @@ function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
     const p = edits[key(r)]; if (!p) return;
     const mins = p.avg_minutes !== undefined ? toMinutes(p.avg_minutes, "min") : r.avg_minutes;
     const km = p.km !== undefined ? (String(p.km).trim() === "" ? null : toNumber(p.km)) : r.km;
-    if (!(mins > 0) || (p.km !== undefined && String(p.km).trim() !== "" && km == null)) { pushToast("Enter the time in minutes (or 2:35) and the distance as a number.", "warn"); return; }
+    if (!(mins > 0) || (p.km !== undefined && String(p.km).trim() !== "" && km == null)) { pushToast(tr("Enter the time in minutes (or 2:35) and the distance as a number."), "warn"); return; }
     setBusy(true);
     const { data, error } = await supabase.from("route_times").update({ avg_minutes: mins, km }).eq("origin", r.origin).eq("destination", r.destination).select("origin");
     setBusy(false);
-    if (error || !data?.length) { pushToast(`Not saved: ${error?.message || "no row changed (permission?)"}`, "warn", true); return; }
+    if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
     load(); onChanged();
   }
   async function del(r) {
-    if (!window.confirm(`Delete the saved time for ${r.origin} - ${r.destination}?`)) return;
+    if (!window.confirm(tr("Delete the saved time for {o} - {d}?", { o: r.origin, d: r.destination }))) return;
     const { error } = await supabase.from("route_times").delete().eq("origin", r.origin).eq("destination", r.destination);
-    if (error) { pushToast(`Not deleted: ${error.message}`, "warn"); return; }
+    if (error) { pushToast(tr("Not deleted: {m}", { m: error.message }), "warn"); return; }
     load(); onChanged();
   }
   async function addRow() {
     const origin = cleanCode(add.origin), destination = cleanCode(add.destination), mins = toMinutes(add.min, "min"), km = String(add.km).trim() === "" ? null : toNumber(add.km);
-    if (!/^[A-Z0-9]{3,4}$/.test(origin) || !/^[A-Z0-9]{3,4}$/.test(destination) || origin === destination || !(mins > 0)) { pushToast("Enter two different airport codes and the time in minutes (or 2:35).", "warn"); return; }
+    if (!/^[A-Z0-9]{3,4}$/.test(origin) || !/^[A-Z0-9]{3,4}$/.test(destination) || origin === destination || !(mins > 0)) { pushToast(tr("Enter two different airport codes and the time in minutes (or 2:35)."), "warn"); return; }
     setBusy(true);
     const { data, error } = await supabase.from("route_times").upsert({ origin, destination, avg_minutes: mins, km }, { onConflict: "origin,destination" }).select("origin");
     setBusy(false);
-    if (error || !data?.length) { pushToast(`Not added: ${error?.message || "no row saved (permission?)"}`, "warn", true); return; }
+    if (error || !data?.length) { pushToast(tr("Not added: {m}", { m: error?.message || tr("no row saved (permission?)") }), "warn", true); return; }
     setAdd({ origin: "", destination: "", min: "", km: "" }); load(); onChanged();
   }
   const hm = m => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
@@ -4377,40 +4389,40 @@ function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
   return (
     <div>
       {err && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>Average flight time per route. When a route is typed in the calculator, its distance and time are filled in from here (the reverse direction is used when only one way is saved). Without a saved time the calculator uses distance / cruise speed.{!canEdit && " Only management and the tour operator liaison can change them."}</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{tr("Average flight time per route. When a route is typed in the calculator, its distance and time are filled in from here (the reverse direction is used when only one way is saved). Without a saved time the calculator uses distance / cruise speed.")}{!canEdit && tr(" Only management and the tour operator liaison can change them.")}</div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
-        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search route" style={{ ...inputStyle, width: 150 }} />
-        {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>Bulk load from file</button>}
-        <button disabled={!rows.length} onClick={() => saveCsvFile(`route-times-${curMonthKey()}.csv`, toCsvFile(rows, [{ label: "From", key: "origin" }, { label: "To", key: "destination" }, { label: "Minutes", key: "avg_minutes" }, { label: "Km", key: "km" }]))} style={miniBtn}>Export (CSV)</button>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder={tr("Search route")} style={{ ...inputStyle, width: 150 }} />
+        {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>{tr("Bulk load from file")}</button>}
+        <button disabled={!rows.length} onClick={() => saveCsvFile(`route-times-${curMonthKey()}.csv`, toCsvFile(rows, [{ label: tr("From"), key: "origin" }, { label: tr("To"), key: "destination" }, { label: tr("Minutes"), key: "avg_minutes" }, { label: tr("Km"), key: "km" }]))} style={miniBtn}>{tr("Export (CSV)")}</button>
       </div>
       {canEdit && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-        <input value={add.origin} onChange={e => setAdd({ ...add, origin: e.target.value.toUpperCase() })} placeholder="From" style={{ ...inputStyle, width: 70, fontFamily: MONO }} />
-        <input value={add.destination} onChange={e => setAdd({ ...add, destination: e.target.value.toUpperCase() })} placeholder="To" style={{ ...inputStyle, width: 70, fontFamily: MONO }} />
-        <input value={add.min} onChange={e => setAdd({ ...add, min: e.target.value })} placeholder="minutes or 2:35" style={{ ...inputStyle, width: 120 }} />
-        <input value={add.km} onChange={e => setAdd({ ...add, km: e.target.value })} placeholder="km (optional)" style={{ ...inputStyle, width: 110 }} />
-        <button disabled={busy} onClick={addRow} style={miniBtn}>Add route</button>
+        <input value={add.origin} onChange={e => setAdd({ ...add, origin: e.target.value.toUpperCase() })} placeholder={tr("From")} style={{ ...inputStyle, width: 70, fontFamily: MONO }} />
+        <input value={add.destination} onChange={e => setAdd({ ...add, destination: e.target.value.toUpperCase() })} placeholder={tr("To")} style={{ ...inputStyle, width: 70, fontFamily: MONO }} />
+        <input value={add.min} onChange={e => setAdd({ ...add, min: e.target.value })} placeholder={tr("minutes or 2:35")} style={{ ...inputStyle, width: 120 }} />
+        <input value={add.km} onChange={e => setAdd({ ...add, km: e.target.value })} placeholder={tr("km (optional)")} style={{ ...inputStyle, width: 110 }} />
+        <button disabled={busy} onClick={addRow} style={miniBtn}>{tr("Add route")}</button>
       </div>}
       <div style={{ overflow: "auto", maxHeight: "50vh" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>From</th><th style={tdc}>To</th><th style={tdc}>Avg time, min</th><th style={tdc}>h:mm</th><th style={tdc}>Distance, km</th><th style={tdc}></th></tr></thead>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("From")}</th><th style={tdc}>{tr("To")}</th><th style={tdc}>{tr("Avg time, min")}</th><th style={tdc}>{tr("h:mm")}</th><th style={tdc}>{tr("Distance, km")}</th><th style={tdc}></th></tr></thead>
         <tbody>{shown.map(r => <tr key={key(r)} style={{ background: edits[key(r)] ? C.amberSoft : "transparent" }}>
           <td style={{ ...tdc, fontFamily: MONO }}><b>{r.origin}</b></td><td style={{ ...tdc, fontFamily: MONO }}><b>{r.destination}</b></td>
           <td style={tdc}>{canEdit ? <input inputMode="numeric" value={val(r, "avg_minutes")} onChange={e => setE(r, "avg_minutes", e.target.value)} style={{ ...inputStyle, width: 80 }} /> : r.avg_minutes}</td>
           <td style={{ ...tdc, color: C.muted }}>{hm(+val(r, "avg_minutes") || r.avg_minutes)}</td>
           <td style={tdc}>{canEdit ? <input inputMode="numeric" value={val(r, "km")} onChange={e => setE(r, "km", e.target.value)} style={{ ...inputStyle, width: 90 }} /> : r.km}</td>
-          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !edits[key(r)]} onClick={() => saveRow(r)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>Save</button> <button onClick={() => del(r)} style={{ ...miniBtn, color: C.red }}>Delete</button></>}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !edits[key(r)]} onClick={() => saveRow(r)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button> <button onClick={() => del(r)} style={{ ...miniBtn, color: C.red }}>{tr("Delete")}</button></>}</td>
         </tr>)}
-        {shown.length === 0 && <tr><td colSpan={6} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 14 }}>{rows.length ? "No route matches." : "No average flight times yet. Add one above or bulk load a file."}</td></tr>}</tbody>
+        {shown.length === 0 && <tr><td colSpan={6} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 14 }}>{rows.length ? tr("No route matches.") : tr("No average flight times yet. Add one above or bulk load a file.")}</td></tr>}</tbody>
       </table></div>
-      {bulk && <BulkLoadDialog title="Bulk load average flight times"
-        help={<>One row per route. Columns: <b>From</b>, <b>To</b> and the flight time as <b>Minutes</b>, <b>Hours</b> or <b>Time</b> (2:35); optional <b>Km</b>. A route already saved is replaced. Routes are used in both directions unless the reverse is saved separately.</>}
-        parse={parseTimesGrid}
+      {bulk && <BulkLoadDialog title={tr("Bulk load average flight times")}
+        help={<Rich s={tr("One row per route. Columns: **From**, **To** and the flight time as **Minutes**, **Hours** or **Time** (2:35); optional **Km**. A route already saved is replaced. Routes are used in both directions unless the reverse is saved separately.")} />}
+        parseKey={lang} parse={g => parseTimesGrid(g, { lang })}
         columns={[{ label: "From", get: r => r.origin }, { label: "To", get: r => r.destination }, { label: "Avg minutes", get: r => r.avg_minutes }, { label: "h:mm", get: r => hm(r.avg_minutes) }, { label: "Km", get: r => r.km ?? "" }]}
-        template={{ name: "route-times-template.csv", text: toCsvFile([{ a: "ALA", b: "PQC", m: 455, k: 5800 }, { a: "NQZ", b: "ALA", m: 85, k: 960 }], [{ label: "From", key: "a" }, { label: "To", key: "b" }, { label: "Minutes", key: "m" }, { label: "Km", key: "k" }]) }}
+        template={{ name: "route-times-template.csv", text: toCsvFile([{ a: "ALA", b: "PQC", m: 455, k: 5800 }, { a: "NQZ", b: "ALA", m: 85, k: 960 }], [{ label: tr("From"), key: "a" }, { label: tr("To"), key: "b" }, { label: tr("Minutes"), key: "m" }, { label: tr("Km"), key: "k" }]) }}
         onApply={async rs => {
           const w = await writeChunks(rs.map(r => ({ origin: r.origin, destination: r.destination, avg_minutes: r.avg_minutes, km: r.km })), c => supabase.from("route_times").upsert(c, { onConflict: "origin,destination" }).select("origin"));
-          if (w.error) return { ok: false, msg: `Not loaded: ${w.error.message}` };
-          if (w.n < rs.length) return { ok: false, msg: `Only ${w.n} of ${rs.length} rows were saved (no permission?).` };
-          pushToast(`Loaded ${w.n} route time${w.n === 1 ? "" : "s"}.`, "ok", true); load(); onChanged(); return { ok: true };
+          if (w.error) return { ok: false, msg: tr("Not loaded: {m}", { m: w.error.message }) };
+          if (w.n < rs.length) return { ok: false, msg: tr("Only {n} of {total} rows were saved (no permission?).", { n: w.n, total: rs.length }) };
+          pushToast(tr("Route times loaded: {n}.", { n: w.n }), "ok", true); load(); onChanged(); return { ok: true };
         }}
         onClose={() => setBulk(false)} />}
     </div>
