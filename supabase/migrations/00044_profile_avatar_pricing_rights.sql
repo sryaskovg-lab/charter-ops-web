@@ -1,5 +1,5 @@
 -- 1. Avatars: a picture per person, kept in a public "avatars" bucket (one folder per user id).
--- 2. Pricing: aircraft types get an "active" flag (only active types appear in the calculator) and the four requested types are added.
+-- 2. Pricing: aircraft types get an "active" flag (a type can be switched off later) and four types are added: CRJ-200, 737-300, 737-500, 737-700.
 -- 3. Navigation fee method (bands per MTOW, or a formula scaled by MTOW) is kept in pricing_settings.
 -- 4. Commercial staff manage the whole pricing module (aircraft, fees, navigation, route times, quotes, fuel prices).
 -- Run in the Supabase SQL editor after 00043.
@@ -22,7 +22,7 @@ create policy avatars_delete_own on storage.objects for delete to authenticated
 
 -- aircraft types: only the active ones are offered in the calculator
 alter table public.aircraft_types add column if not exists active boolean not null default true;
-update public.aircraft_types set active = false where code in ('737','max8','max9','757');
+-- all existing types stay active; switch any off later in Aircraft & navigation
 insert into public.aircraft_types (code, name, mtow_t, seats, cruise_kmh, burn_t_per_h, hour_cost_usd, crew, note, active) values
   ('crj2', 'Bombardier CRJ-200', 23.1, 50, 790, 1.4, 2500, 3, 'approximate public values: confirm MTOW, seats, burn and hour cost', true),
   ('b733', 'Boeing 737-300', 62.8, 144, 800, 2.5, 3200, 6, 'approximate public values: confirm MTOW, seats, burn and hour cost', true),
