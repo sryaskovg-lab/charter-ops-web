@@ -11,7 +11,7 @@ const T = {
     direction: "Направление", distance: "Расстояние, км", time: "Налет, ч", fuel: "Расход ГСМ, т", total: "ВСЕГО по маршруту",
     airport: "Расходы в аэропорту", name: "Наименование", qty: "Кол-во", unit: "Ед.", price: "Цена USD", sum: "Сумма USD", subtotal: "Итого", kerosene: "Керосин",
     summary: "Итог", navEnroute: "Аэронавигация на маршруте", navTerminal: "Аэронавигация в районе аэродрома", hourCost: "Себестоимость летного часа", hour: "час",
-    grand: "ВСЕГО стоимость заказного рейса по маршруту:", perSeat: "Стоимость за кресло", perBlock: "Стоимость блок часа", usd: "USD",
+    grand: "ВСЕГО стоимость заказного рейса по маршруту:", extra: "Дополнительный сбор", perSeat: "Стоимость за кресло", perBlock: "Стоимость блок часа", usd: "USD",
     units: { turnaround: "ед.", pax: "пас.", crew: "чел.", mtow_t: "тон.", fuel_t: "т.", litre: "л", time: "пер." },
   },
   en: {
@@ -19,7 +19,7 @@ const T = {
     direction: "Sector", distance: "Distance, km", time: "Flight time, h", fuel: "Fuel, t", total: "Route total",
     airport: "Costs at airport", name: "Item", qty: "Qty", unit: "Unit", price: "Price USD", sum: "Sum USD", subtotal: "Subtotal", kerosene: "Fuel",
     summary: "Summary", navEnroute: "Air navigation, enroute", navTerminal: "Air navigation, aerodrome area", hourCost: "Flight hour cost", hour: "hour",
-    grand: "TOTAL price of the charter flight:", perSeat: "Price per seat", perBlock: "Price per block hour", usd: "USD",
+    grand: "TOTAL price of the charter flight:", extra: "Additional fee", perSeat: "Price per seat", perBlock: "Price per block hour", usd: "USD",
     units: { turnaround: "unit", pax: "pax", crew: "crew", mtow_t: "t MTOW", fuel_t: "t fuel", litre: "l", time: "period" },
   },
 };
@@ -93,6 +93,7 @@ export default function QuoteDocument({ q, input, lang, generated }) {
           <View style={S.row}><Text style={{ ...S.c, flex: 4 }}>{t.navEnroute}</Text><Text style={{ ...S.c, flex: 1.2, textAlign: "right" }}>{f0(q.nav.enroute)}</Text></View>
           <View style={S.row}><Text style={{ ...S.c, flex: 4 }}>{t.navTerminal}</Text><Text style={{ ...S.c, flex: 1.2, textAlign: "right" }}>{f0(q.nav.terminal)}</Text></View>
           <View style={S.row}><Text style={{ ...S.c, flex: 4 }}>{t.hourCost}: {f2(q.flightHours.hours)} {t.hour} x {f0(q.flightHours.rate)}</Text><Text style={{ ...S.c, flex: 1.2, textAlign: "right" }}>{f0(q.flightHours.total)}</Text></View>
+          {(q.extraFees || []).map((x, i) => <View key={i} style={S.row}><Text style={{ ...S.c, flex: 4 }}>{t.extra}{x.comment ? `: ${x.comment}` : ""}{x.note ? ` (${x.note})` : ""}</Text><Text style={{ ...S.c, flex: 1.2, textAlign: "right" }}>{f0(x.total)}</Text></View>)}
           <View style={{ ...S.row, fontWeight: 700, backgroundColor: "#EEF1F6" }}><Text style={{ ...S.c, flex: 4 }}>{t.total}</Text><Text style={{ ...S.c, flex: 1.2, textAlign: "right" }}>{f0(q.total)}</Text></View>
         </View>
         <View style={{ ...S.box, padding: 8 }} wrap={false}>

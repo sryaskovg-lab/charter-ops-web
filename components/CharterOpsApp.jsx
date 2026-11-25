@@ -14,7 +14,8 @@ import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
 import { parseFuelGrid, parseFeesGrid, parseTimesGrid, toCsv as toCsvFile, toMinutes, toNumber, cleanCode, pickFuelPrice } from "../lib/bulk-import";
-import { computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
+import { toUsd, CURRENCIES, normCurrency, roundUsd } from "../lib/fx";
+import { navRatesFor, computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
 import * as XLSX from "xlsx";
@@ -154,11 +155,11 @@ const STATUS_STYLE = {
 // contract_change_request for management to approve or discard -- the system's own sign-off
 // step, mirroring how Draft Mode queues schedule edits for review.
 const ROLES = {
-  pending: { label: "Pending approval", editFlight: false, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, reports: "none" },
-  ops_coordinator: { label: "Schedule coordinator (ops)", editFlight: true, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, reports: "utilization" },
-  commercial: { label: "Commercial staff", editFlight: false, editAllotments: true, editContracts: false, approveContracts: false, manageUsers: false, reports: "pipeline" },
-  tour_operator_liaison: { label: "Tour operator liaison", editFlight: false, editAllotments: true, editContracts: true, approveContracts: false, manageUsers: false, reports: "portfolio" },
-  management: { label: "Charter dept management", editFlight: true, editAllotments: true, editContracts: true, approveContracts: true, manageUsers: true, reports: "all" },
+  pending: { label: "Pending approval", editFlight: false, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, managePricing: false, reports: "none" },
+  ops_coordinator: { label: "Schedule coordinator (ops)", editFlight: true, editAllotments: false, editContracts: false, approveContracts: false, manageUsers: false, managePricing: false, reports: "utilization" },
+  commercial: { label: "Commercial staff", editFlight: false, editAllotments: true, editContracts: false, approveContracts: false, manageUsers: false, managePricing: true, reports: "pipeline" },
+  tour_operator_liaison: { label: "Tour operator liaison", editFlight: false, editAllotments: true, editContracts: true, approveContracts: false, manageUsers: false, managePricing: true, reports: "portfolio" },
+  management: { label: "Charter dept management", editFlight: true, editAllotments: true, editContracts: true, approveContracts: true, manageUsers: true, managePricing: true, reports: "all" },
 };
 
 // ---------- Supabase data layer ----------
@@ -448,7 +449,10 @@ function PendingApproval({ profile, onSignOut }) {
     </div>
   );
 }
-function CharterOpsAppInner({ profile, onSignOut }) {
+function CharterOpsAppInner({ profile: profileProp, onSignOut }) {
+  const [meOver, setMeOver] = useState({});
+  const [showProfile, setShowProfile] = useState(false);
+  const profile = { ...profileProp, ...meOver };
   const { t, tr, lang, setLang } = useLanguage();
   const role = profile.role;
   const [tab, setTab] = useState("schedule");
@@ -1857,13 +1861,13 @@ function CharterOpsAppInner({ profile, onSignOut }) {
   ];
   const TEAM_ITEM = perms.manageUsers ? ["team", t("nav_team"), IconUsers] : null;
   // Pricing folder: everything for quoting a charter (English labels like Slots and Permits)
-  const canPrice = !!(perms.editAllotments || perms.editContracts);
+  const canPrice = !!(perms.editAllotments || perms.editContracts || perms.managePricing);
   const PRICING_ITEMS = [
     ...(canPrice ? [["pricing_calc", tr("Price calculator"), IconCoin], ["pricing_saved", tr("Saved quotes"), IconCalendar]] : []),
     ["pricing_fuel", tr("Fuel prices"), IconGauge],
-    ...(canPrice ? [["pricing_fees", tr("Airport fees"), IconBuilding], ["pricing_times", tr("Route times"), IconPlane]] : []),
+    ...(canPrice ? [["pricing_fees", tr("Airport fees"), IconBuilding], ["pricing_times", tr("Route times"), IconPlane], ["pricing_setup", tr("Aircraft & navigation"), IconGauge]] : []),
   ];
-  const QUOTE_TABS = { pricing_calc: "calc", pricing_saved: "saved", pricing_fees: "fees", pricing_times: "times" };
+  const QUOTE_TABS = { pricing_calc: "calc", pricing_saved: "saved", pricing_fees: "fees", pricing_times: "times", pricing_setup: "setup" };
   useEffect(() => { if (QUOTE_TABS[tab]) { setQuoteVisited(true); setQuotePage(QUOTE_TABS[tab]); } }, [tab]);
   const inPricing = tab.startsWith("pricing_");
 
@@ -1959,7 +1963,10 @@ function CharterOpsAppInner({ profile, onSignOut }) {
           </div>
           {!(sidebarCollapsed && !isMobile) && (
             <div style={{ padding: "0 10px", fontSize: 12, color: SIDEBAR.text, lineHeight: 1.4 }}>
-              {profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{roleLabel(role, t)}</span>
+              <button onClick={() => setShowProfile(true)} title={tr("My profile")} style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, cursor: "pointer", color: "inherit", font: "inherit", textAlign: "left", lineHeight: 1.4 }}>
+                <Avatar name={profile.name} url={profile.avatar_url} size={28} />
+                <span>{profile.name}<br /><span style={{ color: SIDEBAR.muted, fontSize: 11 }}>{roleLabel(role, t)}</span></span>
+              </button>
             </div>
           )}
           {!(sidebarCollapsed && !isMobile) && (
@@ -2025,7 +2032,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ width: 30, height: 30, borderRadius: 999, background: C.amberSoft, color: C.amber, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{(profile.name || "U")[0].toUpperCase()}</div>
+            <button onClick={() => setShowProfile(true)} title={tr("My profile")} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex" }}><Avatar name={profile.name} url={profile.avatar_url} size={30} /></button>
             {!isMobile && (
               <div style={{ lineHeight: 1.3 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>{profile.name}</div>
@@ -2070,6 +2077,7 @@ function CharterOpsAppInner({ profile, onSignOut }) {
       {tab === "operators" && <OperatorsPanel operators={operators} setOperators={setOperators} flights={flights} allotments={allotments} perms={perms} contractChangeRequests={contractChangeRequests}
         onAddOperator={addOperator} onBulkImportOperators={commitBulkOperators} onBulkImportAllotments={bulkImportAllotments} onDeleteOperator={deleteOperator} onAddAllotment={addAllotment} onReleaseAllotments={releaseAllotments} onRepriceAllotment={repriceAllotment} onRepriceAllotmentsBulk={repriceAllotmentsBulk} onPatchAllotment={patchAllotment}
         onQueueContractChange={queueContractChange} onApplyContractPatch={applyContractPatch} onApproveContractChange={approveContractChange} onDiscardContractChange={discardContractChange} />}
+      {showProfile && <ProfileModal profile={profile} pushToast={pushToast} onSaved={patch => { setMeOver(o => ({ ...o, ...patch })); setProfiles(ps => ps.map(p => p.id === profile.id ? { ...p, ...patch } : p)); }} onClose={() => setShowProfile(false)} />}
       {tab === "team" && perms.manageUsers && <TeamPanel profiles={profiles} currentUserId={profile.id} onUpdateRole={updateUserRole} onCreateUser={createTeamUser} onDeleteUser={deleteTeamUser} onResetPassword={resetTeamUserPassword} pushToast={pushToast} />}
       {tab === "dashboard" && <Dashboard flights={flights} allotments={allotments} resources={resources} operators={operators} flightInventory={flightInventory} perms={perms}
         tasks={tasks} onAddTask={addTask} onToggleTask={toggleTask} notifications={notifications} setTab={setTab} setSelectedFlightId={setSelectedFlightId} onOpenReports={() => setShowReports(true)} />}
@@ -3595,15 +3603,293 @@ function shellStyles(embedded, width, maxH) {
     inner: { background: C.panel, borderRadius: 12, width: `min(${width}px, 100%)`, maxHeight: maxH, overflow: "auto", padding: 18, border: `1px solid ${C.border}` },
   };
 }
-const QUOTE_BLANK = { title: "", acCode: "", pax: "", crew: "", fuelMonth: "", legs: [{ from: "", to: "", km: "", min: "" }], hourCost: "", nav: { enroute: "", terminal: "" }, blockCfg: {} };
+// ---- Live exchange rates (units of currency per 1 USD), cached for 30 minutes ----
+let FX_CACHE = null;
+function useFx() {
+  const [state, setState] = useState(FX_CACHE ? { ...FX_CACHE, loading: false } : { loading: true });
+  async function load(force) {
+    if (!force && FX_CACHE && Date.now() - FX_CACHE.at < 30 * 60 * 1000) { setState({ ...FX_CACHE, loading: false }); return; }
+    setState(s => ({ ...s, loading: true }));
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      const res = await fetch("/api/fx", { headers: { Authorization: `Bearer ${session?.access_token}` } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok || j.error) throw new Error(j.error || `HTTP ${res.status}`);
+      FX_CACHE = { rates: j.rates, updated: j.updated, source: j.source, at: Date.now() };
+      setState({ ...FX_CACHE, loading: false });
+    } catch (e) { setState({ loading: false, error: e.message, rates: FX_CACHE?.rates }); }
+  }
+  useEffect(() => { load(false); }, []);
+  return { ...state, reload: () => load(true) };
+}
+function FxNote({ fx }) {
+  const { tr } = useLanguage();
+  if (fx.loading) return <span style={{ fontSize: 11.5, color: C.faint }}>{tr("Loading live rates…")}</span>;
+  if (fx.error) return <span style={{ fontSize: 11.5, color: C.amber }}>{tr("Live rates unavailable ({m}): type the rate by hand.", { m: fx.error })} <button onClick={fx.reload} style={{ ...miniBtn, fontSize: 10 }}>{tr("Try again")}</button></span>;
+  return <span style={{ fontSize: 11.5, color: C.muted }}>{tr("Live rates from {src}, updated {t} UTC.", { src: fx.source, t: String(fx.updated || "").slice(0, 16).replace("T", " ") })} <button onClick={fx.reload} style={{ ...miniBtn, fontSize: 10 }}>{tr("Refresh")}</button></span>;
+}
 
-const QUOTE_PAGE_TITLE = { calc: "Charter price calculator", saved: "Saved quotes", fees: "Airport fees", times: "Route times" };
+// ---- Picture or initials ----
+function Avatar({ name, url, size = 30, style }) {
+  const [bad, setBad] = useState(false);
+  useEffect(() => { setBad(false); }, [url]);
+  if (url && !bad) return <img src={url} alt="" onError={() => setBad(true)} style={{ width: size, height: size, borderRadius: 999, objectFit: "cover", flexShrink: 0, ...style }} />;
+  return <div style={{ width: size, height: size, borderRadius: 999, background: C.amberSoft, color: C.amber, display: "flex", alignItems: "center", justifyContent: "center", fontSize: Math.round(size * 0.4), fontWeight: 700, flexShrink: 0, ...style }}>{(name || "U")[0].toUpperCase()}</div>;
+}
+
+// square 256 px JPEG from any picture
+async function squareJpeg(file, size = 256) {
+  const bmp = await createImageBitmap(file);
+  const s = Math.min(bmp.width, bmp.height), sx = (bmp.width - s) / 2, sy = (bmp.height - s) / 2;
+  const cv = document.createElement("canvas"); cv.width = cv.height = size;
+  cv.getContext("2d").drawImage(bmp, sx, sy, s, s, 0, 0, size, size);
+  return await new Promise((res, rej) => cv.toBlob(b => (b ? res(b) : rej(new Error("The picture could not be converted"))), "image/jpeg", 0.85));
+}
+
+// ---- My profile: name, picture, password ----
+function ProfileModal({ profile, pushToast, onSaved, onClose }) {
+  const { tr } = useLanguage();
+  const [name, setName] = useState(profile.name || "");
+  const [busy, setBusy] = useState("");
+  const [pw, setPw] = useState({ current: "", next: "", again: "" });
+  const [pwMsg, setPwMsg] = useState("");
+  async function saveName() {
+    const n = name.trim();
+    if (!n || n === profile.name) return;
+    setBusy("name");
+    const { data, error } = await supabase.from("profiles").update({ name: n }).eq("id", profile.id).select("id");
+    setBusy("");
+    if (error || !data?.length) { pushToast(tr("Name not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
+    onSaved({ name: n }); pushToast(tr("Name saved."), "ok");
+  }
+  const pathOf = url => { const m = String(url || "").match(/\/avatars\/(.+?)(?:\?|$)/); return m ? decodeURIComponent(m[1]) : null; };
+  async function pickPicture(file) {
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { pushToast(tr("Choose a picture file (JPEG, PNG or WebP)."), "warn"); return; }
+    setBusy("avatar");
+    try {
+      const blob = await squareJpeg(file);
+      const path = `${profile.id}/avatar-${Date.now()}.jpg`;
+      const up = await supabase.storage.from("avatars").upload(path, blob, { contentType: "image/jpeg", upsert: false });
+      if (up.error) throw new Error(up.error.message);
+      const url = supabase.storage.from("avatars").getPublicUrl(path).data.publicUrl;
+      const { data, error } = await supabase.from("profiles").update({ avatar_url: url }).eq("id", profile.id).select("id");
+      if (error || !data?.length) throw new Error(error?.message || tr("no row changed (permission?)"));
+      const old = pathOf(profile.avatar_url); if (old) await supabase.storage.from("avatars").remove([old]);
+      onSaved({ avatar_url: url }); pushToast(tr("Picture saved."), "ok");
+    } catch (e) { pushToast(tr("Picture not saved: {m}", { m: e.message }), "warn", true); }
+    finally { setBusy(""); }
+  }
+  async function removePicture() {
+    setBusy("avatar");
+    const { error } = await supabase.from("profiles").update({ avatar_url: null }).eq("id", profile.id);
+    if (!error) { const old = pathOf(profile.avatar_url); if (old) await supabase.storage.from("avatars").remove([old]); onSaved({ avatar_url: null }); pushToast(tr("Picture removed."), "ok"); }
+    else pushToast(tr("Picture not removed: {m}", { m: error.message }), "warn");
+    setBusy("");
+  }
+  async function changePassword() {
+    setPwMsg("");
+    if (pw.next.length < 8) { setPwMsg(tr("The new password needs at least 8 characters.")); return; }
+    if (pw.next !== pw.again) { setPwMsg(tr("The two new passwords are not the same.")); return; }
+    if (pw.next === pw.current) { setPwMsg(tr("The new password must differ from the current one.")); return; }
+    setBusy("pw");
+    const { data: { session } } = await supabase.auth.getSession();
+    const email = session?.user?.email || profile.email;
+    const chk = await supabase.auth.signInWithPassword({ email, password: pw.current });
+    if (chk.error) { setBusy(""); setPwMsg(tr("The current password is not correct.")); return; }
+    const { error } = await supabase.auth.updateUser({ password: pw.next });
+    setBusy("");
+    if (error) { setPwMsg(tr("Password not changed: {m}", { m: error.message })); return; }
+    setPw({ current: "", next: "", again: "" }); pushToast(tr("Password changed."), "ok", true);
+  }
+  const lab = { fontSize: 11, color: C.muted, marginBottom: 2 };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(30,42,61,0.5)", zIndex: 95, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.panel, borderRadius: 12, width: "min(460px, 100%)", maxHeight: "92vh", overflow: "auto", padding: 18, border: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>{tr("My profile")}</div>
+          <button onClick={onClose} style={miniBtn}>{tr("Close")}</button>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+          <Avatar name={profile.name} url={profile.avatar_url} size={72} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ ...miniBtn, display: "inline-block", textAlign: "center", opacity: busy === "avatar" ? 0.55 : 1 }}>{busy === "avatar" ? tr("Saving…") : tr("Choose a picture")}<input type="file" accept="image/jpeg,image/png,image/webp" disabled={busy === "avatar"} onChange={e => { const f = e.target.files?.[0]; e.target.value = ""; pickPicture(f); }} style={{ display: "none" }} /></label>
+            {profile.avatar_url && <button disabled={busy === "avatar"} onClick={removePicture} style={{ ...miniBtn, color: C.red }}>{tr("Remove picture")}</button>}
+            <div style={{ fontSize: 10.5, color: C.faint }}>{tr("Cropped to a square. JPEG, PNG or WebP.")}</div>
+          </div>
+        </div>
+        <div style={lab}>{tr("Name")}</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 4 }}>
+          <input value={name} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === "Enter") saveName(); }} style={{ ...inputStyle, flex: 1 }} />
+          <button disabled={busy === "name" || !name.trim() || name.trim() === profile.name} onClick={saveName} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save")}</button>
+        </div>
+        <div style={{ fontSize: 11, color: C.faint, marginBottom: 16 }}>{profile.email}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{tr("Change password")}</div>
+        <div style={{ display: "grid", gap: 8 }}>
+          <div><div style={lab}>{tr("Current password")}</div><input type="password" autoComplete="current-password" value={pw.current} onChange={e => setPw({ ...pw, current: e.target.value })} style={inputStyle} /></div>
+          <div><div style={lab}>{tr("New password (at least 8 characters)")}</div><input type="password" autoComplete="new-password" value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} style={inputStyle} /></div>
+          <div><div style={lab}>{tr("New password again")}</div><input type="password" autoComplete="new-password" value={pw.again} onChange={e => setPw({ ...pw, again: e.target.value })} onKeyDown={e => { if (e.key === "Enter") changePassword(); }} style={inputStyle} /></div>
+        </div>
+        {pwMsg && <div style={{ color: C.red, fontSize: 12.5, marginTop: 8 }}>{pwMsg}</div>}
+        <button disabled={busy === "pw" || !pw.current || !pw.next} onClick={changePassword} style={{ ...miniBtn, marginTop: 10, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{busy === "pw" ? tr("Saving…") : tr("Change password")}</button>
+      </div>
+    </div>
+  );
+}
+
+// ---- Aircraft types and navigation fees by MTOW (pricing setup) ----
+const AC_BLANK = { code: "", name: "", mtow_t: "", seats: "", cruise_kmh: "850", burn_t_per_h: "", hour_cost_usd: "", crew: "6", note: "" };
+function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToast, onChanged }) {
+  const { tr } = useLanguage();
+  const fx = useFx();
+  const [edits, setEdits] = useState({});
+  const [add, setAdd] = useState(AC_BLANK);
+  const [busy, setBusy] = useState(false);
+  const [ns, setNs] = useState(navSettings);
+  const [bEdits, setBEdits] = useState({});
+  const [newBand, setNewBand] = useState({ mtow_from: "", mtow_to: "", enroute_usd_per_km: "", terminal_usd_per_leg: "", note: "" });
+  const [conv, setConv] = useState({ amount: "", currency: "EUR" });
+  useEffect(() => { setNs(navSettings); }, [navSettings]);
+  const val = (a, k) => edits[a.code]?.[k] !== undefined ? edits[a.code][k] : (a[k] ?? "");
+  const setE = (a, k, v) => setEdits(e => ({ ...e, [a.code]: { ...(e[a.code] || {}), [k]: v } }));
+  const numOrNull = v => { const n = Number(String(v).replace(",", ".")); return String(v).trim() !== "" && Number.isFinite(n) ? n : null; };
+  async function saveAircraft(a) {
+    const p = edits[a.code]; if (!p) return;
+    const patch = {};
+    for (const k of ["name", "note"]) if (p[k] !== undefined) patch[k] = String(p[k]).trim() || (k === "note" ? null : a.name);
+    for (const k of ["mtow_t", "seats", "cruise_kmh", "burn_t_per_h", "hour_cost_usd", "crew"]) if (p[k] !== undefined) { const n = numOrNull(p[k]); if (n == null || n < 0 || ((k === "mtow_t" || k === "seats" || k === "cruise_kmh") && n <= 0)) { pushToast(tr("Enter {f} as a number.", { f: tr(AC_FIELD[k]) }), "warn"); return; } patch[k] = k === "seats" || k === "crew" ? Math.round(n) : n; }
+    if (p.active !== undefined) patch.active = !!p.active;
+    setBusy(true);
+    const { data, error } = await supabase.from("aircraft_types").update(patch).eq("code", a.code).select("code");
+    setBusy(false);
+    if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
+    setEdits(e => { const n = { ...e }; delete n[a.code]; return n; }); onChanged(); pushToast(tr("Aircraft saved."), "ok");
+  }
+  async function addAircraft() {
+    const code = add.code.trim().toLowerCase().replace(/[^a-z0-9_-]/g, "");
+    const mtow = numOrNull(add.mtow_t), seats = numOrNull(add.seats), cruise = numOrNull(add.cruise_kmh), burn = numOrNull(add.burn_t_per_h), hc = numOrNull(add.hour_cost_usd), crew = numOrNull(add.crew);
+    if (!code || !add.name.trim() || !(mtow > 0) || !(seats > 0) || !(cruise > 0) || burn == null || hc == null || crew == null) { pushToast(tr("Fill in code, name, MTOW, seats, speed, burn, hour cost and crew."), "warn"); return; }
+    if (aircraft.some(a => a.code === code)) { pushToast(tr("An aircraft with this code exists already."), "warn"); return; }
+    setBusy(true);
+    const { error } = await supabase.from("aircraft_types").insert({ code, name: add.name.trim(), mtow_t: mtow, seats: Math.round(seats), cruise_kmh: cruise, burn_t_per_h: burn, hour_cost_usd: hc, crew: Math.round(crew), note: add.note.trim() || null, active: true });
+    setBusy(false);
+    if (error) { pushToast(tr("Not added: {m}", { m: error.message }), "warn", true); return; }
+    setAdd(AC_BLANK); onChanged(); pushToast(tr("Aircraft added."), "ok");
+  }
+  async function saveNav() {
+    const v = { mode: ns.mode, refMtow: numOrNull(ns.refMtow) ?? 50, enroutePerKm: numOrNull(ns.enroutePerKm) ?? 0, terminalPerLeg: numOrNull(ns.terminalPerLeg) ?? 0 };
+    if (v.mode === "formula" && !(v.refMtow > 0)) { pushToast(tr("Enter the reference MTOW as a number."), "warn"); return; }
+    setBusy(true);
+    const { data, error } = await supabase.from("pricing_settings").upsert({ key: "navigation", value: v }, { onConflict: "key" }).select("key");
+    setBusy(false);
+    if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
+    onChanged(); pushToast(tr("Navigation method saved."), "ok");
+  }
+  const bval = (b, k) => bEdits[b.id]?.[k] !== undefined ? bEdits[b.id][k] : (b[k] ?? "");
+  async function saveBand(b) {
+    const p = bEdits[b.id]; if (!p) return;
+    const patch = {};
+    for (const k of ["mtow_from", "mtow_to", "enroute_usd_per_km", "terminal_usd_per_leg"]) if (p[k] !== undefined) { const n = numOrNull(p[k]); if (n == null || n < 0) { pushToast(tr("Enter the rates and weights as numbers."), "warn"); return; } patch[k] = n; }
+    if (p.note !== undefined) patch.note = String(p.note).trim() || null;
+    if (+(patch.mtow_to ?? b.mtow_to) < +(patch.mtow_from ?? b.mtow_from)) { pushToast(tr("MTOW \"to\" must not be below \"from\"."), "warn"); return; }
+    setBusy(true);
+    const { data, error } = await supabase.from("nav_rates").update(patch).eq("id", b.id).select("id");
+    setBusy(false);
+    if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
+    setBEdits(e => { const n = { ...e }; delete n[b.id]; return n; }); onChanged();
+  }
+  async function delBand(b) {
+    if (!window.confirm(tr("Delete the rates for MTOW {a} - {b} t?", { a: +b.mtow_from, b: +b.mtow_to }))) return;
+    const { error } = await supabase.from("nav_rates").delete().eq("id", b.id);
+    if (error) { pushToast(tr("Not deleted: {m}", { m: error.message }), "warn"); return; }
+    onChanged();
+  }
+  async function addBand() {
+    const f = numOrNull(newBand.mtow_from), t = numOrNull(newBand.mtow_to), e = numOrNull(newBand.enroute_usd_per_km), l = numOrNull(newBand.terminal_usd_per_leg);
+    if (f == null || t == null || e == null || l == null || t < f) { pushToast(tr("Enter MTOW from, MTOW to and both rates as numbers (to is not below from)."), "warn"); return; }
+    setBusy(true);
+    const { error } = await supabase.from("nav_rates").insert({ mtow_from: f, mtow_to: t, enroute_usd_per_km: e, terminal_usd_per_leg: l, note: newBand.note.trim() || null });
+    setBusy(false);
+    if (error) { pushToast(tr("Not added: {m}", { m: error.message }), "warn", true); return; }
+    setNewBand({ mtow_from: "", mtow_to: "", enroute_usd_per_km: "", terminal_usd_per_leg: "", note: "" }); onChanged();
+  }
+  const tdc = { padding: "3px 5px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
+  const inp = w => ({ ...inputStyle, width: w });
+  const convUsd = toUsd(numOrNull(conv.amount) ?? NaN, conv.currency, fx.rates);
+  return (
+    <div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{tr("Aircraft types")}</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{tr("Only active types can be chosen in the calculator. A type is switched off instead of deleted, so the fee lines that name it are kept.")}{!canEdit && " " + tr("Only commercial staff, the tour operator liaison and management can change this.")}</div>
+      <div style={{ overflowX: "auto", marginBottom: 10 }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Code")}</th><th style={tdc}>{tr("Name")}</th><th style={tdc}>MTOW, t</th><th style={tdc}>{tr("Seats")}</th><th style={tdc}>{tr("Cruise, km/h")}</th><th style={tdc}>{tr("Burn, t/h")}</th><th style={tdc}>{tr("Hour cost, USD")}</th><th style={tdc}>{tr("Crew")}</th><th style={tdc}>{tr("Active")}</th><th style={tdc}>{tr("Note")}</th><th style={tdc}></th></tr></thead>
+        <tbody>{aircraft.map(a => <tr key={a.code} style={{ background: edits[a.code] ? C.amberSoft : "transparent", opacity: (a.active === false && !edits[a.code]) ? 0.6 : 1 }}>
+          <td style={{ ...tdc, fontFamily: MONO }}><b>{a.code}</b></td>
+          {[["name", 170], ["mtow_t", 64], ["seats", 56], ["cruise_kmh", 64], ["burn_t_per_h", 58], ["hour_cost_usd", 74], ["crew", 44]].map(([k, w]) => <td key={k} style={tdc}>{canEdit ? <input value={val(a, k)} onChange={e => setE(a, k, e.target.value)} style={inp(w)} /> : String(a[k])}</td>)}
+          <td style={tdc}><input type="checkbox" disabled={!canEdit} checked={edits[a.code]?.active !== undefined ? !!edits[a.code].active : a.active !== false} onChange={e => setE(a, "active", e.target.checked)} /></td>
+          <td style={tdc}>{canEdit ? <input value={val(a, "note")} onChange={e => setE(a, "note", e.target.value)} style={inp(190)} /> : a.note}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <button disabled={busy || !edits[a.code]} onClick={() => saveAircraft(a)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button>}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {canEdit && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 20 }}>
+        {[["code", "Code", 70], ["name", "Name", 150], ["mtow_t", "MTOW, t", 70], ["seats", "Seats", 56], ["cruise_kmh", "Cruise, km/h", 80], ["burn_t_per_h", "Burn, t/h", 70], ["hour_cost_usd", "Hour cost, USD", 90], ["crew", "Crew", 50]].map(([k, l, w]) => <input key={k} value={add[k]} onChange={e => setAdd({ ...add, [k]: e.target.value })} placeholder={tr(l)} style={inp(w)} />)}
+        <button disabled={busy} onClick={addAircraft} style={miniBtn}>{tr("Add aircraft type")}</button>
+      </div>}
+
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{tr("Navigation fees by MTOW")}</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{tr("Both the enroute fee (per km) and the aerodrome area fee (per leg) depend on the aircraft's MTOW. Choose how they are found.")}</div>
+      <div style={{ display: "grid", gap: 6, marginBottom: 10, fontSize: 12.5 }}>
+        <label><input type="radio" disabled={!canEdit} checked={ns.mode !== "formula"} onChange={() => setNs({ ...ns, mode: "bands" })} /> {tr("Table: rates for each MTOW range (below)")}</label>
+        <label><input type="radio" disabled={!canEdit} checked={ns.mode === "formula"} onChange={() => setNs({ ...ns, mode: "formula" })} /> {tr("Formula: rates for a reference MTOW, scaled by the square root of MTOW / reference MTOW")}</label>
+        {ns.mode === "formula" && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginLeft: 22 }}>
+          <span>{tr("Reference MTOW, t")}</span><input disabled={!canEdit} value={ns.refMtow ?? ""} onChange={e => setNs({ ...ns, refMtow: e.target.value })} style={inp(70)} />
+          <span>{tr("Enroute USD per km")}</span><input disabled={!canEdit} value={ns.enroutePerKm ?? ""} onChange={e => setNs({ ...ns, enroutePerKm: e.target.value })} style={inp(80)} />
+          <span>{tr("Aerodrome area USD per leg")}</span><input disabled={!canEdit} value={ns.terminalPerLeg ?? ""} onChange={e => setNs({ ...ns, terminalPerLeg: e.target.value })} style={inp(80)} />
+        </div>}
+        {canEdit && <div><button disabled={busy} onClick={saveNav} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save navigation method")}</button></div>}
+      </div>
+      <div style={{ overflowX: "auto", marginBottom: 8 }}><table style={{ width: "100%", borderCollapse: "collapse", opacity: ns.mode === "formula" ? 0.5 : 1 }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("MTOW from, t")}</th><th style={tdc}>{tr("MTOW to, t")}</th><th style={tdc}>{tr("Enroute USD per km")}</th><th style={tdc}>{tr("Aerodrome area USD per leg")}</th><th style={tdc}>{tr("Note")}</th><th style={tdc}></th></tr></thead>
+        <tbody>{navBands.map(b => <tr key={b.id} style={{ background: bEdits[b.id] ? C.amberSoft : "transparent" }}>
+          {["mtow_from", "mtow_to", "enroute_usd_per_km", "terminal_usd_per_leg"].map(k => <td key={k} style={tdc}>{canEdit ? <input value={bval(b, k)} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), [k]: e.target.value } }))} style={inp(86)} /> : +b[k]}</td>)}
+          <td style={tdc}>{canEdit ? <input value={bval(b, "note")} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), note: e.target.value } }))} style={inp(230)} /> : b.note}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !bEdits[b.id]} onClick={() => saveBand(b)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button> <button onClick={() => delBand(b)} style={{ ...miniBtn, color: C.red }}>{tr("Delete")}</button></>}</td>
+        </tr>)}
+        {navBands.length === 0 && <tr><td colSpan={6} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 12 }}>{tr("No MTOW ranges yet.")}</td></tr>}</tbody>
+      </table></div>
+      {canEdit && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+        {[["mtow_from", "MTOW from, t", 90], ["mtow_to", "MTOW to, t", 90], ["enroute_usd_per_km", "USD per km", 90], ["terminal_usd_per_leg", "USD per leg", 90], ["note", "Note", 180]].map(([k, l, w]) => <input key={k} value={newBand[k]} onChange={e => setNewBand({ ...newBand, [k]: e.target.value })} placeholder={tr(l)} style={inp(w)} />)}
+        <button disabled={busy} onClick={addBand} style={miniBtn}>{tr("Add MTOW range")}</button>
+      </div>}
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{tr("What the calculator will use now")}</div>
+      <table style={{ borderCollapse: "collapse", marginBottom: 22 }}>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Aircraft")}</th><th style={tdc}>MTOW, t</th><th style={tdc}>{tr("Enroute USD per km")}</th><th style={tdc}>{tr("Aerodrome area USD per leg")}</th></tr></thead>
+        <tbody>{aircraft.filter(a => a.active !== false).map(a => { const r = navRatesFor(+a.mtow_t, ns, navBands); return <tr key={a.code}><td style={tdc}>{a.name}</td><td style={tdc}>{+a.mtow_t}</td>{r.source ? <><td style={tdc}>{r.enroutePerKm}</td><td style={tdc}>{r.terminalPerLeg}</td></> : <td style={{ ...tdc, color: C.amber }} colSpan={2}>{tr("no rate for this MTOW")}</td>}</tr>; })}</tbody>
+      </table>
+
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{tr("Currency to USD")}</div>
+      <div style={{ marginBottom: 6 }}><FxNote fx={fx} /></div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", fontSize: 12.5 }}>
+        <input inputMode="decimal" value={conv.amount} onChange={e => setConv({ ...conv, amount: e.target.value })} placeholder={tr("amount")} style={inp(110)} />
+        <select value={conv.currency} onChange={e => setConv({ ...conv, currency: e.target.value })} style={inp(90)}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+        <span>= <b>{convUsd == null ? "-" : usd2(convUsd)}</b> USD</span>
+        {fx.rates?.[conv.currency] && conv.currency !== "USD" && <span style={{ color: C.faint }}>(1 USD = {fx.rates[conv.currency]} {conv.currency})</span>}
+      </div>
+    </div>
+  );
+}
+const AC_FIELD = { mtow_t: "MTOW, t", seats: "Seats", cruise_kmh: "Cruise, km/h", burn_t_per_h: "Burn, t/h", hour_cost_usd: "Hour cost, USD", crew: "Crew" };
+
+const QUOTE_BLANK = { title: "", acCode: "", pax: "", crew: "", fuelMonth: "", legs: [{ from: "", to: "", km: "", min: "" }], hourCost: "", nav: { enroute: "", terminal: "" }, blockCfg: {}, extra: [] };
+
+const QUOTE_PAGE_TITLE = { calc: "Charter price calculator", saved: "Saved quotes", fees: "Airport fees", times: "Route times", setup: "Aircraft & navigation" };
 function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page = "calc" }) {
   const { tr } = useLanguage();
   const [tabState, setTab] = useState("calc");
   const tab = embedded ? page : tabState;
   const [aircraft, setAircraft] = useState([]);
   const [navRates, setNavRates] = useState([]);
+  const [navSettings, setNavSettings] = useState({ mode: "bands", refMtow: 50, enroutePerKm: 0, terminalPerLeg: 0 });
+  const fx = useFx();
   const [fuel, setFuel] = useState(new Map());
   const [fuelHist, setFuelHist] = useState([]);
   const [routeTimes, setRouteTimes] = useState(new Map());
@@ -3613,20 +3899,21 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [st, setSt] = useState(QUOTE_BLANK);
-  const canQuote = !!(perms.editAllotments || perms.editContracts);
-  const canFees = !!perms.editContracts;
+  const canQuote = !!(perms.editAllotments || perms.editContracts || perms.managePricing);
+  const canFees = !!(perms.editContracts || perms.managePricing);
   const set = patch => setSt(s => ({ ...s, ...patch }));
 
   async function loadBase() {
-    const [a, n, f] = await Promise.all([
+    const [a, n, f, ps] = await Promise.all([
       supabase.from("aircraft_types").select("*").order("mtow_t"),
       supabase.from("nav_rates").select("*").order("mtow_from"),
       supabase.from("airport_fuel_prices").select("airport,price,unit"),
+      supabase.from("pricing_settings").select("key,value").eq("key", "navigation"),
     ]);
     const e = a.error || n.error || f.error;
     if (e) { setErr(/relation|schema cache|does not exist/i.test(e.message) ? tr("The calculator tables are missing: run migration 00041_charter_quotes.sql and 00042_charter_fee_seed.sql in Supabase.") : e.message); return; }
-    setErr(""); setAircraft(a.data || []); setNavRates(n.data || []); setFuel(new Map((f.data || []).map(r => [r.airport, r])));
-    setSt(s => s.acCode || !(a.data || []).length ? s : { ...s, acCode: a.data[0].code });
+    setErr(""); setAircraft(a.data || []); setNavRates(n.data || []); if (!ps.error && ps.data?.[0]?.value) setNavSettings({ mode: "bands", ...ps.data[0].value }); setFuel(new Map((f.data || []).map(r => [r.airport, r])));
+    setSt(s => { const act = (a.data || []).filter(x => x.active !== false); return s.acCode || !act.length ? s : { ...s, acCode: act[0].code }; });
   }
   async function loadRoutes() {
     const { data } = await fetchAllPages(() => supabase.from("route_times").select("origin,destination,avg_minutes,km").order("origin").order("destination"));
@@ -3682,12 +3969,18 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     const fuelUsdPerT = c.fuelPrice !== undefined && c.fuelPrice !== "" ? +c.fuelPrice : (fr ? fuelUsdPerTonne(fr.price, fr.unit) : null);
     return { airport: s.airport, uplift: s.uplift, fuelUsdPerT, fuelFrom: fr && !fr.exact ? fr.month : null, lines };
   });
-  const band = acObj ? navRates.find(r => acObj.mtow >= +r.mtow_from && acObj.mtow <= +r.mtow_to) : null;
+  const band = acObj ? navRatesFor(acObj.mtow, navSettings, navRates) : null;
   const nav = {
-    enroutePerKm: st.nav.enroute !== "" ? +st.nav.enroute : (band ? +band.enroute_usd_per_km : 0),
-    terminalPerLeg: st.nav.terminal !== "" ? +st.nav.terminal : (band ? +band.terminal_usd_per_leg : 0),
+    enroutePerKm: st.nav.enroute !== "" ? +st.nav.enroute : (band?.source ? band.enroutePerKm : 0),
+    terminalPerLeg: st.nav.terminal !== "" ? +st.nav.terminal : (band?.source ? band.terminalPerLeg : 0),
   };
-  const quoteInput = acObj && legsC.length ? { aircraft: acObj, aircraftName: ac.name, pax: +st.pax || acObj.seats, crew: +st.crew || ac.crew || 7, hourCost: st.hourCost !== "" ? +st.hourCost : acObj.hourCost, legs: validLegs, blocks, nav } : null;
+  const extraRows = (st.extra || []).map(x => {
+    const cur = x.currency || "USD", amt = Number(String(x.amount).replace(",", "."));
+    const usd = String(x.amount).trim() !== "" && Number.isFinite(amt) ? toUsd(amt, cur, fx.rates, x.rate !== "" && x.rate != null ? Number(String(x.rate).replace(",", ".")) : null) : null;
+    return { ...x, cur, usd, noRate: String(x.amount).trim() !== "" && usd == null };
+  });
+  const extraFees = extraRows.filter(x => x.usd != null && (x.comment || "").trim() !== "" || (x.usd != null && x.usd !== 0)).map(x => ({ comment: x.comment.trim() || "Additional fee", usd: roundUsd(x.usd, 2), note: x.cur === "USD" ? "" : `${x.amount} ${x.cur}` }));
+  const quoteInput = acObj && legsC.length ? { aircraft: acObj, aircraftName: ac.name, pax: +st.pax || acObj.seats, crew: +st.crew || ac.crew || 7, hourCost: st.hourCost !== "" ? +st.hourCost : acObj.hourCost, legs: validLegs, blocks, nav, extraFees } : null;
   const q = quoteInput ? computeQuote(quoteInput) : null;
   const routeText = validLegs.length ? [validLegs[0].from, ...validLegs.map(l => l.to)].join(" - ") : "";
 
@@ -3753,7 +4046,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
         {tab === "calc" && <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 12 }}>
             <div style={{ gridColumn: "span 2" }}><div style={lab}>{tr("Quote name")}</div><input value={st.title} onChange={e => set({ title: e.target.value })} placeholder={routeText || "e.g. Shymkent - Vienna - Shymkent"} style={inputStyle} /></div>
-            <div><div style={lab}>{tr("Aircraft")}</div><select value={st.acCode} onChange={e => set({ acCode: e.target.value })} style={inputStyle}>{aircraft.map(a => <option key={a.code} value={a.code}>{a.name}</option>)}</select></div>
+            <div><div style={lab}>{tr("Aircraft")}</div><select value={st.acCode} onChange={e => set({ acCode: e.target.value })} style={inputStyle}>{aircraft.filter(a => a.active !== false || a.code === st.acCode).map(a => <option key={a.code} value={a.code}>{a.name}{a.active === false ? " (" + tr("inactive") + ")" : ""}</option>)}</select></div>
             <div><div style={lab}>{ac ? tr("Passengers ({n} seats)", { n: ac.seats }) : tr("Passengers")}</div><input inputMode="numeric" value={st.pax} onChange={e => set({ pax: e.target.value })} placeholder={ac ? String(ac.seats) : ""} style={inputStyle} /></div>
             <div><div style={lab}>{tr("Crew")}</div><input inputMode="numeric" value={st.crew} onChange={e => set({ crew: e.target.value })} placeholder={String(ac?.crew || 7)} style={inputStyle} /></div>
             <div><div style={lab}>{tr("Fuel prices of month")}</div><input type="month" value={fuelMonth} onChange={e => set({ fuelMonth: e.target.value })} style={inputStyle} /></div>
@@ -3780,10 +4073,27 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
           </div>
 
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
-            <div><div style={lab}>{tr("Navigation enroute, USD per km")}</div><input inputMode="decimal" value={st.nav.enroute} onChange={e => set({ nav: { ...st.nav, enroute: e.target.value } })} placeholder={band ? String(+band.enroute_usd_per_km) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
-            <div><div style={lab}>{tr("Navigation aerodrome area, USD per leg")}</div><input inputMode="decimal" value={st.nav.terminal} onChange={e => set({ nav: { ...st.nav, terminal: e.target.value } })} placeholder={band ? String(+band.terminal_usd_per_leg) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
-            {acObj && !band && <div style={{ fontSize: 11.5, color: C.amber }}>{tr("No navigation rate for {mtow} t in the table: enter the rates here.", { mtow: acObj.mtow })}</div>}
-            {band && band.note && <div style={{ fontSize: 11, color: C.faint }}>{tr("Table rate: {note}", { note: band.note })}</div>}
+            <div><div style={lab}>{tr("Navigation enroute, USD per km")}</div><input inputMode="decimal" value={st.nav.enroute} onChange={e => set({ nav: { ...st.nav, enroute: e.target.value } })} placeholder={band?.source ? String(band.enroutePerKm) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
+            <div><div style={lab}>{tr("Navigation aerodrome area, USD per leg")}</div><input inputMode="decimal" value={st.nav.terminal} onChange={e => set({ nav: { ...st.nav, terminal: e.target.value } })} placeholder={band?.source ? String(band.terminalPerLeg) : tr("no rate")} style={{ ...inputStyle, width: 130 }} /></div>
+            {acObj && !band?.source && <div style={{ fontSize: 11.5, color: C.amber }}>{tr("No navigation rate for {mtow} t in the table: enter the rates here.", { mtow: acObj.mtow })}</div>}
+            {band?.source && band.note && <div style={{ fontSize: 11, color: C.faint }}>{tr("Table rate: {note}", { note: band.note })}</div>}
+          </div>
+
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+              <b style={{ fontSize: 13 }}>{tr("Additional fees")}</b>
+              <button onClick={() => set({ extra: [...(st.extra || []), { comment: "", amount: "", currency: "USD", rate: "" }] })} style={miniBtn}>{tr("Add additional fee")}</button>
+            </div>
+            {(st.extra || []).length === 0 && <div style={{ fontSize: 12, color: C.faint }}>{tr("Anything not covered above (catering, de-icing, visas, commission...). Each fee has a comment and an amount; other currencies are converted to USD.")}</div>}
+            {extraRows.map((x, i) => <div key={i} style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={x.comment} onChange={e => set({ extra: st.extra.map((y, k) => k === i ? { ...y, comment: e.target.value } : y) })} placeholder={tr("Comment")} style={{ ...inputStyle, width: 260 }} />
+              <input inputMode="decimal" value={x.amount} onChange={e => set({ extra: st.extra.map((y, k) => k === i ? { ...y, amount: e.target.value } : y) })} placeholder={tr("Amount")} style={{ ...inputStyle, width: 110 }} />
+              <select value={x.cur} onChange={e => set({ extra: st.extra.map((y, k) => k === i ? { ...y, currency: e.target.value } : y) })} style={{ ...inputStyle, width: 80 }}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+              {x.cur !== "USD" && <input inputMode="decimal" value={x.rate ?? ""} onChange={e => set({ extra: st.extra.map((y, k) => k === i ? { ...y, rate: e.target.value } : y) })} placeholder={fx.rates?.[x.cur] ? tr("{c} per USD: {r}", { c: x.cur, r: fx.rates[x.cur] }) : tr("{c} per USD", { c: x.cur })} style={{ ...inputStyle, width: 150 }} />}
+              <span style={{ fontFamily: MONO, fontSize: 12.5, minWidth: 90 }}>{x.usd == null ? (x.noRate ? <span style={{ color: C.amber }}>{tr("no rate")}</span> : "") : "= " + usd2(x.usd)}</span>
+              <button onClick={() => set({ extra: st.extra.filter((_, k) => k !== i) })} style={{ ...miniBtn, color: C.red }}>{tr("Remove")}</button>
+            </div>)}
+            {extraRows.some(x => x.cur !== "USD") && <div style={{ marginTop: 6 }}><FxNote fx={fx} /></div>}
           </div>
 
           {blocks.map(b => {
@@ -3824,11 +4134,13 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
             </div>;
           })}
 
+          {extraRows.some(x => x.noRate) && <div style={{ fontSize: 12, color: C.amber, marginBottom: 6 }}>{tr("An additional fee has no exchange rate and is left out of the total.")}</div>}
           {q && <div style={{ position: "sticky", bottom: 0, background: C.panel, borderTop: `2px solid ${C.border}`, paddingTop: 10, marginTop: 6 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, fontSize: 12.5 }}>
               <div><div style={lab}>{tr("Airports")}</div><b>{usd0(q.airports)}</b></div>
               <div><div style={lab}>{tr("Navigation")}</div><b>{usd0(q.nav.enroute + q.nav.terminal)}</b> <span style={{ color: C.faint, fontSize: 11 }}>({usd0(q.nav.enroute)} + {usd0(q.nav.terminal)})</span></div>
               <div><div style={lab}>{tr("Flight hours ({h} h)", { h: q.hours.toFixed(2) })}</div><b>{usd0(q.flightHours.total)}</b></div>
+              {q.extraTotal > 0 && <div><div style={lab}>{tr("Additional fees")}</div><b>{usd0(q.extraTotal)}</b></div>}
               <div><div style={lab}>{tr("Total, USD")}</div><b style={{ fontSize: 18, color: C.green }}>{usd0(q.total)}</b></div>
               <div><div style={lab}>{tr("Per seat ({n})", { n: q.pax })}</div><b style={{ fontSize: 15 }}>{usd0(q.perSeat)}</b></div>
               <div><div style={lab}>{tr("Per block hour")}</div><b style={{ fontSize: 15 }}>{usd0(q.perBlockHour)}</b></div>
@@ -3838,7 +4150,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
               {canQuote && <button disabled={busy} onClick={save} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save quote")}</button>}
               <button disabled={busy} onClick={() => pdf("ru")} style={miniBtn}>{tr("PDF (Russian)")}</button>
               <button disabled={busy} onClick={() => pdf("en")} style={miniBtn}>{tr("PDF (English)")}</button>
-              <button onClick={() => setSt({ ...QUOTE_BLANK, acCode: aircraft[0]?.code || "" })} style={miniBtn}>{tr("New quote")}</button>
+              <button onClick={() => setSt({ ...QUOTE_BLANK, acCode: aircraft.find(a => a.active !== false)?.code || "" })} style={miniBtn}>{tr("New quote")}</button>
             </div>
           </div>}
           {!q && <div style={{ fontSize: 12.5, color: C.faint }}>{tr("Choose the aircraft and enter at least one leg (from, to and distance) to see the price.")}</div>}
@@ -3854,6 +4166,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
           </div>)}
         </div>}
 
+        {tab === "setup" && <PricingSetupEditor canEdit={canFees} aircraft={aircraft} navBands={navRates} navSettings={navSettings} pushToast={pushToast} onChanged={loadBase} />}
         {tab === "times" && <RouteTimesEditor canEdit={canFees} aircraft={aircraft} pushToast={pushToast} onChanged={loadRoutes} />}
         {tab === "fees" && <AirportFeesEditor canEdit={canFees} aircraft={aircraft} geo={geo} pushToast={pushToast} onChanged={a => setFees(f => { const n = { ...f }; delete n[a]; return n; })} />}
       </div>
@@ -3968,7 +4281,7 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
   const [tab, setTab] = useState("current");
   const [bulk, setBulk] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
-  const canEdit = !!perms.editFlight;
+  const canEdit = !!(perms.editFlight || perms.managePricing);
   async function load() {
     const { data, error } = await supabase.from("airport_fuel_prices").select("airport,price,unit,supplier,valid_from,updated_at");
     if (error) { setErr(/relation|schema cache|does not exist/i.test(error.message) ? tr("The fuel price table is missing: run migration 00040_airport_fuel_prices.sql in Supabase.") : error.message); return; }
@@ -4244,11 +4557,32 @@ function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, r
   );
 }
 
+// Prices in a file may be in another currency: pick it, the live rate (or a typed one) converts them to USD
+function useCurrencyConv() {
+  const { tr } = useLanguage();
+  const fx = useFx();
+  const [cur, setCur] = useState("USD");
+  const [rate, setRate] = useState("");
+  const typed = Number(String(rate).replace(",", "."));
+  const per = cur === "USD" ? 1 : (rate !== "" && typed > 0 ? typed : (fx.rates?.[cur] > 0 ? fx.rates[cur] : null));
+  const factor = per ? 1 / per : null;
+  const node = <div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+    <span>{tr("Prices in the file are in")}</span>
+    <select value={cur} onChange={e => { setCur(e.target.value); setRate(""); }} style={{ ...inputStyle, width: 80 }}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+    {cur !== "USD" && <><input inputMode="decimal" value={rate} onChange={e => setRate(e.target.value)} placeholder={fx.rates?.[cur] ? tr("{c} per USD: {r}", { c: cur, r: fx.rates[cur] }) : tr("{c} per USD", { c: cur })} style={{ ...inputStyle, width: 150 }} />
+      <span style={{ color: factor ? C.muted : C.amber }}>{factor ? tr("Prices are multiplied by {f} to get USD.", { f: Math.round(factor * 1e8) / 1e8 }) : tr("No rate yet: type one to load.")}</span><FxNote fx={fx} /></>}
+  </div>;
+  return { cur, factor, node };
+}
+
 function FuelBulkDialog({ names, current, pushToast, onDone, onClose }) {
   const { tr, lang } = useLanguage();
   const [month, setMonth] = useState(curMonthKey());
   const known = useMemo(() => (names.size ? new Set([...names.keys(), ...current.keys()]) : undefined), [names, current]);
+  const cv = useCurrencyConv();
   async function apply(rows) {
+    if (cv.factor == null) return { ok: false, msg: tr("No rate yet: type one to load.") };
+    rows = rows.map(x => ({ ...x, price: roundUsd(x.price * cv.factor, 4) }));
     const r = await writeChunks(rows.map(x => ({ airport: x.airport, month: x.month, price: x.price, unit: x.unit, supplier: x.supplier, note: x.note })), c => supabase.from("airport_fuel_price_history").upsert(c, { onConflict: "airport,month" }).select("airport"));
     if (r.error) return { ok: false, msg: tr("Not loaded: {m}", { m: r.error.message }) + (r.n ? tr(" ({n} rows were loaded before the error)", { n: r.n }) : "") };
     if (r.n < rows.length) return { ok: false, msg: tr("Only {n} of {total} rows were saved (no permission?).", { n: r.n, total: rows.length }) };
@@ -4259,7 +4593,8 @@ function FuelBulkDialog({ names, current, pushToast, onDone, onClose }) {
     parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known, lang })}
     columns={[{ label: "Airport", get: r => r.airport }, { label: "Month", get: r => r.month.slice(0, 7) }, { label: "Price", get: r => r.price }, { label: "Unit", get: r => r.unit }, { label: "Supplier", get: r => r.supplier || "" }]}
     template={{ name: "fuel-prices-template.csv", text: toCsvFile([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: tr("Airport"), key: "a" }, { label: tr("Month"), key: "m" }, { label: tr("Price"), key: "p" }, { label: tr("Unit"), key: "u" }, { label: tr("Supplier"), key: "s" }]) }}
-    extra={<div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Month for rows without a month: ")}<input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>}
+    extra={<><div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Month for rows without a month: ")}<input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>{cv.node}</>}
+    canApply={cv.factor != null}
     onApply={apply} onClose={onClose} />;
 }
 
@@ -4278,7 +4613,10 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
   const [mode, setMode] = useState("update");
   const [sure, setSure] = useState(false);
   const [codesInFile, setCodesInFile] = useState(0);
+  const cv = useCurrencyConv();
   async function apply(rows) {
+    if (cv.factor == null) return { ok: false, msg: tr("No rate yet: type one to load.") };
+    rows = rows.map(r => ({ ...r, price_usd: roundUsd(r.price_usd * cv.factor, 4) }));
     const codes = [...new Set(rows.map(r => r.airport))];
     setCodesInFile(codes.length);
     const existing = [];
@@ -4329,12 +4667,12 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
     parse={g => parseFeesGrid(g, { aircraftCodes: aircraft.map(a => a.code), lang })}
     columns={FEE_COLS.map(c => ({ label: c.label, get: r => { const v = (typeof c.get === "function" ? c.get(r) : r[c.key]) ?? ""; return c.label === "Charged per" ? tr(v) : v; } }))}
     template={{ name: "airport-fees-template.csv", text: toCsvFile([{ airport: "ALA", fee_set: "INT", name: "Landing", basis: "mtow_t", price_usd: 1.5, quantity: "", period_minutes: "", aircraft_type: "" }, { airport: "ALA", fee_set: "INT", name: "Parking", basis: "time", price_usd: 40, quantity: 1, period_minutes: 60, aircraft_type: "" }], feeCols(tr)) }}
-    extra={<div style={{ fontSize: 12, marginBottom: 10 }}>
+    extra={<><div style={{ fontSize: 12, marginBottom: 10 }}>
       <label style={{ display: "block", marginBottom: 4 }}><input type="radio" checked={mode === "update"} onChange={() => setMode("update")} />{tr(" Update matching lines and add new ones (a line matches on airport, fee set, name and aircraft type; other lines stay)")}</label>
       <label style={{ display: "block" }}><input type="radio" checked={mode === "replace"} onChange={() => setMode("replace")} />{tr(" Replace: delete all current lines of the airports in the file, then load the file")}</label>
       {mode === "replace" && <label style={{ display: "block", marginTop: 4, color: C.amber }}><input type="checkbox" checked={sure} onChange={e => setSure(e.target.checked)} />{tr(" I understand that the current fee lines of every airport in the file are deleted first")}</label>}
-    </div>}
-    canApply={mode === "update" || sure} applyHint={tr("Tick the confirmation to replace.")}
+    </div>{cv.node}</>}
+    canApply={(mode === "update" || sure) && cv.factor != null} applyHint={tr("Tick the confirmation to replace.")}
     onApply={apply} onClose={onClose} />;
 }
 
@@ -7483,7 +7821,7 @@ function TeamPanel({ profiles, currentUserId, onUpdateRole, onCreateUser, onDele
         <tbody>
           {profiles.map(p => (
             <tr key={p.id} style={{ borderTop: `1px solid ${C.borderSoft}` }}>
-              <td style={td}>{p.name}{p.id === currentUserId && <span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{t("youSuffix")}</span>}</td>
+              <td style={td}><span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><Avatar name={p.name} url={p.avatar_url} size={24} />{p.name}</span>{p.id === currentUserId && <span style={{ color: C.faint, marginLeft: 6, fontSize: 11 }}>{t("youSuffix")}</span>}</td>
               <td style={{ ...td, fontFamily: MONO, fontSize: 12 }}>{p.email}</td>
               <td style={td}>
                 <select value={p.role} onChange={e => onUpdateRole(p.id, e.target.value)} disabled={p.id === currentUserId} style={{ ...inputStyle, width: 200 }}>
