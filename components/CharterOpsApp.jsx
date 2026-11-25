@@ -14,7 +14,7 @@ import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
 import { parseFuelGrid, parseFeesGrid, parseTimesGrid, toCsv as toCsvFile, toMinutes, toNumber, cleanCode, pickFuelPrice } from "../lib/bulk-import";
-import { toUsd, CURRENCIES, normCurrency, roundUsd } from "../lib/fx";
+import { toUsd, CURRENCIES, normCurrency, roundUsd, storedUsd } from "../lib/fx";
 import { navRatesFor, computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
@@ -3737,6 +3737,12 @@ function ProfileModal({ profile, pushToast, onSaved, onClose }) {
   );
 }
 
+function liveNavSettings(ns, rates) {
+  const cur = ns.currency || "USD";
+  if (cur === "USD") return ns;
+  const e = toUsd(Number(ns.enroutePerKm) || 0, cur, rates), t = toUsd(Number(ns.terminalPerLeg) || 0, cur, rates);
+  return e == null || t == null ? { ...ns, enroutePerKm: 0, terminalPerLeg: 0 } : { ...ns, enroutePerKm: e, terminalPerLeg: t };
+}
 // ---- Aircraft types and navigation fees by MTOW (pricing setup) ----
 const AC_BLANK = { code: "", name: "", mtow_t: "", seats: "", cruise_kmh: "850", burn_t_per_h: "", hour_cost_usd: "", crew: "6", note: "" };
 function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToast, onChanged }) {
@@ -3746,6 +3752,8 @@ function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToas
   const [add, setAdd] = useState(AC_BLANK);
   const [busy, setBusy] = useState(false);
   const [ns, setNs] = useState(navSettings);
+  const nsLive = useMemo(() => liveNavSettings(ns, fx.rates), [ns, fx.rates]);
+  const bandsLive = useMemo(() => navBands.map(b => ({ ...b, enroute_usd_per_km: storedUsd(b, "enroute_usd_per_km", "enroute_orig", fx.rates), terminal_usd_per_leg: storedUsd(b, "terminal_usd_per_leg", "terminal_orig", fx.rates) })), [navBands, fx.rates]);
   const [bEdits, setBEdits] = useState({});
   const [newBand, setNewBand] = useState({ mtow_from: "", mtow_to: "", enroute_usd_per_km: "", terminal_usd_per_leg: "", note: "" });
   const [conv, setConv] = useState({ amount: "", currency: "EUR" });
@@ -3777,7 +3785,7 @@ function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToas
     setAdd(AC_BLANK); onChanged(); pushToast(tr("Aircraft added."), "ok");
   }
   async function saveNav() {
-    const v = { mode: ns.mode, refMtow: numOrNull(ns.refMtow) ?? 50, enroutePerKm: numOrNull(ns.enroutePerKm) ?? 0, terminalPerLeg: numOrNull(ns.terminalPerLeg) ?? 0 };
+    const v = { mode: ns.mode, refMtow: numOrNull(ns.refMtow) ?? 50, enroutePerKm: numOrNull(ns.enroutePerKm) ?? 0, terminalPerLeg: numOrNull(ns.terminalPerLeg) ?? 0, currency: ns.currency || "USD" };
     if (v.mode === "formula" && !(v.refMtow > 0)) { pushToast(tr("Enter the reference MTOW as a number."), "warn"); return; }
     setBusy(true);
     const { data, error } = await supabase.from("pricing_settings").upsert({ key: "navigation", value: v }, { onConflict: "key" }).select("key");
@@ -3785,11 +3793,20 @@ function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToas
     if (error || !data?.length) { pushToast(tr("Not saved: {m}", { m: error?.message || tr("no row changed (permission?)") }), "warn", true); return; }
     onChanged(); pushToast(tr("Navigation method saved."), "ok");
   }
-  const bval = (b, k) => bEdits[b.id]?.[k] !== undefined ? bEdits[b.id][k] : (b[k] ?? "");
+  const ORIG = { enroute_usd_per_km: "enroute_orig", terminal_usd_per_leg: "terminal_orig" };
+  const bval = (b, k) => bEdits[b.id]?.[k] !== undefined ? bEdits[b.id][k] : (ORIG[k] && b.currency && b.currency !== "USD" && b[ORIG[k]] != null ? b[ORIG[k]] : (b[k] ?? ""));
   async function saveBand(b) {
     const p = bEdits[b.id]; if (!p) return;
     const patch = {};
-    for (const k of ["mtow_from", "mtow_to", "enroute_usd_per_km", "terminal_usd_per_leg"]) if (p[k] !== undefined) { const n = numOrNull(p[k]); if (n == null || n < 0) { pushToast(tr("Enter the rates and weights as numbers."), "warn"); return; } patch[k] = n; }
+    for (const k of ["mtow_from", "mtow_to"]) if (p[k] !== undefined) { const n = numOrNull(p[k]); if (n == null || n < 0) { pushToast(tr("Enter the rates and weights as numbers."), "warn"); return; } patch[k] = n; }
+    if (["enroute_usd_per_km", "terminal_usd_per_leg", "currency"].some(k => p[k] !== undefined)) {
+      const cur = p.currency ?? (b.currency || "USD");
+      const e = numOrNull(bval(b, "enroute_usd_per_km")), l = numOrNull(bval(b, "terminal_usd_per_leg"));
+      if (e == null || l == null || e < 0 || l < 0) { pushToast(tr("Enter the rates and weights as numbers."), "warn"); return; }
+      const eu = cur === "USD" ? e : toUsd(e, cur, fx.rates), lu = cur === "USD" ? l : toUsd(l, cur, fx.rates);
+      if (eu == null || lu == null) { pushToast(tr("No exchange rate for {c} yet: try again when the live rates are loaded.", { c: cur }), "warn"); return; }
+      Object.assign(patch, { currency: cur, enroute_usd_per_km: roundUsd(eu, 6), terminal_usd_per_leg: roundUsd(lu, 4), enroute_orig: cur === "USD" ? null : e, terminal_orig: cur === "USD" ? null : l });
+    }
     if (p.note !== undefined) patch.note = String(p.note).trim() || null;
     if (+(patch.mtow_to ?? b.mtow_to) < +(patch.mtow_from ?? b.mtow_from)) { pushToast(tr("MTOW \"to\" must not be below \"from\"."), "warn"); return; }
     setBusy(true);
@@ -3808,10 +3825,13 @@ function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToas
     const f = numOrNull(newBand.mtow_from), t = numOrNull(newBand.mtow_to), e = numOrNull(newBand.enroute_usd_per_km), l = numOrNull(newBand.terminal_usd_per_leg);
     if (f == null || t == null || e == null || l == null || t < f) { pushToast(tr("Enter MTOW from, MTOW to and both rates as numbers (to is not below from)."), "warn"); return; }
     setBusy(true);
-    const { error } = await supabase.from("nav_rates").insert({ mtow_from: f, mtow_to: t, enroute_usd_per_km: e, terminal_usd_per_leg: l, note: newBand.note.trim() || null });
+    const cur = newBand.currency || "USD";
+    const eu = cur === "USD" ? e : toUsd(e, cur, fx.rates), lu = cur === "USD" ? l : toUsd(l, cur, fx.rates);
+    if (eu == null || lu == null) { setBusy(false); pushToast(tr("No exchange rate for {c} yet: try again when the live rates are loaded.", { c: cur }), "warn"); return; }
+    const { error } = await supabase.from("nav_rates").insert({ mtow_from: f, mtow_to: t, enroute_usd_per_km: roundUsd(eu, 6), terminal_usd_per_leg: roundUsd(lu, 4), currency: cur, enroute_orig: cur === "USD" ? null : e, terminal_orig: cur === "USD" ? null : l, note: newBand.note.trim() || null });
     setBusy(false);
     if (error) { pushToast(tr("Not added: {m}", { m: error.message }), "warn", true); return; }
-    setNewBand({ mtow_from: "", mtow_to: "", enroute_usd_per_km: "", terminal_usd_per_leg: "", note: "" }); onChanged();
+    setNewBand({ mtow_from: "", mtow_to: "", enroute_usd_per_km: "", terminal_usd_per_leg: "", note: "", currency: newBand.currency }); onChanged();
   }
   const tdc = { padding: "3px 5px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12.5, verticalAlign: "middle" };
   const inp = w => ({ ...inputStyle, width: w });
@@ -3842,28 +3862,32 @@ function PricingSetupEditor({ canEdit, aircraft, navBands, navSettings, pushToas
         <label><input type="radio" disabled={!canEdit} checked={ns.mode === "formula"} onChange={() => setNs({ ...ns, mode: "formula" })} /> {tr("Formula: rates for a reference MTOW, scaled by the square root of MTOW / reference MTOW")}</label>
         {ns.mode === "formula" && <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginLeft: 22 }}>
           <span>{tr("Reference MTOW, t")}</span><input disabled={!canEdit} value={ns.refMtow ?? ""} onChange={e => setNs({ ...ns, refMtow: e.target.value })} style={inp(70)} />
-          <span>{tr("Enroute USD per km")}</span><input disabled={!canEdit} value={ns.enroutePerKm ?? ""} onChange={e => setNs({ ...ns, enroutePerKm: e.target.value })} style={inp(80)} />
-          <span>{tr("Aerodrome area USD per leg")}</span><input disabled={!canEdit} value={ns.terminalPerLeg ?? ""} onChange={e => setNs({ ...ns, terminalPerLeg: e.target.value })} style={inp(80)} />
+          <span>{tr("Currency")}</span><select disabled={!canEdit} value={ns.currency || "USD"} onChange={e => setNs({ ...ns, currency: e.target.value })} style={inp(70)}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+          <span>{tr("Enroute per km")}</span><input disabled={!canEdit} value={ns.enroutePerKm ?? ""} onChange={e => setNs({ ...ns, enroutePerKm: e.target.value })} style={inp(80)} />
+          <span>{tr("Aerodrome area per leg")}</span><input disabled={!canEdit} value={ns.terminalPerLeg ?? ""} onChange={e => setNs({ ...ns, terminalPerLeg: e.target.value })} style={inp(80)} />
         </div>}
         {canEdit && <div><button disabled={busy} onClick={saveNav} style={{ ...miniBtn, background: GRADIENT_PRIMARY, color: ON_ACCENT, borderColor: C.amber, fontWeight: 600 }}>{tr("Save navigation method")}</button></div>}
       </div>
       <div style={{ overflowX: "auto", marginBottom: 8 }}><table style={{ width: "100%", borderCollapse: "collapse", opacity: ns.mode === "formula" ? 0.5 : 1 }}>
-        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("MTOW from, t")}</th><th style={tdc}>{tr("MTOW to, t")}</th><th style={tdc}>{tr("Enroute USD per km")}</th><th style={tdc}>{tr("Aerodrome area USD per leg")}</th><th style={tdc}>{tr("Note")}</th><th style={tdc}></th></tr></thead>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("MTOW from, t")}</th><th style={tdc}>{tr("MTOW to, t")}</th><th style={tdc}>{tr("Enroute per km")}</th><th style={tdc}>{tr("Aerodrome area per leg")}</th><th style={tdc}>{tr("Currency")}</th><th style={tdc}>{tr("Note")}</th><th style={tdc}></th></tr></thead>
         <tbody>{navBands.map(b => <tr key={b.id} style={{ background: bEdits[b.id] ? C.amberSoft : "transparent" }}>
-          {["mtow_from", "mtow_to", "enroute_usd_per_km", "terminal_usd_per_leg"].map(k => <td key={k} style={tdc}>{canEdit ? <input value={bval(b, k)} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), [k]: e.target.value } }))} style={inp(86)} /> : +b[k]}</td>)}
+          {["mtow_from", "mtow_to", "enroute_usd_per_km", "terminal_usd_per_leg"].map(k => <td key={k} style={tdc}>{canEdit ? <input value={bval(b, k)} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), [k]: e.target.value } }))} style={inp(86)} /> : +bval(b, k)}</td>)}
+          <td style={tdc}>{canEdit ? <select value={bEdits[b.id]?.currency ?? (b.currency || "USD")} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), currency: e.target.value } }))} style={inp(70)}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select> : (b.currency || "USD")}</td>
           <td style={tdc}>{canEdit ? <input value={bval(b, "note")} onChange={e => setBEdits(x => ({ ...x, [b.id]: { ...(x[b.id] || {}), note: e.target.value } }))} style={inp(230)} /> : b.note}</td>
           <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit && <><button disabled={busy || !bEdits[b.id]} onClick={() => saveBand(b)} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button> <button onClick={() => delBand(b)} style={{ ...miniBtn, color: C.red }}>{tr("Delete")}</button></>}</td>
         </tr>)}
-        {navBands.length === 0 && <tr><td colSpan={6} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 12 }}>{tr("No MTOW ranges yet.")}</td></tr>}</tbody>
+        {navBands.length === 0 && <tr><td colSpan={7} style={{ ...tdc, color: C.faint, textAlign: "center", padding: 12 }}>{tr("No MTOW ranges yet.")}</td></tr>}</tbody>
       </table></div>
       {canEdit && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
-        {[["mtow_from", "MTOW from, t", 90], ["mtow_to", "MTOW to, t", 90], ["enroute_usd_per_km", "USD per km", 90], ["terminal_usd_per_leg", "USD per leg", 90], ["note", "Note", 180]].map(([k, l, w]) => <input key={k} value={newBand[k]} onChange={e => setNewBand({ ...newBand, [k]: e.target.value })} placeholder={tr(l)} style={inp(w)} />)}
+        {[["mtow_from", "MTOW from, t", 90], ["mtow_to", "MTOW to, t", 90], ["enroute_usd_per_km", "Per km", 90], ["terminal_usd_per_leg", "Per leg", 90]].map(([k, l, w]) => <input key={k} value={newBand[k]} onChange={e => setNewBand({ ...newBand, [k]: e.target.value })} placeholder={tr(l)} style={inp(w)} />)}
+        <select value={newBand.currency || "USD"} onChange={e => setNewBand({ ...newBand, currency: e.target.value })} style={inp(70)}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+        <input value={newBand.note} onChange={e => setNewBand({ ...newBand, note: e.target.value })} placeholder={tr("Note")} style={inp(180)} />
         <button disabled={busy} onClick={addBand} style={miniBtn}>{tr("Add MTOW range")}</button>
       </div>}
       <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{tr("What the calculator will use now")}</div>
       <table style={{ borderCollapse: "collapse", marginBottom: 22 }}>
         <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Aircraft")}</th><th style={tdc}>MTOW, t</th><th style={tdc}>{tr("Enroute USD per km")}</th><th style={tdc}>{tr("Aerodrome area USD per leg")}</th></tr></thead>
-        <tbody>{aircraft.filter(a => a.active !== false).map(a => { const r = navRatesFor(+a.mtow_t, ns, navBands); return <tr key={a.code}><td style={tdc}>{a.name}</td><td style={tdc}>{+a.mtow_t}</td>{r.source ? <><td style={tdc}>{r.enroutePerKm}</td><td style={tdc}>{r.terminalPerLeg}</td></> : <td style={{ ...tdc, color: C.amber }} colSpan={2}>{tr("no rate for this MTOW")}</td>}</tr>; })}</tbody>
+        <tbody>{aircraft.filter(a => a.active !== false).map(a => { const r = navRatesFor(+a.mtow_t, nsLive, bandsLive); return <tr key={a.code}><td style={tdc}>{a.name}</td><td style={tdc}>{+a.mtow_t}</td>{r.source ? <><td style={tdc}>{r.enroutePerKm}</td><td style={tdc}>{r.terminalPerLeg}</td></> : <td style={{ ...tdc, color: C.amber }} colSpan={2}>{tr("no rate for this MTOW")}</td>}</tr>; })}</tbody>
       </table>
 
       <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>{tr("Currency to USD")}</div>
@@ -3962,14 +3986,15 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     const c = cfgOf(s.airport);
     const lines = baseLines(s.airport).map(l => {
       const o = (c.lines || {})[l.id] || {};
-      return { id: l.id, name: l.name, basis: l.basis, periodMinutes: l.period_minutes, price: o.price !== undefined && o.price !== "" ? +o.price : +l.price_usd, qty: o.qty !== undefined && o.qty !== "" ? +o.qty : l.quantity, include: o.include !== false };
+      return { id: l.id, name: l.name, basis: l.basis, periodMinutes: l.period_minutes, price: o.price !== undefined && o.price !== "" ? +o.price : storedUsd(l, "price_usd", "price_orig", fx.rates), qty: o.qty !== undefined && o.qty !== "" ? +o.qty : l.quantity, include: o.include !== false };
     });
     (c.extra || []).forEach((x, i) => lines.push({ id: "x" + i, name: x.name || "Other", basis: x.basis || "turnaround", price: +x.price || 0, qty: +x.qty || 1, include: x.include !== false, extra: true }));
     const fr = pickFuelPrice(fuelHist, fuel, s.airport, fuelMonth + "-01");
     const fuelUsdPerT = c.fuelPrice !== undefined && c.fuelPrice !== "" ? +c.fuelPrice : (fr ? fuelUsdPerTonne(fr.price, fr.unit) : null);
     return { airport: s.airport, uplift: s.uplift, fuelUsdPerT, fuelFrom: fr && !fr.exact ? fr.month : null, lines };
   });
-  const band = acObj ? navRatesFor(acObj.mtow, navSettings, navRates) : null;
+  const navLive = useMemo(() => navRates.map(b => ({ ...b, enroute_usd_per_km: storedUsd(b, "enroute_usd_per_km", "enroute_orig", fx.rates), terminal_usd_per_leg: storedUsd(b, "terminal_usd_per_leg", "terminal_orig", fx.rates) })), [navRates, fx.rates]);
+  const band = acObj ? navRatesFor(acObj.mtow, liveNavSettings(navSettings, fx.rates), navLive) : null;
   const nav = {
     enroutePerKm: st.nav.enroute !== "" ? +st.nav.enroute : (band?.source ? band.enroutePerKm : 0),
     terminalPerLeg: st.nav.terminal !== "" ? +st.nav.terminal : (band?.source ? band.terminalPerLeg : 0),
@@ -4185,6 +4210,7 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [newCode, setNewCode] = useState("");
   const [bulk, setBulk] = useState(false);
+  const fx = useFx();
   async function loadAirports() {
     const { data } = await supabase.from("airport_fee_lines").select("airport").limit(5000);
     const list = [...new Set((data || []).map(r => r.airport))].sort();
@@ -4201,13 +4227,21 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
   useEffect(() => { if (sets.length && !sets.includes(feeSet)) setFeeSet(sets[0]); }, [airport, lines.length]);
   const shown = lines.filter(l => l.fee_set === feeSet);
   const val = (l, k) => edits[l.id]?.[k] !== undefined ? edits[l.id][k] : (l[k] ?? "");
+  const amountOf = l => (l.currency && l.currency !== "USD" && l.price_orig != null) ? l.price_orig : l.price_usd;
   const setE = (l, k, v) => setEdits(e => ({ ...e, [l.id]: { ...(e[l.id] || {}), [k]: v } }));
   async function saveLine(l) {
     const p = edits[l.id]; if (!p) return;
     const patch = {};
     if (p.name !== undefined) patch.name = String(p.name).trim();
     if (p.basis !== undefined) patch.basis = p.basis;
-    if (p.price_usd !== undefined) { const n = +String(p.price_usd).replace(",", "."); if (!Number.isFinite(n) || n < 0) { pushToast(tr("Enter the price as a number."), "warn"); return; } patch.price_usd = n; }
+    if (p.amount !== undefined || p.currency !== undefined) {
+      const cur = p.currency ?? (l.currency || "USD");
+      const n = +String(p.amount ?? amountOf(l)).replace(",", ".");
+      if (!Number.isFinite(n) || n < 0) { pushToast(tr("Enter the price as a number."), "warn"); return; }
+      const u = cur === "USD" ? n : toUsd(n, cur, fx.rates);
+      if (u == null) { pushToast(tr("No exchange rate for {c} yet: try again when the live rates are loaded.", { c: cur }), "warn"); return; }
+      patch.price_usd = roundUsd(u, 4); patch.currency = cur; patch.price_orig = cur === "USD" ? null : n;
+    }
     if (p.quantity !== undefined) patch.quantity = p.quantity === "" ? null : +String(p.quantity).replace(",", ".");
     if (p.period_minutes !== undefined) patch.period_minutes = p.period_minutes === "" ? null : +p.period_minutes;
     if (p.aircraft_type !== undefined) patch.aircraft_type = p.aircraft_type || null;
@@ -4246,13 +4280,13 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
         <button onClick={() => exportAllFees(pushToast, tr)} style={miniBtn}>{tr("Export all fees (CSV)")}</button>
       </div>
       {bulk && <FeesBulkDialog aircraft={aircraft} pushToast={pushToast} onDone={codes => { codes.forEach(c => onChanged(c)); loadAirports(); loadLines(airport); }} onClose={() => setBulk(false)} />}
-      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{canEdit ? tr("Change a value and press Save on that line. All prices are in USD; \"time\" lines are charged per period of the length shown.") : tr("Only management and the tour operator liaison can change fees.")}</div>
+      <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 8 }}>{canEdit ? tr("Change a value and press Save on that line. Each price can be in any currency and is converted to USD at the live rate; \"time\" lines are charged per period of the length shown.") : tr("Only management and the tour operator liaison can change fees.")}</div>
       <div style={{ overflowX: "auto" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Item")}</th><th style={tdc}>{tr("Charged")}</th><th style={tdc}>{tr("Price USD")}</th><th style={tdc}>{tr("Qty")}</th><th style={tdc}>{tr("Period, min")}</th><th style={tdc}>{tr("Only for")}</th><th style={tdc}></th></tr></thead>
+        <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600 }}><th style={tdc}>{tr("Item")}</th><th style={tdc}>{tr("Charged")}</th><th style={tdc}>{tr("Price")}</th><th style={tdc}>{tr("Qty")}</th><th style={tdc}>{tr("Period, min")}</th><th style={tdc}>{tr("Only for")}</th><th style={tdc}></th></tr></thead>
         <tbody>{shown.map(l => <tr key={l.id} style={{ background: edits[l.id] ? C.amberSoft : "transparent" }}>
           <td style={tdc}>{canEdit ? <input value={val(l, "name")} onChange={e => setE(l, "name", e.target.value)} style={{ ...inputStyle, minWidth: 220 }} /> : l.name}</td>
           <td style={tdc}>{canEdit ? <select value={val(l, "basis")} onChange={e => setE(l, "basis", e.target.value)} style={{ ...inputStyle, width: 150 }}>{BASES.map(k => <option key={k} value={k}>{tr(BASIS_LABEL[k])}</option>)}</select> : BASIS_LABEL[l.basis]}</td>
-          <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "price_usd")} onChange={e => setE(l, "price_usd", e.target.value)} style={{ ...inputStyle, width: 90 }} /> : +l.price_usd}</td>
+          <td style={{ ...tdc, whiteSpace: "nowrap" }}>{canEdit ? <><input inputMode="decimal" value={edits[l.id]?.amount !== undefined ? edits[l.id].amount : amountOf(l)} onChange={e => setE(l, "amount", e.target.value)} style={{ ...inputStyle, width: 84 }} /> <select value={edits[l.id]?.currency ?? (l.currency || "USD")} onChange={e => setE(l, "currency", e.target.value)} style={{ ...inputStyle, width: 66 }}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select></> : `${+amountOf(l)} ${l.currency || "USD"}`}{(edits[l.id]?.currency ?? l.currency ?? "USD") !== "USD" && <div style={{ fontSize: 10.5, color: C.faint }}>≈ {usd2(storedUsd(l, "price_usd", "price_orig", fx.rates))}</div>}</td>
           <td style={tdc}>{canEdit ? <input inputMode="decimal" value={val(l, "quantity")} onChange={e => setE(l, "quantity", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.quantity}</td>
           <td style={tdc}>{canEdit ? <input inputMode="numeric" value={val(l, "period_minutes")} onChange={e => setE(l, "period_minutes", e.target.value)} style={{ ...inputStyle, width: 60 }} /> : l.period_minutes}</td>
           <td style={tdc}>{canEdit ? <select value={val(l, "aircraft_type") || ""} onChange={e => setE(l, "aircraft_type", e.target.value)} style={{ ...inputStyle, width: 90 }}><option value="">{tr("all")}</option>{aircraft.map(a => <option key={a.code} value={a.code}>{a.code}</option>)}</select> : (l.aircraft_type || "all")}</td>
@@ -4616,7 +4650,7 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
   const cv = useCurrencyConv();
   async function apply(rows) {
     if (cv.factor == null) return { ok: false, msg: tr("No rate yet: type one to load.") };
-    rows = rows.map(r => ({ ...r, price_usd: roundUsd(r.price_usd * cv.factor, 4) }));
+    rows = rows.map(r => ({ ...r, price_orig: cv.cur === "USD" ? null : r.price_usd, currency: cv.cur, price_usd: roundUsd(r.price_usd * cv.factor, 4) }));
     const codes = [...new Set(rows.map(r => r.airport))];
     setCodesInFile(codes.length);
     const existing = [];
@@ -4645,7 +4679,7 @@ function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
       const e = byKey.get(feeKey(r));
       if (!e) { const k = `${r.airport}|${r.fee_set}`; const s = (maxSort.get(k) ?? -1) + 1; maxSort.set(k, s); toIns.push({ ...r, sort: s, source: "import" }); return; }
       const patch = {};
-      if (+e.price_usd !== r.price_usd) patch.price_usd = r.price_usd;
+      if (+e.price_usd !== r.price_usd || (e.currency || "USD") !== r.currency) { patch.price_usd = r.price_usd; patch.currency = r.currency; patch.price_orig = r.price_orig; }
       if (e.basis !== r.basis) patch.basis = r.basis;
       if ((e.quantity == null ? null : +e.quantity) !== r.quantity && !(r.quantity == null)) patch.quantity = r.quantity;
       if ((e.period_minutes ?? null) !== (r.period_minutes ?? null) && r.period_minutes != null) patch.period_minutes = r.period_minutes;
