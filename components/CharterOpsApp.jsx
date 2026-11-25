@@ -14,7 +14,7 @@ import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
 import { parseFuelGrid, parseFeesGrid, parseTimesGrid, toCsv as toCsvFile, toMinutes, toNumber, cleanCode, pickFuelPrice } from "../lib/bulk-import";
-import { toUsd, CURRENCIES, normCurrency, roundUsd, storedUsd } from "../lib/fx";
+import { toUsd, CURRENCIES, normCurrency, roundUsd, storedUsd, FUEL_PER, splitFuelUnit, joinFuelUnit } from "../lib/fx";
 import { navRatesFor, computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
@@ -3990,7 +3990,7 @@ function CharterQuoteModal({ perms, pushToast, onClose, embedded = false, page =
     });
     (c.extra || []).forEach((x, i) => lines.push({ id: "x" + i, name: x.name || "Other", basis: x.basis || "turnaround", price: +x.price || 0, qty: +x.qty || 1, include: x.include !== false, extra: true }));
     const fr = pickFuelPrice(fuelHist, fuel, s.airport, fuelMonth + "-01");
-    const fuelUsdPerT = c.fuelPrice !== undefined && c.fuelPrice !== "" ? +c.fuelPrice : (fr ? fuelUsdPerTonne(fr.price, fr.unit) : null);
+    const fuelUsdPerT = c.fuelPrice !== undefined && c.fuelPrice !== "" ? +c.fuelPrice : (fr ? fuelUsdPerTonne(fr.price, fr.unit, fx.rates) : null);
     return { airport: s.airport, uplift: s.uplift, fuelUsdPerT, fuelFrom: fr && !fr.exact ? fr.month : null, lines };
   });
   const navLive = useMemo(() => navRates.map(b => ({ ...b, enroute_usd_per_km: storedUsd(b, "enroute_usd_per_km", "enroute_orig", fx.rates), terminal_usd_per_leg: storedUsd(b, "terminal_usd_per_leg", "terminal_orig", fx.rates) })), [navRates, fx.rates]);
@@ -4300,7 +4300,16 @@ function AirportFeesEditor({ canEdit, aircraft, geo, pushToast, onChanged }) {
   );
 }
 
-const FUEL_UNITS = ["USD/tonne", "USD/kg", "USD/USG", "USD/litre"];
+const PER_LABEL = { tonne: "per tonne", kg: "per kg", USG: "per US gallon", litre: "per litre" };
+// fuel unit = currency + per-unit, stored as "EUR/tonne"
+function FuelUnitPick({ value, onChange, w = 190 }) {
+  const { tr } = useLanguage();
+  const { cur, per } = splitFuelUnit(value);
+  return <span style={{ display: "inline-flex", gap: 4 }}>
+    <select value={cur} onChange={e => onChange(joinFuelUnit(e.target.value, per))} style={{ ...inputStyle, width: 72 }}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select>
+    <select value={per} onChange={e => onChange(joinFuelUnit(cur, e.target.value))} style={{ ...inputStyle, width: w - 76 }}>{FUEL_PER.map(p => <option key={p} value={p}>{tr(PER_LABEL[p])}</option>)}</select>
+  </span>;
+}
 // One current fuel price per airport, listed for every airport (origin or destination) that appears in the schedule.
 function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false }) {
   const { tr, lang } = useLanguage();
@@ -4404,7 +4413,7 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10, fontSize: 12, color: C.muted }}>
             <span>{tr("Start quickly: give the {n} airports without a price the same price", { n: airports.length - priced })}</span>
             <input value={fill.price} onChange={e => setFill(f => ({ ...f, price: e.target.value }))} placeholder={tr("price")} style={{ ...inputStyle, width: 80 }} />
-            <select value={fill.unit} onChange={e => setFill(f => ({ ...f, unit: e.target.value }))} style={{ ...inputStyle, width: 110 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select>
+            <FuelUnitPick value={fill.unit} onChange={u => setFill(f => ({ ...f, unit: u }))} />
             <button disabled={busy || fill.price === ""} onClick={fillMissing} style={miniBtn}>{tr("Apply to airports without a price")}</button>
           </div>
         )}
@@ -4417,7 +4426,7 @@ function FuelPricesModal({ flights, perms, pushToast, onClose, embedded = false 
                 <td style={cell}><b style={{ fontFamily: MONO }}>{a.code}</b><div style={{ fontSize: 10.5, color: C.faint }}>{names.get(a.code) || ""}</div></td>
                 <td style={{ ...cell, color: C.muted }}>{a.n}</td>
                 <td style={cell}>{canEdit ? <input value={val(a.code, "price")} onChange={e => setEdit(a.code, "price", e.target.value)} placeholder={has ? "" : tr("no price")} inputMode="decimal" style={{ ...inputStyle, width: 80, borderColor: has ? undefined : C.amber }} /> : (has ? rows.get(a.code).price : <span style={{ color: C.faint }}>—</span>)}</td>
-                <td style={cell}>{canEdit ? <select value={val(a.code, "unit")} onChange={e => setEdit(a.code, "unit", e.target.value)} style={{ ...inputStyle, width: 105 }}>{FUEL_UNITS.map(u => <option key={u}>{u}</option>)}</select> : (has ? rows.get(a.code).unit : "")}</td>
+                <td style={cell}>{canEdit ? <FuelUnitPick value={val(a.code, "unit")} onChange={u => setEdit(a.code, "unit", u)} /> : (has ? rows.get(a.code).unit : "")}</td>
                 <td style={cell}>{canEdit ? <input value={val(a.code, "supplier")} onChange={e => setEdit(a.code, "supplier", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.supplier}</td>
                 <td style={cell}>{canEdit ? <input type="date" value={val(a.code, "valid_from") || ""} onChange={e => setEdit(a.code, "valid_from", e.target.value)} style={{ ...inputStyle, width: 130 }} /> : rows.get(a.code)?.valid_from}</td>
                 <td style={{ ...cell, whiteSpace: "nowrap" }}>{canEdit && <button disabled={busy || !dirty(a.code)} onClick={() => save([a.code])} style={{ ...miniBtn, color: C.green, borderColor: C.green }}>{tr("Save")}</button>}</td>
@@ -4581,7 +4590,7 @@ function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, r
       <div style={{ overflow: "auto", maxHeight: "52vh" }}><table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead><tr style={{ textAlign: "left", color: C.muted, fontSize: 11, fontWeight: 600, position: "sticky", top: 0, background: C.panel }}><th style={cell}>{tr("Airport")}</th>{months.map(m => <th key={m} style={cell}>{m.slice(0, 7)}</th>)}</tr></thead>
         <tbody>{list.map(c => <tr key={c}>
-          <td style={{ ...cell, whiteSpace: "nowrap" }}><b style={{ fontFamily: MONO }}>{c}</b> <span style={{ fontSize: 10, color: C.faint }}>{current.get(c)?.unit?.replace("USD/", "") || ""}</span></td>
+          <td style={{ ...cell, whiteSpace: "nowrap" }}><b style={{ fontFamily: MONO }}>{c}</b> <span style={{ fontSize: 10, color: C.faint }}>{current.get(c)?.unit || ""}</span></td>
           {months.map(m => { const k = `${c}|${m}`; const dirty = dirtyKeys.includes(k);
             return <td key={m} style={{ ...cell, background: dirty ? C.amberSoft : "transparent" }}>{canEdit ? <input inputMode="decimal" value={cellVal(c, m)} onChange={e => setEdits(x => ({ ...x, [k]: e.target.value }))} title={byKey.get(k)?.unit} style={{ ...inputStyle, width: 64, padding: "3px 5px", fontSize: 12 }} /> : (cellVal(c, m) || <span style={{ color: C.faint }}>-</span>)}</td>; })}
         </tr>)}
@@ -4613,22 +4622,19 @@ function FuelBulkDialog({ names, current, pushToast, onDone, onClose }) {
   const { tr, lang } = useLanguage();
   const [month, setMonth] = useState(curMonthKey());
   const known = useMemo(() => (names.size ? new Set([...names.keys(), ...current.keys()]) : undefined), [names, current]);
-  const cv = useCurrencyConv();
+  const [defCur, setDefCur] = useState("USD");
   async function apply(rows) {
-    if (cv.factor == null) return { ok: false, msg: tr("No rate yet: type one to load.") };
-    rows = rows.map(x => ({ ...x, price: roundUsd(x.price * cv.factor, 4) }));
     const r = await writeChunks(rows.map(x => ({ airport: x.airport, month: x.month, price: x.price, unit: x.unit, supplier: x.supplier, note: x.note })), c => supabase.from("airport_fuel_price_history").upsert(c, { onConflict: "airport,month" }).select("airport"));
     if (r.error) return { ok: false, msg: tr("Not loaded: {m}", { m: r.error.message }) + (r.n ? tr(" ({n} rows were loaded before the error)", { n: r.n }) : "") };
     if (r.n < rows.length) return { ok: false, msg: tr("Only {n} of {total} rows were saved (no permission?).", { n: r.n, total: rows.length }) };
     pushToast(tr("Loaded {n} fuel price(s) into the history.", { n: r.n }), "ok", true); onDone(); return { ok: true };
   }
-  return <BulkLoadDialog title={tr("Bulk load fuel prices")} parseKey={month + lang}
-    help={<Rich s={tr("Columns: **Airport**, **Price**, optional **Unit** (USD/tonne, USD/kg, USD/USG, USD/litre; default USD/tonne), **Month** (2026-11), **Supplier**. Or one column per month (2026-09, 2026-10, ...) with a row per airport. Existing prices for the same airport and month are replaced.")} />}
-    parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known, lang })}
+  return <BulkLoadDialog title={tr("Bulk load fuel prices")} parseKey={month + lang + defCur}
+    help={<Rich s={tr("Columns: **Airport**, **Price**, optional **Unit** (tonne, kg, USG, litre, or with a currency such as EUR/tonne or KZT/litre; default USD/tonne), optional **Currency**, **Month** (2026-11), **Supplier**. Or one column per month (2026-09, 2026-10, ...) with a row per airport. Existing prices for the same airport and month are replaced.")} />}
+    parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known, lang, defaultCurrency: defCur })}
     columns={[{ label: "Airport", get: r => r.airport }, { label: "Month", get: r => r.month.slice(0, 7) }, { label: "Price", get: r => r.price }, { label: "Unit", get: r => r.unit }, { label: "Supplier", get: r => r.supplier || "" }]}
     template={{ name: "fuel-prices-template.csv", text: toCsvFile([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: tr("Airport"), key: "a" }, { label: tr("Month"), key: "m" }, { label: tr("Price"), key: "p" }, { label: tr("Unit"), key: "u" }, { label: tr("Supplier"), key: "s" }]) }}
-    extra={<><div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Month for rows without a month: ")}<input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>{cv.node}</>}
-    canApply={cv.factor != null}
+    extra={<><div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Month for rows without a month: ")}<input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div><div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>{tr("Currency for rows without one: ")}<select value={defCur} onChange={e => setDefCur(e.target.value)} style={{ ...inputStyle, width: 80 }}>{CURRENCIES.map(c => <option key={c}>{c}</option>)}</select></div></>}
     onApply={apply} onClose={onClose} />;
 }
 
