@@ -13,7 +13,7 @@ import { buildRequestEmail, extractEmails, TEMPLATE_VARS, BUILTIN_TEMPLATES, ren
 import { allCountries, stateLabel, countryName } from "../lib/country-names";
 import { looksLikeSsim, parseSsim, expandLegs, fleetTypeKey, canonicalAircraftType } from "../lib/ssim";
 import { assignTails } from "../lib/tail-assign";
-import { parseFuelGrid, parseFeesGrid, parseTimesGrid, toCsv, toMinutes, toNumber, cleanCode, pickFuelPrice } from "../lib/bulk-import";
+import { parseFuelGrid, parseFeesGrid, parseTimesGrid, toCsv as toCsvFile, toMinutes, toNumber, cleanCode, pickFuelPrice } from "../lib/bulk-import";
 import { computeQuote, computeLegs, stationsForLegs, applicableLines, fuelUsdPerTonne, BASES, BASIS_LABEL } from "../lib/charter-calc";
 import { detectKind, parseScheduleMessage, planScheduleChanges, planSsimSync, markDuplicates } from "../lib/schedule-msg";
 import { makeGeo, upcomingDestinations, suggestAirports, suggestRoutes, compareMapped } from "../lib/permit-geo";
@@ -4174,7 +4174,7 @@ function FuelHistoryPanel({ canEdit, codes, names, current, pushToast, onBulk, r
     setEdits({}); load(); onChangedCurrent();
   }
   function exportCsv() {
-    saveCsvFile(`fuel-price-history-${curMonthKey()}.csv`, toCsv(hist, [{ label: "Airport", key: "airport" }, { label: "Month", get: r => String(r.month).slice(0, 7) }, { label: "Price", get: r => +r.price }, { label: "Unit", key: "unit" }, { label: "Supplier", key: "supplier" }]));
+    saveCsvFile(`fuel-price-history-${curMonthKey()}.csv`, toCsvFile(hist, [{ label: "Airport", key: "airport" }, { label: "Month", get: r => String(r.month).slice(0, 7) }, { label: "Price", get: r => +r.price }, { label: "Unit", key: "unit" }, { label: "Supplier", key: "supplier" }]));
   }
   const cell = { padding: "3px 4px", borderTop: `1px solid ${C.borderSoft}`, fontSize: 12, verticalAlign: "middle" };
   return (
@@ -4215,7 +4215,7 @@ function FuelBulkDialog({ names, current, pushToast, onDone, onClose }) {
     help={<>Columns: <b>Airport</b>, <b>Price</b>, optional <b>Unit</b> (USD/tonne, USD/kg, USD/USG, USD/litre; default USD/tonne), <b>Month</b> (2026-11), <b>Supplier</b>. Or one column per month (2026-09, 2026-10, ...) with a row per airport. Existing prices for the same airport and month are replaced.</>}
     parse={g => parseFuelGrid(g, { defaultMonth: `${month}-01`, knownAirports: known })}
     columns={[{ label: "Airport", get: r => r.airport }, { label: "Month", get: r => r.month.slice(0, 7) }, { label: "Price", get: r => r.price }, { label: "Unit", get: r => r.unit }, { label: "Supplier", get: r => r.supplier || "" }]}
-    template={{ name: "fuel-prices-template.csv", text: toCsv([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: "Airport", key: "a" }, { label: "Month", key: "m" }, { label: "Price", key: "p" }, { label: "Unit", key: "u" }, { label: "Supplier", key: "s" }]) }}
+    template={{ name: "fuel-prices-template.csv", text: toCsvFile([{ a: "ALA", m: "2026-11", p: 850, u: "USD/tonne", s: "" }, { a: "NQZ", m: "2026-11", p: 880, u: "USD/tonne", s: "" }], [{ label: "Airport", key: "a" }, { label: "Month", key: "m" }, { label: "Price", key: "p" }, { label: "Unit", key: "u" }, { label: "Supplier", key: "s" }]) }}
     extra={<div style={{ fontSize: 12, marginBottom: 10, display: "flex", gap: 8, alignItems: "center" }}>Month for rows without a month: <input type="month" value={month} onChange={e => e.target.value && setMonth(e.target.value)} style={{ ...inputStyle, width: 140 }} /></div>}
     onApply={apply} onClose={onClose} />;
 }
@@ -4226,7 +4226,7 @@ const FEE_COLS = [{ label: "Airport", key: "airport" }, { label: "Fee set", key:
 async function exportAllFees(pushToast) {
   const { data, error } = await fetchAllPages(() => supabase.from("airport_fee_lines").select("*").order("airport").order("fee_set").order("sort").order("id"));
   if (error) { pushToast(`Export failed: ${error.message}`, "warn"); return; }
-  saveCsvFile(`airport-fees-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(data, FEE_COLS));
+  saveCsvFile(`airport-fees-${new Date().toISOString().slice(0, 10)}.csv`, toCsvFile(data, FEE_COLS));
 }
 
 function FeesBulkDialog({ aircraft, pushToast, onDone, onClose }) {
@@ -4347,7 +4347,7 @@ function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
         <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search route" style={{ ...inputStyle, width: 150 }} />
         {canEdit && <button onClick={() => setBulk(true)} style={miniBtn}>Bulk load from file</button>}
-        <button disabled={!rows.length} onClick={() => saveCsvFile(`route-times-${curMonthKey()}.csv`, toCsv(rows, [{ label: "From", key: "origin" }, { label: "To", key: "destination" }, { label: "Minutes", key: "avg_minutes" }, { label: "Km", key: "km" }]))} style={miniBtn}>Export (CSV)</button>
+        <button disabled={!rows.length} onClick={() => saveCsvFile(`route-times-${curMonthKey()}.csv`, toCsvFile(rows, [{ label: "From", key: "origin" }, { label: "To", key: "destination" }, { label: "Minutes", key: "avg_minutes" }, { label: "Km", key: "km" }]))} style={miniBtn}>Export (CSV)</button>
       </div>
       {canEdit && <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
         <input value={add.origin} onChange={e => setAdd({ ...add, origin: e.target.value.toUpperCase() })} placeholder="From" style={{ ...inputStyle, width: 70, fontFamily: MONO }} />
@@ -4371,7 +4371,7 @@ function RouteTimesEditor({ canEdit, aircraft, pushToast, onChanged }) {
         help={<>One row per route. Columns: <b>From</b>, <b>To</b> and the flight time as <b>Minutes</b>, <b>Hours</b> or <b>Time</b> (2:35); optional <b>Km</b>. A route already saved is replaced. Routes are used in both directions unless the reverse is saved separately.</>}
         parse={parseTimesGrid}
         columns={[{ label: "From", get: r => r.origin }, { label: "To", get: r => r.destination }, { label: "Avg minutes", get: r => r.avg_minutes }, { label: "h:mm", get: r => hm(r.avg_minutes) }, { label: "Km", get: r => r.km ?? "" }]}
-        template={{ name: "route-times-template.csv", text: toCsv([{ a: "ALA", b: "PQC", m: 455, k: 5800 }, { a: "NQZ", b: "ALA", m: 85, k: 960 }], [{ label: "From", key: "a" }, { label: "To", key: "b" }, { label: "Minutes", key: "m" }, { label: "Km", key: "k" }]) }}
+        template={{ name: "route-times-template.csv", text: toCsvFile([{ a: "ALA", b: "PQC", m: 455, k: 5800 }, { a: "NQZ", b: "ALA", m: 85, k: 960 }], [{ label: "From", key: "a" }, { label: "To", key: "b" }, { label: "Minutes", key: "m" }, { label: "Km", key: "k" }]) }}
         onApply={async rs => {
           const w = await writeChunks(rs.map(r => ({ origin: r.origin, destination: r.destination, avg_minutes: r.avg_minutes, km: r.km })), c => supabase.from("route_times").upsert(c, { onConflict: "origin,destination" }).select("origin"));
           if (w.error) return { ok: false, msg: `Not loaded: ${w.error.message}` };
